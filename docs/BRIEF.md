@@ -24,7 +24,7 @@ Older adults with several conditions face two problems at once: medicines and re
 
 | Person | Gets | Where |
 | --- | --- | --- |
-| Harriet (senior) | Friendly check-ins, plain answers about her own medicines, vitals compared with her usual, messages from family | Relay chat and calls |
+| Harriet (senior) | Friendly check-ins, plain answers about her own medicines, heart rate compared with her usual range, messages from family | Relay chat and calls |
 | Sarah (daughter, caregiver) | Daily status, missed check-in alerts, flags, limited to what Harriet allows | Relay group chat |
 | Doctor | Vitals trend, reported symptoms, medication flags with sources, her questions | Visit-prep PDF (stretch) |
 
@@ -34,7 +34,7 @@ Demo patient: Harriet Lindqvist, FinchNode synthetic scenario `polypharmacy-seni
 
 1. Morning chat check-in in Relay with buttons, at most 3 questions picked from her record.
 2. "Call me to chat": ElevenLabs voice call through Relay that remembers what she shared and ends by pointing her to family.
-3. "Check my vitals": Relay video call, quiet minute, Presage heart rate and breathing rate compared with her own baseline from the record.
+3. "Check my vitals": Relay video call, quiet minute, Presage heart rate compared with her usual range from clinic readings in the record; breathing rate said back and saved, not compared (her record has no breathing-rate readings).
 4. Voice messages between Harriet and family through Relay, both ways.
 5. Hospital paper check: photo of discharge or visit papers, read back for her to confirm, compared with her FinchNode medication list.
 6. Missed check-in alert to the family group.
@@ -49,6 +49,7 @@ Later: smart pillbox.
 - FinchNode is read-only. Nothing is written back to the EHR; our own database holds what Harriet tells us.
 - No diagnosis and no dosing advice. Fixed rules decide flags; the LLM only words them.
 - Presage FDA clearance (K254169) covers pulse rate and breathing rate on its iOS/Android setup only. Readings taken from Relay call video on our server are a wellness estimate. Never show blood pressure or HRV.
+- Red flags always alert the family, even at the lowest sharing level; the sharing level only limits how much the alert says. Safety wins over privacy here, on purpose.
 - At most 3 questions a day. "Not today" is always an option and never gets a guilt message.
 - The voice always says it is an AI. No voice cloning. No human-friend persona. Calls are short and end by pointing to a real person.
 - Secrets only in `.env`.

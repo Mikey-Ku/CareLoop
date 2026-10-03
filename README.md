@@ -6,7 +6,7 @@ A daily check-in companion for older adults living alone with several chronic co
 
 ## What it does
 
-Each morning a Relay agent starts a short, friendly chat with at most three questions picked from the senior's FinchNode health record. She can choose a voice call to talk or a video call to check her heart rate and breathing rate against her own usual. Photos of hospital papers are checked against her medication list, and her family follows along in a Relay group chat.
+Each morning a Relay agent starts a short, friendly chat with at most three questions picked from the senior's FinchNode health record. She can choose a voice call to talk or a video call that compares her heart rate with her usual range from clinic visits and records her breathing rate. Photos of hospital papers are checked against her medication list, and her family follows along in a Relay group chat.
 
 All data in this project is synthetic.
 

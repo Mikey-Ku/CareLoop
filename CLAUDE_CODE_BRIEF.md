@@ -51,7 +51,7 @@ This folder is a git repo with a GitHub remote (`Mikey-Ku/Mhacks_2026`). The tea
 
 A daily check-in companion for older adults who live alone with several chronic conditions.
 
-Each morning a Relay agent sends a short, friendly chat with buttons and at most 3 questions picked from the senior's FinchNode record. She can then choose a voice call to talk (ElevenLabs) or a video call to check her vitals (Presage heart rate and breathing rate, compared with her own baseline). Photos of hospital papers are read back and checked against her medication list, voice messages go to and from her family group, and the family gets a heads-up if she doesn't check in by noon.
+Each morning a Relay agent sends a short, friendly chat with buttons and at most 3 questions picked from the senior's FinchNode record. She can then choose a voice call to talk (ElevenLabs) or a video call to check her vitals (Presage heart rate compared with her usual range from the record; breathing rate recorded). Photos of hospital papers are read back and checked against her medication list, voice messages go to and from her family group, and the family gets a heads-up if she doesn't check in by noon.
 
 ## Architecture
 
@@ -83,7 +83,7 @@ Definition of done for this run:
 - `npm install && npm test` passes in `apps/server`.
 - Client tests cover all scenario behaviors in the `docs/DESIGN.md` table that the fixtures include.
 - Rules output for Harriet matches `fixtures/answer-key.json`.
-- `npm run packet -- patient-demo-polypharmacy` prints a sensible packet with `asOf` set to the record's latest date.
+- `npm run packet -- patient-demo-polypharmacy` prints a sensible packet with `checkinDate` and `dataAsOf` both 2026-09-01 (demo clock, see `docs/DESIGN.md` "Dates").
 - `README.md` has setup and test commands.
 - RUN_LOG.md updated and pushed to origin.
 
