@@ -6,6 +6,7 @@ import {
   LOINC,
   activeMedications,
   ageOn,
+  asOf,
   latest,
   normalizeHealthRecord,
   normalizeObservation,
@@ -434,5 +435,63 @@ describe("Harriet (patient-demo-polypharmacy)", () => {
 
   it("has 10 conditions", () => {
     expect(record.conditions).toHaveLength(10);
+  });
+});
+
+describe("asOf: the record as it stood on the check-in date", () => {
+  const multi = normalized("patient-demo-multi-source");
+  const harriet = normalized("patient-demo-polypharmacy");
+
+  it("drops labs, vitals, dispenses, medications and conditions dated after the check-in date", () => {
+    const record = asOf(multi, "2025-12-31");
+    expect(record.labs.map((m) => m.date)).toEqual(["2025-09-16", "2025-11-20", "2025-11-20"]);
+    expect(record.labs.every((m) => m.date! <= "2025-12-31")).toBe(true);
+    // Levothyroxine started in March 2026 at both sources, so it isn't on her list yet.
+    expect(record.medications.map((m) => m.name)).toEqual(["sumatriptan 50 MG Oral Tablet", "ferrous sulfate 325 MG Oral Tablet"]);
+    expect(asOf(multi, "2025-11-19").conditions.map((c) => c.name)).toEqual(["Hypothyroidism", "Migraine"]);
+    expect(asOf(multi, "2025-11-20").conditions).toHaveLength(3);
+  });
+
+  it("on or after the last date nothing changes, and the input is never modified", () => {
+    const before = structuredClone(harriet);
+    expect(asOf(harriet, harriet.dataAsOf!)).toEqual(harriet);
+    expect(asOf(multi, "2026-09-01")).toEqual(multi);
+    asOf(harriet, "2020-01-01");
+    expect(harriet).toEqual(before);
+  });
+
+  it("a medication merged from two sources keeps only the source records from before the check-in date", () => {
+    const levo = asOf(multi, "2026-03-03").medications.find((m) => m.rxnorm === "966221")!;
+    expect(levo.provenance.map((p) => p.recordId)).toEqual(["rec_52a93a5ccc12e075b00f679f"]);
+    expect(levo.startDate).toBe("2026-03-02");
+    expect(asOf(multi, "2026-03-01").medications.some((m) => m.rxnorm === "966221")).toBe(false);
+  });
+
+  it("keeps undated items: a missing date says nothing about when the record was made", () => {
+    const [first] = harriet.medications;
+    const undatedMed = { ...first!, startDate: undefined, provenance: first!.provenance.map((p) => ({ ...p, date: undefined })) };
+    const undatedCondition = { ...harriet.conditions[0]!, onsetDate: undefined };
+    const undatedDispense = { ...harriet.dispenses[0]!, date: undefined };
+    const undatedLab = { ...harriet.labs[0]!, date: undefined, usable: false, unusableReason: "no date" };
+    const record = asOf(
+      { ...harriet, medications: [undatedMed], conditions: [undatedCondition], dispenses: [undatedDispense], labs: [undatedLab], vitals: [] },
+      "2000-01-01",
+    );
+    expect(record.medications).toEqual([undatedMed]);
+    expect(record.conditions).toEqual([undatedCondition]);
+    expect(record.dispenses).toEqual([undatedDispense]);
+    expect(record.labs).toEqual([undatedLab]);
+  });
+
+  it("keeps everything that isn't a dated record: demographics, sources, data as-of, shared categories", () => {
+    const record = asOf(harriet, "2000-01-01");
+    expect(record.medications).toEqual([]);
+    expect(record.labs).toEqual([]);
+    expect(record.vitals).toEqual([]);
+    expect(record.dispenses).toEqual([]);
+    expect(record.demographics).toEqual(harriet.demographics);
+    expect(record.dataAsOf).toBe(harriet.dataAsOf);
+    expect(record.sources).toEqual(harriet.sources);
+    expect(record.sharedCategories).toEqual(harriet.sharedCategories);
   });
 });

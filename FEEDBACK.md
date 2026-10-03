@@ -10,20 +10,26 @@ Team notes between Claude Code runs. Claude Code reads this at the start of ever
 
 (Claude Code writes questions here when it hits real ambiguity.)
 
-- [ ] R5 refill grace period: DESIGN.md says "days supply plus a grace period" but gives no number. Run 1 uses `refillGraceDays: 7` in `apps/server/src/rules/config.ts` as a placeholder. R5 is skipped for Harriet anyway (one fill per drug). Pick a value.
-- [ ] Atrial fibrillation and camera heart rate: Harriet has AFib, the rhythm where camera heart-rate estimates are least reliable. Should the vitals call say so, or skip the usual-range comparison for patients with AFib? Default for now: no special handling.
-- [ ] Red-flag questions in rotation: "trouble breathing lying flat" and "unusual bleeding" rotate like every other question, so Harriet is asked each only some days. Should red-flag questions be asked daily (using up 2 of the 3 slots)? Default for now: rotate.
-- [ ] R4 above the range: a potassium above the top of its reference range (say 5.5 with range to 5.1) flags today, since the check is "at or above the start of the top quarter". Safer reading of DESIGN.md, but confirm.
-- [ ] Records dated after the check-in date: rules don't ignore labs or fills dated later than the pinned demo date. Harriet has none. Should they be excluded?
-- [ ] Flags when record consent ends: snapshots are deleted on a 410, but stored flags are kept. Delete them too?
-- [ ] Family messages: run 1 picked `direction` to_senior/to_family and `kind` voice/text/photo in the schema. Check against how the Relay agent stores messages in run 2.
-- [ ] Red-flag advice adds "If it gets worse or feels like an emergency, call 911." Beyond the spec; keep or drop?
-- [ ] Stale button taps: a tap on an old message counts as the answer to whatever is pending now. Fine for the demo; tighten with `replyTo` in run 2?
-- [ ] "Later" on a flag she has heard: a record flag becomes told (not offered again), a paper (R6) flag stays new (offered again). Make them match? Suggested: both told.
-- [ ] Family members get no reply when they first message the agent, so they can't tell they're set up. Send a short welcome ("You'll get Harriet's daily updates here")? Suggested: yes, next run.
+Answered by Michael on 2026-10-03 (built in run 2c):
+
+- [x] [done] R5 refill grace period: 7 days.
+- [x] [done] AFib and camera heart rate: for patients with atrial fibrillation, report the reading as an estimate and skip the usual-range comparison.
+- [x] [done] Red-flag questions: asked periodically, based on her conditions and whether a check is needed (every other day by default, daily for a few days after a worrying answer), not by plain rotation.
+- [x] [done] R4 above the range: keep flagging it.
+- [x] [done] Records dated after the check-in date: ignored, so the app behaves as if it really is that day.
+- [x] [done] Flags when record consent ends: deleted along with the record copy.
+- [x] [done] Family message values (`to_senior`/`to_family`, `voice`/`text`/`photo`): keep.
+- [x] [done] Red-flag advice: keep the 911 line, but lead with telling her family; family alerts ask them to call her today.
+- [x] [done] Stale button taps: a tap on an old message re-prompts instead of answering (checked against the message it replies to).
+- [x] [done] "Later" on a flag she has heard: told, for record and paper flags alike.
+- [x] [done] Family welcome: a family member gets a short welcome the first time they message the agent.
 - [x] [done] Sharing changes: chat flow built in run 2b.
 - [x] [done] R6 results enter the flag lifecycle after Harriet confirms the read-back (run 2b).
-- [x] [done] Branches: merged to `main` through a pull request (run 2b).
+- [x] [done] Branches: merged to `main` through PR #1 (run 2b).
+
+Open:
+
+- [ ] Red-flag cadence numbers: `redFlagEveryDays = 2` and `followUpDays = 3` in `apps/server/src/context/questions.ts`. Product values, not clinical cutoffs; change them if they feel wrong in rehearsal.
 
 ## Team tasks (humans only, not for Claude Code)
 

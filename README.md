@@ -46,7 +46,7 @@ npm run simulate -- [subject] [--day YYYY-MM-DD] [--db path] [--reset] [--live] 
 
 - Days carry over in `data/simulator.db`; `--reset` deletes that file first. `--day` defaults to `CLOCK_DATE`, else her data as-of date (2026-09-01).
 - Commands: `/next` (next day), `/day YYYY-MM-DD`, `/noon` (missed check-in job), `/flags`, `/sharing <level>`, `/paper` (discharge paper read-back and R6 check), `/db`, `/help`, `/quit`.
-- `--script file` runs one input per line (`#` comments) and exits, non-zero if any input failed. Demo backups live in `scripts/demo/`, for example `npm run simulate -- --reset --script ../../scripts/demo/harriet-day1.txt`. `harriet-red-flag.txt` needs `--day 2026-09-02`.
+- `--script file` runs one input per line (`#` comments) and exits, non-zero if any input failed. Demo backups live in `scripts/demo/`, for example `npm run simulate -- --reset --script ../../scripts/demo/harriet-day1.txt`.
 
 ## How it works
 
@@ -56,9 +56,11 @@ npm run simulate -- [subject] [--day YYYY-MM-DD] [--db path] [--reset] [--live] 
 
 ## Working with Claude Code
 
-1. Add notes for the next run to `FEEDBACK.md`, commit and push.
-2. Open Claude Code in this folder and say: "Read CLAUDE_CODE_BRIEF.md and start the next run."
-3. Review `RUN_LOG.md` after each run.
+The remaining work is split into five lanes in [docs/TEAM_PLAN.md](docs/TEAM_PLAN.md). Pick one, then:
+
+1. Add notes for your lane to `FEEDBACK.md` if you have any.
+2. Open Claude Code in your clone and say: "Read CLAUDE_CODE_BRIEF.md and docs/TEAM_PLAN.md. I own lane N. Start the next run for my lane."
+3. It works on a lane branch and opens a pull request. Merge it once CI is green and a teammate has looked.
 
 ## License
 

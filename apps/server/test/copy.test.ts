@@ -10,6 +10,7 @@ import {
   familyDailyStatus,
   familyMissedAlert,
   familyRedFlagAlert,
+  familyWelcome,
   flagDetail,
   flagNotedReply,
   flagOffer,
@@ -55,7 +56,9 @@ const ruleFlagMessages = ["patient-demo-polypharmacy", "patient-demo-001", "pati
 function allOutputs(): string[] {
   const out: string[] = [];
   for (const n of [0, 1, 3]) out.push(checkinGreeting(NAME, n));
-  out.push(notTodayReply(NAME), redFlagAdvice(NAME), flagOffer(), flagNotedReply(), checkinDone(NAME));
+  out.push(notTodayReply(NAME), flagOffer(), flagNotedReply(), checkinDone(NAME));
+  out.push(redFlagAdvice(NAME), redFlagAdvice(NAME, ["Sarah"]), redFlagAdvice(NAME, ["Sarah", "Tom"]), redFlagAdvice(NAME, []));
+  out.push(familyWelcome(NAME));
   out.push(flagDetail(FLAG_MESSAGE), ...ruleFlagMessages.map(flagDetail));
   out.push(didntUnderstand([BUTTON.start, BUTTON.notToday]), didntUnderstand(["Yes"]));
   out.push(recordLinkEndedSenior(NAME), recordLinkEndedFamily(NAME), familyMissedAlert(NAME, "12:00 PM"));
@@ -65,7 +68,7 @@ function allOutputs(): string[] {
     out.push(sharingMenu(level), sharingChangedSenior(level), sharingChangedFamily(NAME, level));
     out.push(familyRedFlagAlert({ seniorName: NAME, sharing: level, ...RED_FLAG }));
     for (const outcome of OUTCOMES)
-      for (const vitals of [undefined, { heartRate: 72, inUsualRange: true }, { heartRate: 104, inUsualRange: false }])
+      for (const vitals of [undefined, { heartRate: 72, inUsualRange: true }, { heartRate: 104, inUsualRange: false }, { heartRate: 78 }])
         out.push(familyDailyStatus({ seniorName: NAME, sharing: level, outcome, answers: ANSWERS, flags: [{ message: FLAG_MESSAGE }], vitals }));
   }
   return out;
@@ -78,7 +81,7 @@ describe("copy: style rules across every output", () => {
     const fns = Object.entries(copy).filter(([, v]) => typeof v === "function").map(([k]) => k).sort();
     const sampled = [
       "checkinDone", "checkinGreeting", "didntUnderstand", "familyDailyStatus", "familyMissedAlert", "familyRedFlagAlert",
-      "flagDetail", "flagNotedReply", "flagOffer", "notTodayReply", "recordLinkEndedFamily", "recordLinkEndedSenior",
+      "familyWelcome", "flagDetail", "flagNotedReply", "flagOffer", "notTodayReply", "recordLinkEndedFamily", "recordLinkEndedSenior",
       "redFlagAdvice", "sharingChangedFamily", "sharingChangedSenior", "sharingLevelFromButton", "sharingMenu",
     ].sort();
     expect(fns).toEqual(sampled);
@@ -161,8 +164,30 @@ describe("copy: senior messages", () => {
     for (const text of [flagDetail(FLAG_MESSAGE), ...ruleFlagMessages.map(flagDetail)]) expect(text.toLowerCase()).not.toMatch(/you should (stop|start|take)|stop taking/);
   });
 
-  it("red-flag advice tells her to call her doctor", () => {
-    expect(redFlagAdvice(NAME)).toMatch(/call your doctor/);
+  it("red-flag advice leads with who was told, then her doctor, then 911", () => {
+    expect(redFlagAdvice(NAME, ["Sarah"])).toBe(
+      "Harriet, I've asked Sarah to check on you. Please call your doctor today about this. If it gets worse or feels like an emergency, call 911.",
+    );
+    expect(redFlagAdvice(NAME, ["Sarah", "Tom", "Ann"])).toMatch(/^Harriet, I've asked Sarah, Tom and Ann to check on you\. /);
+    for (const text of [redFlagAdvice(NAME), redFlagAdvice(NAME, ["Sarah"]), redFlagAdvice(NAME, [])]) {
+      const family = text.indexOf("check on you");
+      const doctor = text.indexOf("call your doctor today");
+      const emergency = text.indexOf("call 911");
+      expect(doctor, text).toBeGreaterThan(family);
+      expect(emergency, text).toBeGreaterThan(doctor);
+      // Short sentences.
+      for (const sentence of text.split(/(?<=\.) /)) expect(sentence.split(" ").length, sentence).toBeLessThanOrEqual(12);
+    }
+  });
+
+  it("red-flag advice without names says 'your family'; with no one linked it claims no one was told", () => {
+    expect(redFlagAdvice(NAME)).toMatch(/^Harriet, I've asked your family to check on you\. Please call your doctor/);
+    expect(redFlagAdvice(NAME, [])).toBe("Harriet, please call your doctor today about this. If it gets worse or feels like an emergency, call 911.");
+    expect(redFlagAdvice(NAME, [" ", ""])).toBe(redFlagAdvice(NAME, []));
+  });
+
+  it("red-flag advice uses no pronoun for family members", () => {
+    for (const text of [redFlagAdvice(NAME, ["Sarah"]), redFlagAdvice(NAME, ["Tom"])]) expect(text).not.toMatch(/\b(she|he|her|his)\b/i);
   });
 
   it("the greeting says it is an assistant and offers 'Not today'", () => {
@@ -181,17 +206,28 @@ describe("copy: family messages by sharing level", () => {
   it("red-flag alert at status and status_vitals has no medical detail", () => {
     for (const sharing of ["status", "status_vitals"] as const) {
       const text = familyRedFlagAlert({ seniorName: NAME, sharing, ...RED_FLAG });
-      expect(text).toBe("Harriet reported something she should call her doctor about today. Please check in with her.");
+      expect(text).toBe("Harriet reported something she should call her doctor about. Please call Harriet today to check on her.");
       expect(text).not.toContain(RED_FLAG.questionText);
       expect(text).not.toContain(`"${RED_FLAG.answer}"`);
       expect(text.toLowerCase()).not.toContain("breathing");
     }
   });
 
-  it("red-flag alert at all includes the question and answer", () => {
+  it("red-flag alert at all includes the question and answer, and still asks for a call today", () => {
     const text = familyRedFlagAlert({ seniorName: NAME, sharing: "all", ...RED_FLAG });
     expect(text).toContain(RED_FLAG.questionText);
     expect(text).toContain(`"${RED_FLAG.answer}"`);
+    expect(text).toContain("Please call Harriet today to check on her.");
+  });
+
+  it("the family welcome says it's an AI assistant, daily updates come here, she decides what they see, urgent alerts always come", () => {
+    const text = familyWelcome(NAME);
+    expect(text).toMatch(/assistant/);
+    expect(text).toMatch(/AI, not a person/);
+    expect(text).toMatch(/Each day I'll send you an update on Harriet's check-in here/);
+    expect(text).toMatch(/Harriet decides how much you see/);
+    expect(text).toMatch(/something urgent, you'll always hear about it/);
+    expect(familyWelcome("Rosa")).toContain("Rosa's check-in assistant");
   });
 
   it("daily status says checked in, not today or missed at every level", () => {
@@ -223,6 +259,18 @@ describe("copy: family messages by sharing level", () => {
     expect(familyDailyStatus({ ...input, sharing: "status_vitals", vitals: { heartRate: 72, inUsualRange: true } })).toContain("within Harriet's usual range");
   });
 
+  it("a reading not compared with her usual range (atrial fibrillation) is only an estimate: number at all, none at status_vitals", () => {
+    const input = { seniorName: NAME, outcome: "checked_in" as const, answers: [], flags: [], vitals: { heartRate: 78 } };
+    expect(familyDailyStatus({ ...input, sharing: "status" })).toBe("Harriet checked in today.");
+    expect(familyDailyStatus({ ...input, sharing: "status_vitals" })).toBe(
+      "Harriet checked in today.\n\nHeart rate checked today. This is a camera estimate, not a medical test.",
+    );
+    expect(familyDailyStatus({ ...input, sharing: "all" })).toBe(
+      "Harriet checked in today.\n\nHeart rate today: about 78 beats a minute. This is a camera estimate, not a medical test.",
+    );
+    for (const sharing of LEVELS) expect(familyDailyStatus({ ...input, sharing })).not.toMatch(/usual range|within|outside/);
+  });
+
   it("without vitals the daily status is unchanged by level below all", () => {
     const input = { seniorName: NAME, outcome: "not_today" as const, answers: ANSWERS, flags: [] };
     expect(familyDailyStatus({ ...input, sharing: "status_vitals" })).toBe(familyDailyStatus({ ...input, sharing: "status" }));
@@ -237,7 +285,7 @@ describe("copy: family messages by sharing level", () => {
   });
 
   it("speaks to one family member in their own chat, never to a group", () => {
-    const family: string[] = [recordLinkEndedFamily(NAME), familyMissedAlert(NAME, "12:00")];
+    const family: string[] = [recordLinkEndedFamily(NAME), familyMissedAlert(NAME, "12:00"), familyWelcome(NAME)];
     for (const sharing of LEVELS) {
       family.push(sharingChangedFamily(NAME, sharing), familyRedFlagAlert({ seniorName: NAME, sharing, ...RED_FLAG }));
       for (const outcome of OUTCOMES)

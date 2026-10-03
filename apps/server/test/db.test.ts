@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  deletePatientFlags,
   deletePatientSnapshots,
   getFlag,
   getSharing,
@@ -57,7 +58,7 @@ describe("schema", () => {
     const db = openDatabase(":memory:");
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((t) => t.name);
     expect(tables).toEqual(
-      ["checkins", "family_members", "family_messages", "flags", "inbound_messages", "memories", "paper_scans", "patients", "record_snapshots", "relay_events", "relay_full_syncs", "vitals_readings"].sort(),
+      ["checkin_prompts", "checkins", "family_members", "family_messages", "flags", "inbound_messages", "memories", "paper_scans", "patients", "record_snapshots", "relay_events", "relay_full_syncs", "vitals_readings"].sort(),
     );
     expect(schemaVersion(db)).toBe(SCHEMA_VERSION);
     expect(db.pragma("foreign_keys", { simple: true })).toBe(1);
@@ -229,6 +230,25 @@ describe("nextFlagToOffer", () => {
 
   it("returns nothing when no flag is new", () => {
     expect(nextFlagToOffer(db, P, "2026-09-01")).toBeUndefined();
+  });
+});
+
+describe("deletePatientFlags (record consent ended)", () => {
+  it("deletes only her flags; a check-in's pending flag becomes null; check-ins stay", () => {
+    const db = openDatabase(":memory:");
+    seed(db);
+    upsertPatient(db, { id: "other", finchnodePatientId: "fn-other", preferredName: "Other" });
+    const { inserted } = syncFlags(db, P, [flag("R1", "medium", { a: "1" }), flag("R3", "high", { b: "2" })], T1);
+    syncFlags(db, "other", [flag("R1", "medium", { c: "3" })], T1);
+    markTold(db, inserted[0]!.flagId, T1);
+    db.prepare("INSERT INTO checkins (patient_id, date, status, pending_flag_id) VALUES (?, ?, 'answered', ?)").run(P, "2026-09-01", Number(inserted[0]!.flagId));
+
+    expect(deletePatientFlags(db, P)).toBe(2);
+    expect(openFlags(db, P)).toEqual([]);
+    expect(getFlag(db, inserted[0]!.flagId)).toBeUndefined();
+    expect(openFlags(db, "other")).toHaveLength(1);
+    expect(db.prepare("SELECT pending_flag_id AS id FROM checkins WHERE patient_id = ?").get(P)).toEqual({ id: null });
+    expect(deletePatientFlags(db, P)).toBe(0);
   });
 });
 

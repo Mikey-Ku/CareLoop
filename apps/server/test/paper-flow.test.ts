@@ -9,7 +9,17 @@ import { PAPER_LATER_REPLY, PAPER_NO_RECORD_REPLY, PAPER_REJECTED_REPLY } from "
 import { QUESTION_BANK } from "../src/context/questions.ts";
 import { getCheckin } from "../src/db/checkins.ts";
 import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
-import { latestSnapshot, openDatabase, openFlags, setSharing, upsertPatient, type Db, type FlagSummary } from "../src/db/index.ts";
+import {
+  latestSnapshot,
+  nextFlagToOffer,
+  notedFlags,
+  openDatabase,
+  openFlags,
+  setSharing,
+  upsertPatient,
+  type Db,
+  type FlagSummary,
+} from "../src/db/index.ts";
 import { getPaperScan, latestPaperScan } from "../src/db/paper-scans.ts";
 import { ConsentInactiveError } from "../src/finchnode/client.ts";
 import { FIXTURES_DIR, loadRxNavCache, loadSnapshot } from "../src/finchnode/fixtures.ts";
@@ -23,8 +33,8 @@ const P = "harriet";
 const SUBJECT = "patient-demo-polypharmacy";
 const ME = "chat_harriet";
 const FAMILY = "chat_family";
-const DAY1 = "2026-09-01"; // questions: dizzy-on-standing, morning-medicines, mood
-const DAY2 = "2026-09-02"; // questions: hf-ankle-swelling, hf-breathing-lying-flat, anticoagulant-bleeding
+const DAY1 = "2026-09-01";
+const DAY2 = "2026-09-02";
 const [YES, NO] = PAPER_CONFIRM_BUTTONS as [string, string];
 const rxnav = loadRxNavCache();
 
@@ -78,6 +88,22 @@ const r6Flags = () => openFlags(db, P).filter((f) => f.ruleId === "R6");
 const statusOf = (rule: string) => openFlags(db, P).find((f) => f.ruleId === rule)?.status;
 const DETAIL = msg(ME, flagDetail(R6.message), [BUTTON.willAskDoctor, BUTTON.later]);
 
+// The check-in's questions are read from its row, so these tests don't depend on which questions a day picks.
+const todaysQuestions = (day = DAY1) => getCheckin(db, P, day)!.questionIds.map(question);
+const currentQuestion = (day = DAY1) => {
+  const row = getCheckin(db, P, day)!;
+  return question(row.questionIds[row.questionIndex]!);
+};
+/** A button that isn't a red-flag answer, so no alert goes out. */
+const safeAnswer = (q: { buttons: string[]; redFlagAnswers: string[] }) => q.buttons.find((b) => !q.redFlagAnswers.includes(b))!;
+const asked = (q: { text: string; buttons: string[] }) => msg(ME, q.text, q.buttons);
+/** Answer every remaining question safely; returns what the last answer produced. */
+async function answerAll(day = DAY1): Promise<SentMessage[]> {
+  let last: SentMessage[] = [];
+  while (getCheckin(db, P, day)?.step === "question") last = await say(safeAnswer(currentQuestion(day)));
+  return last;
+}
+
 describe("starting a paper check", () => {
   it("stores the read paper unconfirmed and sends the read-back with the two confirm buttons; no check-in", async () => {
     const { scanId } = await engine.startPaperCheck(P, PAPER, "att_1");
@@ -108,7 +134,7 @@ describe("starting a paper check", () => {
 });
 
 describe('"Yes, that\'s right"', () => {
-  it("compares with a fresh snapshot, stores an R6 flag as new, tells her plainly; I'll ask my doctor marks it noted", async () => {
+  it("compares with a fresh snapshot, stores an R6 flag, tells her plainly (so it is told); I'll ask my doctor marks it noted", async () => {
     expect(R6.status).toBe("flag");
     expect(R6.message).toMatch(/aspirin/);
     const { scanId } = await engine.startPaperCheck(P, PAPER);
@@ -117,7 +143,8 @@ describe('"Yes, that\'s right"', () => {
     expect(loads).toBe(1);
     expect(latestSnapshot(db, P)).toBeDefined();
     const [flag] = r6Flags();
-    expect(flag).toMatchObject({ ruleId: "R6", status: "new", message: R6.message, severity: "medium" });
+    expect(flag).toMatchObject({ ruleId: "R6", status: "told", message: R6.message, severity: "medium" });
+    expect(db.prepare("SELECT told_on, offered_on FROM flags WHERE id = ?").get(Number(flag!.flagId))).toEqual({ told_on: DAY1, offered_on: null });
     const scan = getPaperScan(db, scanId)!;
     expect(scan).toMatchObject({ phase: "confirmed", confirmedAt: now });
     expect(scan.outcome).toMatchObject({ outcome: "flag", flagId: Number(flag!.flagId), followUp: "pending" });
@@ -185,26 +212,52 @@ describe('"No, something\'s off"', () => {
 });
 
 describe("R6 in the flag lifecycle", () => {
-  it('"Later" keeps it new: it is in openFlags and offered in the next day\'s check-in', async () => {
+  it('"Later" leaves it told, like "Later" after a check-in flag\'s detail: never offered again on its own, not on the visit-prep list', async () => {
     await engine.startPaperCheck(P, PAPER);
     await say(YES);
     expect(brief(await say(BUTTON.later))).toEqual([msg(ME, PAPER_LATER_REPLY)]);
+    expect(PAPER_LATER_REPLY).not.toMatch(/again/);
+    expect(PAPER_LATER_REPLY).toMatch(/doctor or pharmacist/);
     const r6 = r6Flags()[0]!;
-    expect(r6.status).toBe("new");
+    expect(r6.status).toBe("told");
+    expect(latestPaperScan(db, P)?.outcome).toMatchObject({ followUp: "later" });
     // Heard today, so the day's check-in offers no other flag.
-    expect(db.prepare("SELECT offered_on FROM flags WHERE id = ?").get(Number(r6.flagId))).toEqual({ offered_on: DAY1 });
+    expect(nextFlagToOffer(db, P, DAY1)).toBeUndefined();
+    expect(notedFlags(db, P)).toEqual([]);
 
-    // Next morning: R1, R3, R4 are synced as new too; she has already noted them, so R6 is next in line.
+    // Next morning: R1, R3, R4 are synced as new; once she has noted them there is nothing left to offer.
     now = `${DAY2}T09:00:00.000Z`;
     await engine.startDay(P, DAY2);
     expect(openFlags(db, P).map((f) => f.ruleId).sort()).toEqual(["R1", "R3", "R4", "R6"]);
+    expect(nextFlagToOffer(db, P, DAY2)?.ruleId).not.toBe("R6");
     db.prepare("UPDATE flags SET status = 'noted', noted_at = ? WHERE rule_id != 'R6'").run(now);
-    for (const t of ["Let's start", "No", "No"]) await say(t);
-    expect(brief(await say("No"))).toEqual([msg(ME, flagOffer(), [BUTTON.tellMeMore, BUTTON.later])]);
-    expect(getCheckin(db, P, DAY2)?.pendingFlagId).toBe(Number(r6.flagId));
-    expect(brief(await say("Tell me more"))).toEqual([DETAIL]);
+    expect(nextFlagToOffer(db, P, DAY2)).toBeUndefined();
+    expect(statusOf("R6")).toBe("told");
+    expect(notedFlags(db, P).map((f) => f.ruleId)).not.toContain("R6");
+    // The paper's buttons are spent: a late tap doesn't reach the paper check.
     await say(BUTTON.willAskDoctor);
+    expect(statusOf("R6")).toBe("told");
+  });
+
+  it("no tap at all: heard is told, so it is never offered again on its own", async () => {
+    await engine.startPaperCheck(P, PAPER);
+    await say(YES);
+    now = `${DAY2}T09:00:00.000Z`;
+    await engine.startDay(P, DAY2);
+    db.prepare("UPDATE flags SET status = 'noted', noted_at = ? WHERE rule_id != 'R6'").run(now);
+    expect(nextFlagToOffer(db, P, DAY2)).toBeUndefined();
+    // Her "I'll ask my doctor" on the paper's message still works the next day (then the greeting comes again).
+    expect(brief(await say(BUTTON.willAskDoctor))[0]).toEqual(msg(ME, flagNotedReply()));
     expect(statusOf("R6")).toBe("noted");
+  });
+
+  it('"Later" on a flag stored new before this change still makes it told', async () => {
+    await engine.startPaperCheck(P, PAPER);
+    await say(YES);
+    db.prepare("UPDATE flags SET status = 'new', told_at = NULL, told_on = NULL WHERE rule_id = 'R6'").run();
+    await say(BUTTON.later);
+    expect(statusOf("R6")).toBe("told");
+    expect(db.prepare("SELECT told_on FROM flags WHERE rule_id = 'R6'").get()).toEqual({ told_on: DAY1 });
   });
 
   it("at sharing all, a noted R6 flag is in the family's daily status", async () => {
@@ -214,8 +267,8 @@ describe("R6 in the flag lifecycle", () => {
     await engine.startPaperCheck(P, PAPER);
     await say(YES);
     await say(BUTTON.willAskDoctor);
-    for (const t of ["Let's start", "No", "Yes"]) await say(t);
-    const family = (await say("Good")).find((m) => m.chatId === FAMILY)!;
+    await say("Let's start");
+    const family = (await answerAll()).find((m) => m.chatId === FAMILY)!;
     const flags = openFlags(db, P).map((f: FlagSummary) => ({ message: f.message }));
     expect(flags.map((f) => f.message)).toContain(R6.message);
     const row = getCheckin(db, P, DAY1)!;
@@ -246,25 +299,25 @@ describe("paper check alongside the check-in", () => {
     await engine.startDay(P, DAY1);
     await say("Let's start");
     await engine.startPaperCheck(P, PAPER);
-    const dizzy = question("dizzy-on-standing");
-    const meds = question("morning-medicines");
+    const [first, second] = todaysQuestions();
 
     expect(brief(await say(YES))).toEqual([DETAIL]);
     expect(getCheckin(db, P, DAY1)).toMatchObject({ step: "question", questionIndex: 0, answers: [] });
-    expect(brief(await say(BUTTON.willAskDoctor))).toEqual([msg(ME, flagNotedReply()), msg(ME, dizzy.text, dizzy.buttons)]);
-    expect(brief(await say("No"))).toEqual([msg(ME, meds.text, meds.buttons)]);
+    expect(brief(await say(BUTTON.willAskDoctor))).toEqual([msg(ME, flagNotedReply()), asked(first!)]);
+    expect(brief(await say(safeAnswer(first!)))).toEqual([asked(second!)]);
   });
 
   it("everything else keeps going to the check-in while a read-back waits", async () => {
     await engine.startDay(P, DAY1);
     await say("Let's start");
     await engine.startPaperCheck(P, PAPER);
-    expect(brief(await say("No"))).toEqual([msg(ME, question("morning-medicines").text, question("morning-medicines").buttons)]);
+    const [first, second] = todaysQuestions();
+    expect(brief(await say(safeAnswer(first!)))).toEqual([asked(second!)]);
     expect(latestPaperScan(db, P)?.phase).toBe("awaiting_confirm");
     // "No, something's off" then hands the question back.
     expect(brief(await say(NO))).toEqual([
       msg(ME, PAPER_REJECTED_REPLY),
-      msg(ME, question("morning-medicines").text, question("morning-medicines").buttons),
+      asked(second!),
     ]);
   });
 
@@ -272,9 +325,9 @@ describe("paper check alongside the check-in", () => {
     await engine.startDay(P, DAY1);
     await engine.startPaperCheck(P, PAPER);
     await say(YES); // R6 told, follow-up pending
-    for (const t of ["Let's start", "No", "Yes"]) await say(t);
-    // The paper check marked today as offered, so the check-in finishes without another flag.
-    const end = await say("Good");
+    await say("Let's start");
+    // The paper check told her a flag today, so the check-in finishes without another flag.
+    const end = await answerAll();
     expect(getCheckin(db, P, DAY1)?.step).toBe("done");
     expect(end.some((m) => m.text === flagOffer())).toBe(false);
     // The follow-up still works afterwards.
@@ -284,12 +337,15 @@ describe("paper check alongside the check-in", () => {
 
   it("a check-in flag detail keeps its own I'll ask my doctor", async () => {
     await engine.startDay(P, DAY1);
-    for (const t of ["Let's start", "No", "Yes", "Good", "Tell me more"]) await say(t);
+    await say("Let's start");
+    await answerAll();
+    expect(getCheckin(db, P, DAY1)?.step).toBe("flag_offer");
+    await say("Tell me more");
     await engine.startPaperCheck(P, PAPER);
     await say(YES);
     await say(BUTTON.willAskDoctor);
     expect(statusOf("R1")).toBe("noted");
-    expect(statusOf("R6")).toBe("new");
+    expect(statusOf("R6")).toBe("told");
     expect(getCheckin(db, P, DAY1)?.step).toBe("done");
     await say(BUTTON.willAskDoctor);
     expect(statusOf("R6")).toBe("noted");

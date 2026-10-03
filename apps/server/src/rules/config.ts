@@ -15,7 +15,7 @@ export type RulesConfig = {
   potassiumTopFraction: number;
   /**
    * R5: days allowed past a fill's days supply before a refill counts as late.
-   * NOT in DESIGN.md yet: placeholder until the team picks a value (see FEEDBACK.md).
+   * 7 days, confirmed by the team 2026-10-03.
    */
   refillGraceDays: number;
 };

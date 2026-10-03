@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { buildContextPacket, type ContextPacket } from "../src/context/packet.ts";
+import { AFIB_NOTE, buildContextPacket, type ContextPacket } from "../src/context/packet.ts";
 import { QUESTION_BANK } from "../src/context/questions.ts";
 import { loadRxNavCache, loadSnapshot } from "../src/finchnode/fixtures.ts";
-import { normalizeHealthRecord, type PatientRecord } from "../src/finchnode/normalize.ts";
+import { LOINC, normalizeHealthRecord, type Condition, type Measurement, type PatientRecord } from "../src/finchnode/normalize.ts";
 import { fingerprint, runRules } from "../src/rules/index.ts";
 
 const rxnav = loadRxNavCache();
@@ -28,8 +28,12 @@ describe("context packet for Harriet (patient-demo-polypharmacy)", () => {
     expect(packet.sharing).toBe("status");
   });
 
-  it("has her usual heart-rate range from 10 clinic readings", () => {
-    expect(packet.usualRange).toEqual({ heartRate: { low: 65, high: 91, readings: 10 } });
+  it("keeps her usual heart-rate range from 10 clinic readings, but never compares with it: she has atrial fibrillation", () => {
+    expect(packet.conditions).toContain("Atrial fibrillation");
+    expect(packet.usualRange).toEqual({ heartRate: { low: 65, high: 91, readings: 10 }, compareHeartRate: false, note: AFIB_NOTE });
+    expect(AFIB_NOTE).toMatch(/irregular/);
+    expect(AFIB_NOTE).toMatch(/estimate/);
+    expect(AFIB_NOTE).not.toMatch(/[\u2013\u2014]/);
   });
 
   it("lists active conditions and medications with dose, last fill and source", () => {
@@ -120,7 +124,7 @@ describe("context packet edge cases", () => {
     }
     expect(packet.conditions).toEqual([]);
     expect(packet.recentLabs).toEqual([]);
-    expect(packet.usualRange).toEqual({});
+    expect(packet.usualRange).toEqual({ compareHeartRate: false, note: expect.stringMatching(/no clinic heart-rate readings/) });
     expect(packet.patient.age).toBeNull();
     expect(packet.medications.map((m) => m.name)).toEqual(["lisinopril 10 MG Oral Tablet", "atorvastatin 20 MG Oral Tablet"]);
   });
@@ -132,13 +136,17 @@ describe("context packet edge cases", () => {
     expect(packet.medications).toEqual([]);
     expect(packet.recentLabs).toEqual([]);
     expect(packet.openFlags).toEqual([]);
-    expect(packet.usualRange).toEqual({});
+    expect(packet.usualRange).toMatchObject({ compareHeartRate: false });
+    expect(packet.usualRange.heartRate).toBeUndefined();
     expect(packet.patient.preferredName).toBe("Jonah");
   });
 
   it("messy coding: usual range omitted with 1 heart-rate reading, unusable labs skipped", () => {
     const packet = packetFor("patient-demo-messy-coding");
-    expect(packet.usualRange).toEqual({});
+    expect(packet.usualRange).toEqual({
+      compareHeartRate: false,
+      note: "Her record has only 1 clinic heart-rate reading and a usual range needs 3, so a reading is not compared.",
+    });
     const names = packet.recentLabs.map((l) => l.name);
     expect(names.some((n) => /creatinine/i.test(n))).toBe(false);
     expect(names.some((n) => /protein/i.test(n))).toBe(false);
@@ -150,13 +158,88 @@ describe("context packet edge cases", () => {
   it("usual range threshold is configurable", () => {
     expect(packetFor("patient-demo-messy-coding", { minUsualRangeReadings: 1 }).usualRange).toEqual({
       heartRate: { low: 72, high: 72, readings: 1 },
+      compareHeartRate: true,
     });
-    expect(packetFor("patient-demo-polypharmacy", { minUsualRangeReadings: 11 }).usualRange).toEqual({});
+    // Harriet with too few readings: still atrial fibrillation, so the reason given is that.
+    expect(packetFor("patient-demo-polypharmacy", { minUsualRangeReadings: 11 }).usualRange).toEqual({ compareHeartRate: false, note: AFIB_NOTE });
   });
 
   it("multi-source: merged medications keep every source", () => {
     const packet = packetFor("patient-demo-multi-source");
     expect(packet.medications.length).toBeGreaterThan(0);
     expect(packet.medications.some((m) => m.source.includes(", "))).toBe(true);
+  });
+});
+
+describe("atrial fibrillation and the usual range", () => {
+  const harriet = recordFor("patient-demo-polypharmacy");
+  const withConditions = (conditions: Condition[]): PatientRecord => ({ ...harriet, conditions });
+  const afib = harriet.conditions.find((c) => /atrial fibrillation/i.test(c.name))!;
+  const build = (record: PatientRecord) => buildContextPacket({ record, ruleResults: [], checkinDate: "2026-09-01" }).usualRange;
+
+  it("without atrial fibrillation her readings are compared with the usual range", () => {
+    expect(build(withConditions(harriet.conditions.filter((c) => c !== afib)))).toEqual({
+      heartRate: { low: 65, high: 91, readings: 10 },
+      compareHeartRate: true,
+    });
+  });
+
+  it("a resolved atrial fibrillation doesn't stop the comparison; any spelling of an active one does", () => {
+    const others = harriet.conditions.filter((c) => c !== afib);
+    expect(build(withConditions([...others, { ...afib, status: "resolved" }])).compareHeartRate).toBe(true);
+    expect(build(withConditions([...others, { ...afib, name: "Paroxysmal ATRIAL FIBRILLATION" }])).compareHeartRate).toBe(false);
+  });
+
+  it("atrial fibrillation whose onset is after the check-in date doesn't count yet", () => {
+    const later = { ...afib, onsetDate: "2026-09-15" };
+    expect(build(withConditions([...harriet.conditions.filter((c) => c !== afib), later])).compareHeartRate).toBe(true);
+  });
+});
+
+describe("records after the check-in date are ignored", () => {
+  const harriet = recordFor("patient-demo-polypharmacy");
+  const future = (m: Measurement, date: string, value: number): Measurement => ({
+    ...m,
+    date,
+    value,
+    provenance: m.provenance.map((p) => ({ ...p, recordId: `${p.recordId}-future`, date })),
+  });
+
+  it("a lab and a heart-rate reading dated after the check-in date change nothing in the packet", () => {
+    const egfr = harriet.labs.filter((m) => m.loinc === LOINC.egfr).at(-1)!;
+    const hr = harriet.vitals.filter((m) => m.loinc === LOINC.heartRate).at(-1)!;
+    const record: PatientRecord = {
+      ...harriet,
+      labs: [...harriet.labs, future(egfr, "2026-09-20", 25)],
+      vitals: [...harriet.vitals, future(hr, "2026-09-20", 120)],
+    };
+    const at = (checkinDate: string) => buildContextPacket({ record, ruleResults: [], checkinDate });
+    const before = at("2026-09-01");
+    expect(before).toEqual(buildContextPacket({ record: harriet, ruleResults: [], checkinDate: "2026-09-01" }));
+    expect(before.recentLabs.find((l) => l.name.startsWith("Glomerular"))).toMatchObject({ value: 31, date: "2026-07-14" });
+    // On the later day they count.
+    const after = at("2026-09-20");
+    expect(after.recentLabs.find((l) => l.name.startsWith("Glomerular"))).toMatchObject({ value: 25, date: "2026-09-20" });
+    expect(after.usualRange.heartRate).toEqual({ low: 65, high: 120, readings: 11 });
+  });
+});
+
+describe("packet: today's questions follow the red-flag cadence", () => {
+  const harriet = recordFor("patient-demo-polypharmacy");
+  const ids = (p: ContextPacket) => p.todaysQuestions.map((q) => q.id);
+
+  it("with no history, both red-flag questions are due", () => {
+    const p = buildContextPacket({ record: harriet, ruleResults: [], checkinDate: "2026-09-02" });
+    expect(ids(p)).toEqual(expect.arrayContaining(["hf-breathing-lying-flat", "anticoagulant-bleeding"]));
+  });
+
+  it("with calm answers yesterday, matching the engine, they wait a day", () => {
+    const history = [
+      { day: "2026-09-01", questionId: "hf-breathing-lying-flat", answer: "No" },
+      { day: "2026-09-01", questionId: "anticoagulant-bleeding", answer: "No" },
+    ];
+    const p = buildContextPacket({ record: harriet, ruleResults: [], checkinDate: "2026-09-02", history });
+    expect(ids(p)).not.toContain("hf-breathing-lying-flat");
+    expect(ids(p)).not.toContain("anticoagulant-bleeding");
   });
 });

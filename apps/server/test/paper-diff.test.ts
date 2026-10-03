@@ -242,6 +242,18 @@ describe("sameStrength", () => {
     expect(sameStrength(undefined, "5 MG")).toBeUndefined();
   });
 
+  it("with a check-in date, a medication that starts after it isn't on her list yet", () => {
+    const later = { ...med("clopidogrel 75 MG Oral Tablet"), startDate: "2026-09-10" };
+    later.provenance = later.provenance.map((p) => ({ ...p, date: "2026-09-10" }));
+    const record = recordWith(med("apixaban 5 MG Oral Tablet"), later);
+    const paper = paperWith(line("clopidogrel", "75 mg", "new"));
+    expect(diffPaper(record, paper).status).toBe("checked");
+    expect(diffPaper(record, paper, "2026-09-10").status).toBe("checked");
+    const before = diffPaper(record, paper, "2026-09-01");
+    expect(before.status).toBe("flag");
+    expect(before.details.discrepancies).toEqual([{ kind: "new_not_in_record", paperName: "clopidogrel", paperStrength: "75 mg" }]);
+  });
+
   it("a strength the paper leaves out is not a dose discrepancy", () => {
     const result = diffPaper(recordWith(med("apixaban 5 MG Oral Tablet")), paperWith(line("apixaban", undefined, "continue")));
     expect(result.status).toBe("checked");

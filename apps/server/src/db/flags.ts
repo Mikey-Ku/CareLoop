@@ -143,3 +143,12 @@ export function markNoted(db: Db, flagId: string | number, now: string): boolean
       .run(now, Number(flagId)).changes === 1
   );
 }
+
+/**
+ * Record consent ended (FinchNode 410): delete her stored flags along with the record copy they came
+ * from. A check-in's pending_flag_id becomes null (ON DELETE SET NULL). Check-ins, chats and memories
+ * stay. Returns the number of flags deleted.
+ */
+export function deletePatientFlags(db: Db, patientId: string): number {
+  return db.prepare("DELETE FROM flags WHERE patient_id = ?").run(patientId).changes;
+}

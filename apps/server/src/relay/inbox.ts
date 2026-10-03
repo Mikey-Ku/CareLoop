@@ -1,10 +1,13 @@
 import type { MessageWebhookData, RelayWebhookEvent, WebSocketFullSyncContext } from "@relaymessenger/sdk";
+import { familyWelcome } from "../checkin/copy.ts";
 import type { CheckinEngine } from "../checkin/engine-types.ts";
-import { patientForChat } from "../db/checkins.ts";
+import { normalizeHandle as familyHandle } from "../config.ts";
+import { getCheckinPatient, patientForChat } from "../db/checkins.ts";
 import { familyMembersForChat, linkFamilyMember } from "../db/family.ts";
 import type { Db } from "../db/index.ts";
-import type { InboundMessage } from "./messenger.ts";
+import type { InboundMessage, Messenger } from "./messenger.ts";
 import { consoleLog, describeRelayError, normalizeHandle, sameHandle, type RelayClient, type RelayLog } from "./relay-client.ts";
+import { RelayMessenger } from "./relay-messenger.ts";
 
 // Durable inbox for Relay's acknowledged WebSocket, after Relay-SDK
 // cookbook/websocket-agent. `onEvent` commits the whole event by `event_id`
@@ -19,14 +22,22 @@ import { consoleLog, describeRelayError, normalizeHandle, sameHandle, type Relay
 // direct message when that arrives first. Only the senior's chat reaches the
 // check-in engine; family messages are logged and otherwise ignored until family
 // replies and voice memos are built (build step 7).
+//
+// Family welcome: the first time a family member's chat is linked for a senior
+// (it had no chat before), the agent sends familyWelcome there once, with the
+// idempotency key `welcome:<patientId>:<handle>`. A re-link to another chat, a
+// rename or a repeat event sends nothing. Best effort: a failed send is logged
+// and never undoes the link or fails the event.
 
 export type InboxDeps = {
   db: Db;
   engine: Pick<CheckinEngine, "handleInbound">;
   /** The senior's Relay handle (PATIENT_RELAY_HANDLE). */
   patientHandle: string;
-  /** Used to mark the senior's chat Read after her message is handled, and to list chats on FULL sync. */
+  /** Used to mark the senior's chat Read after her message is handled, to list chats on FULL sync, and to send the family welcome. */
   relay: Pick<RelayClient, "chats">;
+  /** Sends the family welcome. Defaults to a RelayMessenger over `relay`. */
+  messenger?: Messenger;
   log?: RelayLog;
   now?: () => string;
 };
@@ -111,6 +122,44 @@ function linkPatientChat(db: Db, patientHandle: string, chatId: string): { patie
 }
 
 // ---------------------------------------------------------------------------
+// Family linking and the welcome
+
+type FamilyLink = { patientIds: string[]; changed: boolean; firstLinked: string[] };
+
+/**
+ * linkFamilyMember, plus which patients this handle had no chat for until now
+ * (`firstLinked`): those are the ones that get the welcome.
+ */
+function linkFamily(db: Db, handle: string, chatId: string, displayName: string | null, now: string): FamilyLink | undefined {
+  const unlinked = new Set(
+    (db.prepare(`SELECT patient_id AS patientId FROM family_members WHERE handle = ? AND chat_id IS NULL`).all(familyHandle(handle)) as { patientId: string }[]).map(
+      (r) => r.patientId,
+    ),
+  );
+  const linked = linkFamilyMember(db, handle, chatId, displayName, now);
+  if (!linked) return undefined;
+  return { ...linked, firstLinked: linked.patientIds.filter((id) => unlinked.has(id)) };
+}
+
+/** Send familyWelcome to a newly linked family chat, once per senior. Never throws. */
+async function welcomeFamily(deps: InboxDeps, log: RelayLog, handle: string, chatId: string, patientIds: string[], fields: Record<string, unknown> = {}): Promise<void> {
+  if (patientIds.length === 0) return;
+  const messenger = deps.messenger ?? new RelayMessenger(deps.relay);
+  const normalized = familyHandle(handle);
+  for (const patientId of patientIds) {
+    const patient = getCheckinPatient(deps.db, patientId);
+    if (!patient) continue;
+    const at = { ...fields, handle: normalized, chat_id: chatId, patient_id: patientId };
+    try {
+      await messenger.send(chatId, { text: familyWelcome(patient.preferredName) }, `welcome:${patientId}:${normalized}`);
+      log("relay_family_welcomed", at);
+    } catch (error) {
+      log("relay_family_welcome_failed", { ...at, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Processing one event
 
 function textOf(data: MessageWebhookData): string {
@@ -138,9 +187,10 @@ export async function processEvent(deps: InboxDeps, event: RelayWebhookEvent): P
       return "patient_linked";
     }
     // A configured family member: this is their family chat.
-    const family = linkFamilyMember(deps.db, contact.handle, chatId, contact.display_name || null, now());
+    const family = linkFamily(deps.db, contact.handle, chatId, contact.display_name || null, now());
     if (family) {
       log("relay_family_linked", { ...base, handle: normalizeHandle(contact.handle), chat_id: chatId, patient_ids: family.patientIds, changed: family.changed });
+      await welcomeFamily(deps, log, contact.handle, chatId, family.firstLinked, base);
       return "family_linked";
     }
     log("relay_contact_added", { ...base, handle: normalizeHandle(contact.handle), chat_id: chatId });
@@ -170,10 +220,11 @@ export async function processEvent(deps: InboxDeps, event: RelayWebhookEvent): P
     // (mirrors her fallback above). Logged without the text; family replies are build step 7.
     let family = familyMembersForChat(deps.db, data.chat.id);
     if (family.length === 0) {
-      const linked = linkFamilyMember(deps.db, data.sender_handle.handle, data.chat.id, data.sender_handle.display_name, now());
+      const linked = linkFamily(deps.db, data.sender_handle.handle, data.chat.id, data.sender_handle.display_name, now());
       if (linked) {
         log("relay_family_linked", { ...base, handle: normalizeHandle(data.sender_handle.handle), chat_id: data.chat.id, patient_ids: linked.patientIds, changed: linked.changed });
         family = familyMembersForChat(deps.db, data.chat.id);
+        await welcomeFamily(deps, log, data.sender_handle.handle, data.chat.id, linked.firstLinked, base);
       }
     }
     if (family.length > 0) {
@@ -320,10 +371,16 @@ export function createRelayInbox(deps: InboxDeps): RelayInbox {
         }
       }
       let familyLinked = 0;
+      const welcomes: { handle: string; chatId: string; patientIds: string[] }[] = [];
       deps.db.transaction(() => {
         if (patientChatId) linkPatientChat(deps.db, deps.patientHandle, patientChatId);
         // Only configured family members match; anyone else is skipped.
-        for (const o of others) if (linkFamilyMember(deps.db, o.handle, o.chatId, o.displayName, now())) familyLinked += 1;
+        for (const o of others) {
+          const linked = linkFamily(deps.db, o.handle, o.chatId, o.displayName, now());
+          if (!linked) continue;
+          familyLinked += 1;
+          if (linked.firstLinked.length > 0) welcomes.push({ handle: o.handle, chatId: o.chatId, patientIds: linked.firstLinked });
+        }
         deps.db
           .prepare(`INSERT INTO relay_full_syncs (through_sequence, reason, chats_seen, completed_at) VALUES (?, ?, ?, ?)`)
           .run(context.throughSequence, context.reason, chatsSeen, now());
@@ -335,6 +392,18 @@ export function createRelayInbox(deps: InboxDeps): RelayInbox {
         patient_chat_found: Boolean(patientChatId),
         family_chats_found: familyLinked,
       });
+      // A family member first linked here (their contact.added fell in the superseded
+      // window) still gets the welcome once: queued on the processor, so the socket
+      // callback never waits on a send.
+      if (welcomes.length > 0) {
+        tail = tail
+          .then(async () => {
+            for (const w of welcomes) await welcomeFamily(deps, log, w.handle, w.chatId, w.patientIds, { through_sequence: context.throughSequence });
+          })
+          .catch((error: unknown) => {
+            log("relay_family_welcome_failed", { error: error instanceof Error ? error.message : String(error) });
+          });
+      }
     },
 
     drain,

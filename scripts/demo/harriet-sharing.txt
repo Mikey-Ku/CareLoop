@@ -9,15 +9,15 @@
 #
 # Let's start
 1
-# Have you felt dizzy when standing up? -> No
+# Did you have trouble breathing when lying flat last night? -> No
 1
 # She asks for the sharing menu mid check-in
 Sharing
-# Everything -> the morning medicines question comes again
+# Everything -> the bruising or bleeding question comes again
 3
-# Did you take your morning medicines? -> Yes
+# Have you had any unusual bruising or bleeding? -> No
 1
-# How are you feeling today? -> Good
+# Have you felt dizzy when standing up? -> No
 1
 # One thing worth asking your doctor about -> Tell me more
 1

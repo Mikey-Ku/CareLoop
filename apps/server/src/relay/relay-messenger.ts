@@ -21,9 +21,10 @@ export function toRelayParts(message: OutboundMessage): MessagePart[] {
 }
 
 export class RelayMessenger implements Messenger {
-  private readonly relay: RelayClient;
+  private readonly relay: Pick<RelayClient, "chats">;
 
-  constructor(relay: RelayClient) {
+  /** Only `chats` is used, so the inbox can send with the client slice it already holds. */
+  constructor(relay: Pick<RelayClient, "chats">) {
     this.relay = relay;
   }
 

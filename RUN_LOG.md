@@ -110,3 +110,34 @@ Run 2 (Relay): a `RelayMessenger` implementing `Messenger` with `@relaymessenger
 With a Relay token: `npm run relay:check`, then `npm run agent -- --checkin-now` on two phones, and fix whatever the real SDK disagrees with. Then build step 4 (ElevenLabs call on `call.created`, answered within 32 seconds; Relay-SDK `cookbook/elevenlabs-agents-call`).
 
 **Open questions:** see `FEEDBACK.md` (flag "Later" consistency, family welcome message, plus earlier items).
+
+## Run 2c: 2026-10-03 21:00
+
+**Goal of this run:** Build the team's answers to the open questions, and write the team plan.
+
+**What was built:**
+- Red-flag questions on a cadence instead of rotation: due when never asked, every other day, and daily for 3 days after a worrying answer in the same group; at most 2 of the 3 slots (`QUESTION_CADENCE` in `questions.ts`, product values). Answer history from `answerHistory`; a not-today or missed day doesn't count as asked. The packet takes the same history.
+- Red-flag advice names the family members who were told (display name, else handle), then "call your doctor today", then the 911 line; with no family linked it doesn't claim anyone was told. Family alerts ask them to call her today.
+- `asOf`: records dated after the check-in date are ignored by rules, the packet, the paper diff and question picking.
+- AFib: `usualRange.compareHeartRate` false with a plain note; family status shows the reading as an estimate with no in or out.
+- R5 grace period confirmed at 7 days. "Later" after hearing a flag leaves it told for record and paper flags. Flags deleted with the record copy when record consent ends. One-time welcome to each family member on first link.
+- Stale button taps: `checkin_prompts` (migration 5) records which sent message each step waits on; a tap on any other message re-sends the current prompt.
+- `docs/TEAM_PLAN.md`: five lanes (Relay live, voice calls, vitals, papers and doctor sheet, family and demo), shared-file rules, branch-and-PR workflow. `CLAUDE_CODE_BRIEF.md` now has each session work on a lane branch and open a PR.
+- 525 tests passing (was 453); all six demo scripts exit 0.
+
+**What was skipped or changed from spec:**
+- Run protocol changed: no more pushes to `main`; lane branches and pull requests.
+- `apps/server/.vitest/` (a stale test report committed in run 1) untracked and ignored.
+- Work split across two parallel agents (cadence, engine and stale taps; dates, AFib, copy, welcome) plus integration here.
+
+**Files touched:**
+- `apps/server/src/context/{questions,packet}.ts`, `src/checkin/{engine,engine-types,copy,paper-flow}.ts`, `src/db/{answer-history,checkins,flags,schema}.ts`, `src/finchnode/normalize.ts`, `src/rules/{index,paper-diff,config}.ts`, `src/relay/{inbox,relay-messenger}.ts`, `src/cli/simulator.ts`, tests, `scripts/demo/*`.
+- `docs/TEAM_PLAN.md`, `docs/DESIGN.md`, `CLAUDE_CODE_BRIEF.md`, `CLAUDE.md`, `README.md`, `FEEDBACK.md`, `.gitignore`.
+
+**Commits:**
+- `feat: run 2c: red-flag cadence, family-first alerts, team plan`
+
+**Recommended next step:**
+Split by lanes in `docs/TEAM_PLAN.md`. Lane 1 (Relay live) first: token, two phones, `npm run relay:check`, `npm run agent -- --checkin-now`.
+
+**Open questions:** `FEEDBACK.md` (red-flag cadence numbers).

@@ -456,6 +456,54 @@ describe("R5 refill timing", () => {
   });
 });
 
+// ---------- Records after the check-in date ----------
+
+describe("runRules ignores records dated after the check-in date", () => {
+  const harriet = normalizeHealthRecord(loadSnapshot(answerKey.patient), { rxnav });
+  const keyResults = runRules({ record: harriet, checkinDate: answerKey.checkinDate });
+  const later = "2026-09-20";
+
+  it("a rising eGFR and a low potassium after the check-in date change neither R1 nor R4", () => {
+    // On the later day these would clear R4 (eGFR rising, potassium low) and move R1 to "checked".
+    const record: PatientRecord = { ...harriet, labs: [...harriet.labs, egfr(52, later), potassium(3.8, "3.5 - 5.1 mmol/L", later)] };
+    const results = runRules({ record, checkinDate: answerKey.checkinDate });
+    expect(results.map(fingerprint)).toEqual(keyResults.map(fingerprint));
+    for (const ruleId of ["R1", "R4"]) {
+      const r = results.find((x) => x.ruleId === ruleId)!;
+      expect(r.status).toBe("flag");
+      expect(r.evidence.every((e) => e.date! <= answerKey.checkinDate)).toBe(true);
+    }
+    // On the later day they count.
+    const onLater = runRules({ record, checkinDate: later });
+    expect(onLater.find((r) => r.ruleId === "R1")?.status).toBe("checked");
+    expect(onLater.find((r) => r.ruleId === "R4")?.status).toBe("checked");
+  });
+
+  it("Harriet's answer key is unchanged", () => {
+    for (const expected of answerKey.results) {
+      const actual = keyResults.find((r) => r.ruleId === expected.ruleId)!;
+      expect(actual.status).toBe(expected.status);
+      expect(actual.details).toMatchObject(expected.details);
+    }
+  });
+
+  it("a medication that starts after the check-in date isn't on her list yet (R3)", () => {
+    const apixaban = med("apixaban 5 MG Oral Tablet");
+    const aspirin = { ...med("aspirin 81 MG Oral Tablet"), startDate: later };
+    aspirin.provenance = aspirin.provenance.map((p) => ({ ...p, date: later }));
+    expect(runRules({ record: patient({ medications: [apixaban, aspirin] }), checkinDate: CHECKIN }).find((r) => r.ruleId === "R3")?.status).toBe("checked");
+    expect(runRules({ record: patient({ medications: [apixaban, aspirin] }), checkinDate: later }).find((r) => r.ruleId === "R3")?.status).toBe("flag");
+  });
+
+  it("a fill after the check-in date doesn't count (R5)", () => {
+    const m = med("atorvastatin 40 MG Oral Tablet");
+    const fills = [fill(m, "2026-08-01", 30), fill(m, later, 30)];
+    const r5 = (checkinDate: string) => runRules({ record: patient({ medications: [m], dispenses: fills }), checkinDate }).find((r) => r.ruleId === "R5")!;
+    expect(r5(CHECKIN).status).toBe("skipped");
+    expect(r5(later).status).toBe("flag");
+  });
+});
+
 // ---------- fingerprint ----------
 
 describe("fingerprint", () => {

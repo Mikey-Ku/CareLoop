@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BUTTON,
@@ -17,7 +19,7 @@ import {
 import { createCheckinEngine } from "../src/checkin/engine.ts";
 import type { CheckinEngine } from "../src/checkin/engine-types.ts";
 import { QUESTION_BANK } from "../src/context/questions.ts";
-import { getCheckin } from "../src/db/checkins.ts";
+import { getCheckin, getCheckinPrompt } from "../src/db/checkins.ts";
 import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import {
   latestSnapshot,
@@ -29,17 +31,19 @@ import {
   type Db,
   type FlagSummary,
 } from "../src/db/index.ts";
-import { FinchNodeClient } from "../src/finchnode/client.ts";
-import { loadRecorded, loadRxNavCache, loadSnapshot, replayFetch } from "../src/finchnode/fixtures.ts";
+import { ConsentInactiveError, FinchNodeClient } from "../src/finchnode/client.ts";
+import { FIXTURES_DIR, loadRecorded, loadRxNavCache, loadSnapshot, replayFetch } from "../src/finchnode/fixtures.ts";
 import { FakeMessenger } from "../src/relay/fake-messenger.ts";
-import type { SentMessage } from "../src/relay/messenger.ts";
+import type { InboundMessage, SentMessage } from "../src/relay/messenger.ts";
+import type { ExtractedPaper } from "../src/rules/paper-diff.ts";
 
 const P = "harriet";
 const SUBJECT = "patient-demo-polypharmacy";
 const ME = "chat_harriet";
 const FAMILY = "chat_family";
-const DAY1 = "2026-09-01"; // questions: dizzy-on-standing, morning-medicines, mood
-const DAY2 = "2026-09-02"; // questions: hf-ankle-swelling, hf-breathing-lying-flat, anticoagulant-bleeding
+// Red-flag questions are due when never answered, so a first check-in always asks both.
+const DAY1 = "2026-09-01"; // questions: hf-breathing-lying-flat, anticoagulant-bleeding, dizzy-on-standing
+const DAY2 = "2026-09-02"; // after a calm DAY1: hf-ankle-swelling, morning-medicines, mood
 const rxnav = loadRxNavCache();
 
 const question = (id: string) => QUESTION_BANK.find((q) => q.id === id)!;
@@ -71,6 +75,16 @@ async function say(text: string, chatId = ME): Promise<SentMessage[]> {
   return messenger.sent.slice(before);
 }
 
+/** A button tap: the label as text, replying to the message that carried the button. */
+async function tap(label: string, on: SentMessage | undefined): Promise<SentMessage[]> {
+  if (!on) throw new Error(`no message to tap "${label}" on`);
+  const before = messenger.sent.length;
+  inbound += 1;
+  const message: InboundMessage = { chatId: ME, messageId: `in_${inbound}`, text: label, replyTo: on.messageId, at: now };
+  await engine.handleInbound(message);
+  return messenger.sent.slice(before);
+}
+
 const brief = (messages: SentMessage[]) => messages.map(({ chatId, text, buttons }) => ({ chatId, text, buttons }));
 const msg = (chatId: string, text: string, buttons?: string[]) => ({ chatId, text, buttons });
 const flagsByRule = () => new Map(openFlags(db, P).map((f) => [f.ruleId, f] as [string, FlagSummary]));
@@ -80,7 +94,7 @@ beforeEach(() => setup());
 describe("a full Harriet day", () => {
   it("greeting, three answers, flag offer, tell me more, I'll ask my doctor, done, family status", async () => {
     setSharing(db, P, "all");
-    expect(await engine.startDay(P, DAY1)).toEqual({ kind: "sent", questionIds: ["dizzy-on-standing", "morning-medicines", "mood"] });
+    expect(await engine.startDay(P, DAY1)).toEqual({ kind: "sent", questionIds: ["hf-breathing-lying-flat", "anticoagulant-bleeding", "dizzy-on-standing"] });
     expect(brief(messenger.sent)).toEqual([msg(ME, checkinGreeting("Harriet", 3), [BUTTON.start, BUTTON.notToday])]);
 
     // Snapshot saved and flags synced: R1, R3, R4 all medium, so R1 (oldest id) first.
@@ -89,22 +103,22 @@ describe("a full Harriet day", () => {
     expect([...flags.keys()].sort()).toEqual(["R1", "R3", "R4"]);
     const r1 = flags.get("R1")!;
 
+    const breathing = question("hf-breathing-lying-flat");
+    const bleeding = question("anticoagulant-bleeding");
     const dizzy = question("dizzy-on-standing");
-    const meds = question("morning-medicines");
-    const mood = question("mood");
 
-    expect(brief(await say("Let's start"))).toEqual([msg(ME, dizzy.text, dizzy.buttons)]);
+    expect(brief(await say("Let's start"))).toEqual([msg(ME, breathing.text, breathing.buttons)]);
     now = `${DAY1}T09:01:00.000Z`;
-    expect(brief(await say("No"))).toEqual([msg(ME, meds.text, meds.buttons)]);
-    expect(brief(await say(" yes "))).toEqual([msg(ME, mood.text, mood.buttons)]); // trimmed, case-insensitive
-    expect(brief(await say("Good"))).toEqual([msg(ME, flagOffer(), [BUTTON.tellMeMore, BUTTON.later])]);
+    expect(brief(await say("No"))).toEqual([msg(ME, bleeding.text, bleeding.buttons)]);
+    expect(brief(await say(" no "))).toEqual([msg(ME, dizzy.text, dizzy.buttons)]); // trimmed, case-insensitive
+    expect(brief(await say("No"))).toEqual([msg(ME, flagOffer(), [BUTTON.tellMeMore, BUTTON.later])]);
 
     let row = getCheckin(db, P, DAY1)!;
-    expect(row).toMatchObject({ status: "answered", step: "flag_offer", pendingFlagId: Number(r1.flagId), mood: "Good", finishedAt: null });
+    expect(row).toMatchObject({ status: "answered", step: "flag_offer", pendingFlagId: Number(r1.flagId), mood: null, finishedAt: null });
     expect(row.answers.map((a) => [a.questionId, a.answer])).toEqual([
+      ["hf-breathing-lying-flat", "No"],
+      ["anticoagulant-bleeding", "No"],
       ["dizzy-on-standing", "No"],
-      ["morning-medicines", "Yes"],
-      ["mood", "Good"],
     ]);
     expect(db.prepare("SELECT offered_on FROM flags WHERE id = ?").get(Number(r1.flagId))).toEqual({ offered_on: DAY1 });
 
@@ -133,32 +147,32 @@ describe("a full Harriet day", () => {
 
   it("at sharing level status the family gets only the outcome", async () => {
     await engine.startDay(P, DAY1);
-    for (const t of ["Let's start", "No", "Yes", "Okay", "Later"]) await say(t);
+    for (const t of ["Let's start", "No", "No", "Sometimes", "Later"]) await say(t);
     const family = messenger.inChat(FAMILY);
     expect(family.map((m) => m.text)).toEqual([
       familyDailyStatus({ seniorName: "Harriet", sharing: "status", outcome: "checked_in", answers: [], flags: [] }),
     ]);
-    expect(family[0]!.text).not.toContain(question("mood").text);
+    expect(family[0]!.text).not.toContain(question("dizzy-on-standing").text);
   });
 
   it("day 2 offers the next new flag and never the noted one", async () => {
     await engine.startDay(P, DAY1);
-    for (const t of ["Let's start", "No", "Yes", "Good", "Tell me more", "I'll ask my doctor"]) await say(t);
+    for (const t of ["Let's start", "No", "No", "No", "Tell me more", "I'll ask my doctor"]) await say(t);
     const r3 = flagsByRule().get("R3")!;
 
     now = `${DAY2}T09:00:00.000Z`;
     expect(await engine.startDay(P, DAY2)).toMatchObject({ kind: "sent" });
     // Same evidence, so the noted flag is unchanged rather than re-raised.
     expect(flagsByRule().get("R1")?.status).toBe("noted");
-    for (const t of ["Let's start", "No", "No"]) await say(t);
-    expect(brief(await say("No"))).toEqual([msg(ME, flagOffer(), [BUTTON.tellMeMore, BUTTON.later])]);
+    for (const t of ["Let's start", "No", "Yes"]) await say(t);
+    expect(brief(await say("Good"))).toEqual([msg(ME, flagOffer(), [BUTTON.tellMeMore, BUTTON.later])]);
     expect(getCheckin(db, P, DAY2)?.pendingFlagId).toBe(Number(r3.flagId));
     expect(brief(await say("Tell me more"))).toEqual([msg(ME, flagDetail(r3.message), [BUTTON.willAskDoctor, BUTTON.later])]);
   });
 
   it("Later keeps the flag new and offers it again the next day", async () => {
     await engine.startDay(P, DAY1);
-    for (const t of ["Let's start", "No", "Yes", "Good"]) await say(t);
+    for (const t of ["Let's start", "No", "No", "No"]) await say(t);
     const r1 = flagsByRule().get("R1")!;
     expect(brief(await say("later"))).toEqual([
       msg(ME, checkinDone("Harriet"), [SHARING_MENU_BUTTON]),
@@ -168,13 +182,13 @@ describe("a full Harriet day", () => {
 
     now = `${DAY2}T09:00:00.000Z`;
     await engine.startDay(P, DAY2);
-    for (const t of ["Let's start", "No", "No", "No"]) await say(t);
+    for (const t of ["Let's start", "No", "Yes", "Good"]) await say(t);
     expect(getCheckin(db, P, DAY2)).toMatchObject({ step: "flag_offer", pendingFlagId: Number(r1.flagId) });
   });
 
   it("Later after hearing the detail leaves the flag told", async () => {
     await engine.startDay(P, DAY1);
-    for (const t of ["Let's start", "No", "Yes", "Good", "Tell me more"]) await say(t);
+    for (const t of ["Let's start", "No", "No", "No", "Tell me more"]) await say(t);
     expect(brief(await say("Later"))[0]).toEqual(msg(ME, checkinDone("Harriet"), [SHARING_MENU_BUTTON]));
     expect(flagsByRule().get("R1")?.status).toBe("told");
   });
@@ -182,12 +196,191 @@ describe("a full Harriet day", () => {
   it("no new flag to offer: done right after the last answer", async () => {
     await engine.startDay(P, DAY1);
     db.prepare("UPDATE flags SET status = 'noted', noted_at = ?").run(now);
-    for (const t of ["Let's start", "No", "Yes"]) await say(t);
-    expect(brief(await say("Good"))).toEqual([
+    for (const t of ["Let's start", "No", "No"]) await say(t);
+    expect(brief(await say("No"))).toEqual([
       msg(ME, checkinDone("Harriet"), [SHARING_MENU_BUTTON]),
       msg(FAMILY, familyDailyStatus({ seniorName: "Harriet", sharing: "status", outcome: "checked_in", answers: [], flags: [] })),
     ]);
     expect(getCheckin(db, P, DAY1)).toMatchObject({ status: "answered", step: "done" });
+  });
+});
+
+describe("red-flag questions across days", () => {
+  const RED = ["hf-breathing-lying-flat", "anticoagulant-bleeding"];
+  const at = (day: string) => {
+    now = `${day}T09:00:00.000Z`;
+  };
+
+  /** Starts the day and answers each question with answers[id] (else its first, calm button). */
+  async function checkIn(day: string, answers: Record<string, string> = {}): Promise<string[]> {
+    at(day);
+    const result = await engine.startDay(P, day);
+    if (result.kind !== "sent") throw new Error(`no check-in on ${day}`);
+    await say("Let's start");
+    for (const id of result.questionIds) await say(answers[id] ?? question(id).buttons[0]!);
+    await say("Later"); // the flag offer, if any; nothing pending otherwise
+    return result.questionIds;
+  }
+
+  it("four days: asked on day 1, rested on day 2, then daily after a worrying answer", async () => {
+    expect(await checkIn("2026-09-01")).toEqual(["hf-breathing-lying-flat", "anticoagulant-bleeding", "dizzy-on-standing"]);
+    // Answered yesterday: no red-flag questions today. Her ankles are "A little" swollen.
+    expect(await checkIn("2026-09-02", { "hf-ankle-swelling": "A little" })).toEqual(["hf-ankle-swelling", "morning-medicines", "mood"]);
+    // Due again (2 days), and the swelling is followed up.
+    expect(await checkIn("2026-09-03")).toEqual(["hf-ankle-swelling", "hf-breathing-lying-flat", "anticoagulant-bleeding"]);
+    // Breathing again the next day because of the swelling; bleeding rests (answered yesterday).
+    expect(await checkIn("2026-09-04")).toEqual(["hf-ankle-swelling", "hf-breathing-lying-flat", "dizzy-on-standing"]);
+  });
+
+  it("a calm second day asks no red-flag questions; the third asks both again", async () => {
+    await checkIn("2026-09-01");
+    expect((await checkIn("2026-09-02")).filter((id) => RED.includes(id))).toEqual([]);
+    expect((await checkIn("2026-09-03")).filter((id) => RED.includes(id))).toEqual(RED);
+  });
+
+  it('a "not today" or missed day doesn\'t count as asked, so the questions stay due', async () => {
+    await engine.startDay(P, "2026-09-01");
+    await say("Not today");
+    at("2026-09-02");
+    expect((await engine.startDay(P, "2026-09-02")).kind).toBe("sent");
+    expect(getCheckin(db, P, "2026-09-02")?.questionIds.filter((id) => RED.includes(id))).toEqual(RED);
+    await engine.runMissedCheckin(P, "2026-09-02");
+    at("2026-09-03");
+    await engine.startDay(P, "2026-09-03");
+    expect(getCheckin(db, P, "2026-09-03")?.questionIds.filter((id) => RED.includes(id))).toEqual(RED);
+  });
+});
+
+describe("stale button taps", () => {
+  const breathing = question("hf-breathing-lying-flat");
+  const bleeding = question("anticoagulant-bleeding");
+  const dizzy = question("dizzy-on-standing");
+  const sentText = (text: string) => messenger.sent.find((m) => m.chatId === ME && m.text === text);
+  const answers = () => getCheckin(db, P, DAY1)!.answers.map((a) => [a.questionId, a.answer]);
+
+  it("a tap on the message that is waiting answers it, and each prompt is remembered with its step", async () => {
+    await engine.startDay(P, DAY1);
+    const greeting = messenger.lastIn(ME)!;
+    expect(getCheckinPrompt(db, greeting.messageId)).toMatchObject({ step: "greeting", questionIndex: 0 });
+    expect(brief(await tap("Let's start", greeting))).toEqual([msg(ME, breathing.text, breathing.buttons)]);
+    expect(getCheckinPrompt(db, messenger.lastIn(ME)!.messageId)).toMatchObject({ step: "question", questionIndex: 0 });
+    expect(brief(await tap("No", messenger.lastIn(ME)))).toEqual([msg(ME, bleeding.text, bleeding.buttons)]);
+    expect(answers()).toEqual([["hf-breathing-lying-flat", "No"]]);
+  });
+
+  it("a tap on an earlier question re-sends the pending one and records nothing", async () => {
+    await engine.startDay(P, DAY1);
+    await tap("Let's start", messenger.lastIn(ME));
+    const first = messenger.lastIn(ME)!;
+    await tap("No", first);
+    // On the bleeding question, she taps "Yes" on the breathing question again.
+    expect(brief(await tap("Yes", first))).toEqual([msg(ME, bleeding.text, bleeding.buttons)]);
+    expect(answers()).toEqual([["hf-breathing-lying-flat", "No"]]);
+    expect(getCheckin(db, P, DAY1)).toMatchObject({ step: "question", questionIndex: 1 });
+    expect(messenger.inChat(FAMILY)).toEqual([]); // no red flag from a stale "Yes"
+    // The original bleeding question still works (the re-sent one does too, below).
+    expect(brief(await tap("No", sentText(bleeding.text)))).toEqual([msg(ME, dizzy.text, dizzy.buttons)]);
+    expect(answers()).toEqual([
+      ["hf-breathing-lying-flat", "No"],
+      ["anticoagulant-bleeding", "No"],
+    ]);
+  });
+
+  it("a tap on a didn't-understand message or a re-sent question answers it", async () => {
+    await engine.startDay(P, DAY1);
+    await say("Let's start");
+    const original = messenger.lastIn(ME)!;
+    const unclear = (await say("what?"))[0]!;
+    expect(unclear.buttons).toEqual(breathing.buttons);
+    expect(brief(await tap("No", unclear))).toEqual([msg(ME, bleeding.text, bleeding.buttons)]);
+    await say("Sharing");
+    const again = (await say("Just check-ins")).at(-1)!; // the bleeding question comes again
+    expect(again.text).toBe(bleeding.text);
+    expect(brief(await tap("No", again))).toEqual([msg(ME, dizzy.text, dizzy.buttons)]);
+    expect(brief(await tap("No", original))).toEqual([msg(ME, dizzy.text, dizzy.buttons)]); // now stale
+    expect(answers()).toHaveLength(2);
+  });
+
+  it("typed text matching a label (no replyTo) still answers whatever is pending", async () => {
+    await engine.startDay(P, DAY1);
+    await tap("Let's start", messenger.lastIn(ME));
+    await say("No");
+    await say("no");
+    expect(answers()).toEqual([
+      ["hf-breathing-lying-flat", "No"],
+      ["anticoagulant-bleeding", "No"],
+    ]);
+  });
+
+  it('"Not today" on the greeting while she is on question 2 still ends the day', async () => {
+    await engine.startDay(P, DAY1);
+    const greeting = messenger.lastIn(ME)!;
+    await tap("Let's start", greeting);
+    await tap("No", messenger.lastIn(ME));
+    expect(brief(await tap("Not today", greeting))).toEqual([
+      msg(ME, notTodayReply("Harriet")),
+      msg(FAMILY, familyDailyStatus({ seniorName: "Harriet", sharing: "status", outcome: "not_today", answers: [], flags: [] })),
+    ]);
+    expect(getCheckin(db, P, DAY1)).toMatchObject({ status: "skipped", step: "done" });
+    expect(answers()).toHaveLength(1);
+  });
+
+  it("taps on yesterday's messages don't touch today's check-in, Sharing still works from them", async () => {
+    await engine.startDay(P, DAY1);
+    const yesterdayGreeting = messenger.lastIn(ME)!;
+    for (const t of ["Let's start", "No", "No", "No"]) await say(t);
+    const yesterdayOffer = messenger.lastIn(ME)!;
+    const done = (await say("Later"))[0]!;
+
+    now = `${DAY2}T09:00:00.000Z`;
+    await engine.startDay(P, DAY2);
+    const greeting = messenger.lastIn(ME)!;
+    expect(brief(await tap("Not today", yesterdayGreeting))).toEqual([msg(ME, greeting.text, greeting.buttons)]);
+    expect(getCheckin(db, P, DAY2)).toMatchObject({ status: "sent", step: "greeting" });
+    await say("Let's start");
+    const ankle = question("hf-ankle-swelling");
+    expect(brief(await tap("Later", yesterdayOffer))).toEqual([msg(ME, ankle.text, ankle.buttons)]);
+    expect(brief(await tap("No", done))).toEqual([msg(ME, ankle.text, ankle.buttons)]); // a message with no check-in buttons
+    expect(getCheckin(db, P, DAY2)?.answers).toEqual([]);
+    // "Sharing" from yesterday's last message opens the menu (and the question comes back after a pick).
+    expect((await tap(SHARING_MENU_BUTTON, done))[0]?.buttons).toHaveLength(3);
+  });
+
+  it("I'll ask my doctor on the paper result goes to the paper check, even while the check-in shows a flag", async () => {
+    const paper = JSON.parse(readFileSync(join(FIXTURES_DIR, "papers", "harriet-discharge.extracted.json"), "utf8")) as ExtractedPaper;
+    await engine.startDay(P, DAY1);
+    for (const t of ["Let's start", "No", "No", "No", "Tell me more"]) await say(t);
+    const r1Detail = messenger.lastIn(ME)!;
+    await engine.startPaperCheck(P, paper);
+    await tap("Yes, that's right", messenger.lastIn(ME));
+    const r6Result = messenger.lastIn(ME)!;
+    expect(r6Result.buttons).toContain(BUTTON.willAskDoctor);
+
+    const sent = await tap(BUTTON.willAskDoctor, r6Result);
+    expect(flagsByRule().get("R6")?.status).toBe("noted");
+    expect(flagsByRule().get("R1")?.status).toBe("told");
+    expect(brief(sent).at(-1)).toEqual(msg(ME, r1Detail.text, r1Detail.buttons)); // the check-in's flag comes again
+    await tap(BUTTON.willAskDoctor, r1Detail);
+    expect(flagsByRule().get("R1")?.status).toBe("noted");
+    expect(getCheckin(db, P, DAY1)?.step).toBe("done");
+  });
+
+  it("a stale tap with nothing pending does nothing", async () => {
+    await engine.startDay(P, DAY1);
+    const greeting = messenger.lastIn(ME)!;
+    await say("Not today");
+    expect(await tap("Let's start", greeting)).toEqual([]);
+  });
+
+  it("a tap on the flag offer after it moved on to the detail re-sends the detail", async () => {
+    await engine.startDay(P, DAY1);
+    for (const t of ["Let's start", "No", "No", "No"]) await say(t);
+    const offer = messenger.lastIn(ME)!;
+    const detail = (await tap("Tell me more", offer))[0]!;
+    expect(brief(await tap("Later", offer))).toEqual([msg(ME, detail.text, detail.buttons)]);
+    expect(getCheckin(db, P, DAY1)?.step).toBe("flag_detail");
+    await tap(BUTTON.willAskDoctor, detail);
+    expect(flagsByRule().get("R1")?.status).toBe("noted");
   });
 });
 
@@ -220,10 +413,8 @@ describe("Not today", () => {
 
 describe("red flags", () => {
   async function toBreathingQuestion() {
-    now = `${DAY2}T09:00:00.000Z`;
-    await engine.startDay(P, DAY2);
-    await say("Let's start");
-    await say("No"); // ankle swelling
+    await engine.startDay(P, DAY1);
+    await say("Let's start"); // breathing lying flat comes first
   }
   const breathing = question("hf-breathing-lying-flat");
   const bleeding = question("anticoagulant-bleeding");
@@ -232,7 +423,7 @@ describe("red flags", () => {
     await toBreathingQuestion();
     const sent = await say("Yes");
     expect(brief(sent)).toEqual([
-      msg(ME, redFlagAdvice("Harriet")),
+      msg(ME, redFlagAdvice("Harriet", ["Sarah"])), // names the linked family member
       msg(FAMILY, familyRedFlagAlert({ seniorName: "Harriet", sharing: "status", questionText: breathing.text, answer: "Yes" })),
       msg(ME, bleeding.text, bleeding.buttons),
     ]);
@@ -251,14 +442,23 @@ describe("red flags", () => {
     expect(sent[1]!.text).toContain(breathing.text);
   });
 
+  it("with no family chat linked, her advice doesn't claim anyone was told", async () => {
+    db.prepare("UPDATE family_members SET chat_id = NULL").run();
+    await toBreathingQuestion();
+    const sent = await say("Yes");
+    expect(sent[0]!.text).toBe(redFlagAdvice("Harriet", []));
+    expect(sent[0]!.text.toLowerCase()).not.toContain("family");
+    expect(sent[0]!.text).toContain("911");
+  });
+
   it("two red flags in one check-in alert twice, each once", async () => {
     await toBreathingQuestion();
     await say("Yes");
     await say("Yes"); // bleeding
     const alert = familyRedFlagAlert({ seniorName: "Harriet", sharing: "status", questionText: bleeding.text, answer: "Yes" });
     expect(messenger.inChat(FAMILY).filter((m) => m.text === alert)).toHaveLength(2);
-    expect(messenger.inChat(ME).filter((m) => m.text === redFlagAdvice("Harriet"))).toHaveLength(2);
-    expect(getCheckin(db, P, DAY2)?.answers.map((a) => a.answer)).toEqual(["No", "Yes", "Yes"]);
+    expect(messenger.inChat(ME).filter((m) => m.text === redFlagAdvice("Harriet", ["Sarah"]))).toHaveLength(2);
+    expect(getCheckin(db, P, DAY1)?.answers.map((a) => a.answer)).toEqual(["Yes", "Yes"]);
   });
 });
 
@@ -288,8 +488,8 @@ describe("idempotency and robustness", () => {
   it("unrecognised text while a question is pending gets the buttons again and nothing else", async () => {
     await engine.startDay(P, DAY1);
     await say("Let's start");
-    const dizzy = question("dizzy-on-standing");
-    expect(brief(await say("what?"))).toEqual([msg(ME, didntUnderstand(dizzy.buttons), dizzy.buttons)]);
+    const breathing = question("hf-breathing-lying-flat");
+    expect(brief(await say("what?"))).toEqual([msg(ME, didntUnderstand(breathing.buttons), breathing.buttons)]);
     expect(getCheckin(db, P, DAY1)).toMatchObject({ step: "question", questionIndex: 0, answers: [] });
     expect(brief(await say("hello"))).toHaveLength(1); // each unclear message gets its own reply
   });
@@ -297,7 +497,7 @@ describe("idempotency and robustness", () => {
   it("unrecognised text at the greeting and at the flag offer", async () => {
     await engine.startDay(P, DAY1);
     expect(brief(await say("hmm"))).toEqual([msg(ME, didntUnderstand([BUTTON.start, BUTTON.notToday]), [BUTTON.start, BUTTON.notToday])]);
-    for (const t of ["Let's start", "No", "Yes", "Good"]) await say(t);
+    for (const t of ["Let's start", "No", "No", "No"]) await say(t);
     expect(brief(await say("maybe"))).toEqual([msg(ME, didntUnderstand([BUTTON.tellMeMore, BUTTON.later]), [BUTTON.tellMeMore, BUTTON.later])]);
   });
 
@@ -333,27 +533,25 @@ describe("family chats (one per family member)", () => {
     syncFamilyMembers(db, P, ["sarah", "tom"]);
     linkFamilyMember(db, "tom", TOM, "Tom", now);
     const send = vi.spyOn(messenger, "send");
-    now = `${DAY2}T09:00:00.000Z`;
-    await engine.startDay(P, DAY2);
+    await engine.startDay(P, DAY1);
     await say("Let's start");
-    await say("No"); // ankle swelling
     const breathing = question("hf-breathing-lying-flat");
     const alert = familyRedFlagAlert({ seniorName: "Harriet", sharing: "status", questionText: breathing.text, answer: "Yes" });
     const sent = await say("Yes"); // red flag
     expect(brief(sent)).toEqual([
-      msg(ME, redFlagAdvice("Harriet")),
+      msg(ME, redFlagAdvice("Harriet", ["Sarah", "Tom"])),
       msg(FAMILY, alert),
       msg(TOM, alert),
       msg(ME, question("anticoagulant-bleeding").text, question("anticoagulant-bleeding").buttons),
     ]);
-    for (const t of ["No", "Later"]) await say(t);
+    for (const t of ["No", "No", "Later"]) await say(t);
     expect(messenger.inChat(FAMILY).map((m) => m.text)).toEqual([alert, statusText]);
     expect(messenger.inChat(TOM).map((m) => m.text)).toEqual([alert, statusText]);
     expect(familyKeys(send)).toEqual([
-      [FAMILY, `${P}:${DAY2}:red-flag:hf-breathing-lying-flat:family:sarah`],
-      [TOM, `${P}:${DAY2}:red-flag:hf-breathing-lying-flat:family:tom`],
-      [FAMILY, `${P}:${DAY2}:status:family:sarah`],
-      [TOM, `${P}:${DAY2}:status:family:tom`],
+      [FAMILY, `${P}:${DAY1}:red-flag:hf-breathing-lying-flat:family:sarah`],
+      [TOM, `${P}:${DAY1}:red-flag:hf-breathing-lying-flat:family:tom`],
+      [FAMILY, `${P}:${DAY1}:status:family:sarah`],
+      [TOM, `${P}:${DAY1}:status:family:tom`],
     ]);
   });
 
@@ -389,7 +587,7 @@ describe("family chats (one per family member)", () => {
   it("with no family member linked, family sends are skipped and her check-in carries on", async () => {
     db.prepare("UPDATE family_members SET chat_id = NULL").run();
     await engine.startDay(P, DAY1);
-    for (const t of ["Let's start", "No", "Yes", "Good"]) await say(t);
+    for (const t of ["Let's start", "No", "No", "No"]) await say(t);
     expect(brief(await say("Later"))).toEqual([msg(ME, checkinDone("Harriet"), [SHARING_MENU_BUTTON])]);
     expect(await engine.runMissedCheckin(P, DAY1)).toBe("nothing_to_do");
     expect(messenger.sent.every((m) => m.chatId === ME)).toBe(true);
@@ -415,10 +613,8 @@ describe("family chats (one per family member)", () => {
       if (chatId === FAMILY) throw new Error("Sarah blocked the agent");
       return realSend(chatId, message, key);
     });
-    now = `${DAY2}T09:00:00.000Z`;
-    await engine.startDay(P, DAY2);
+    await engine.startDay(P, DAY1);
     await say("Let's start");
-    await say("No");
     await expect(engine.handleInbound({ chatId: ME, messageId: "red_1", text: "Yes", at: now })).rejects.toThrow("Sarah blocked the agent");
     expect(messenger.inChat(TOM)).toHaveLength(1);
     expect(messenger.lastIn(ME)?.text).toBe(question("anticoagulant-bleeding").text);
@@ -455,7 +651,7 @@ describe("missed check-in", () => {
   it("she can still check in after it was marked missed", async () => {
     await engine.startDay(P, DAY1);
     await engine.runMissedCheckin(P, DAY1);
-    for (const t of ["Let's start", "No", "Yes", "Good", "Later"]) await say(t);
+    for (const t of ["Let's start", "No", "No", "No", "Later"]) await say(t);
     expect(getCheckin(db, P, DAY1)).toMatchObject({ status: "answered", step: "done" });
     expect(messenger.lastIn(FAMILY)?.text).toBe(
       familyDailyStatus({ seniorName: "Harriet", sharing: "status", outcome: "checked_in", answers: [], flags: [] }),
@@ -480,6 +676,30 @@ describe("record consent ended", () => {
     expect(messenger.sent.every((m) => m.buttons === undefined)).toBe(true);
     expect(messenger.sent[0]!.text).toContain("Harriet");
     for (const m of messenger.sent) expect(m.text).not.toMatch(/\u2014/);
+  });
+
+  it("410 deletes her stored flags too; check-ins stay, and a flag left on offer just ends the check-in", async () => {
+    let consentEnded = false;
+    setup(async (subject) => {
+      if (consentEnded) throw new ConsentInactiveError(410, "consent_inactive", "Consent is no longer active");
+      return loadSnapshot(subject);
+    });
+    await engine.startDay(P, DAY1);
+    for (const t of ["Let's start", "No", "No", "No"]) await say(t); // R1 on offer
+    expect(openFlags(db, P).length).toBeGreaterThan(0);
+
+    consentEnded = true;
+    now = `${DAY2}T09:00:00.000Z`;
+    expect(await engine.startDay(P, DAY2)).toEqual({ kind: "record_consent_ended" });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM flags WHERE patient_id = ?").get(P)).toEqual({ n: 0 });
+    expect(latestSnapshot(db, P)).toBeUndefined();
+    expect(getCheckin(db, P, DAY1)).toMatchObject({ step: "flag_offer", pendingFlagId: null, answers: [{}, {}, {}] });
+
+    // Yesterday's offer has nothing left to tell: the check-in ends without one.
+    expect(brief(await say("Tell me more"))).toEqual([
+      msg(ME, checkinDone("Harriet"), [SHARING_MENU_BUTTON]),
+      msg(FAMILY, familyDailyStatus({ seniorName: "Harriet", sharing: "status", outcome: "checked_in", answers: [], flags: [] })),
+    ]);
   });
 
   it("other loading errors are not swallowed", async () => {

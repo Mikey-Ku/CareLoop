@@ -44,8 +44,19 @@ export function notTodayReply(name: string): string {
   return `That's fine, ${name}. I'll check in again tomorrow. Have a good day.`;
 }
 
-export function redFlagAdvice(name: string): string {
-  return `Thank you for telling me, ${name}. Please call your doctor today about this. If it gets worse or feels like an emergency, call 911. I've let your family know so someone can check in with you.`;
+/**
+ * After a red-flag answer. Leads with who was told, then her doctor, then 911.
+ * `familyNames` are the family members whose chats got the alert: left out, it says
+ * "your family"; an empty list (nobody linked) says nothing about family, so she is
+ * never told someone was alerted when no one was. No pronouns for family members:
+ * the app doesn't know them.
+ */
+export function redFlagAdvice(name: string, familyNames?: string[]): string {
+  const names = familyNames?.map((n) => n.trim()).filter((n) => n.length > 0);
+  const who = names === undefined ? "your family" : names.length > 0 ? listJoin(names) : undefined;
+  const doctor = "call your doctor today about this.";
+  const first = who ? [`${name}, I've asked ${who} to check on you.`, `Please ${doctor}`] : [`${name}, please ${doctor}`];
+  return [...first, "If it gets worse or feels like an emergency, call 911."].join(" ");
 }
 
 export function flagOffer(): string {
@@ -75,8 +86,12 @@ export function didntUnderstand(buttons: string[]): string {
 /** After "No, something's off". */
 export const PAPER_REJECTED_REPLY =
   "Thank you for checking. I won't use what I read. Please bring the papers to your doctor or pharmacist so they can go over them with you.";
-/** After "Later" on the paper result. The flag stays new, so a later check-in offers it again. */
-export const PAPER_LATER_REPLY = "That's fine. I'll bring it up again another day.";
+/**
+ * After "Later" on the paper result. She has heard it, so the flag is told and is not
+ * offered again on its own (the same as "Later" after a check-in flag's detail).
+ */
+export const PAPER_LATER_REPLY =
+  "That's fine. When you can, please bring the papers to your doctor or pharmacist and ask about this.";
 /** No medicines were read off the papers. */
 export const PAPER_NOTHING_TO_COMPARE =
   "There were no medicines on the papers to compare with your medication list, so there's nothing to check.";
@@ -116,7 +131,7 @@ export function sharingLevelFromButton(label: string): SharingLevel | undefined 
 /** What the family sees at each level, finishing the sentence "Your family sees ...". */
 const SEES: Record<SharingLevel, string> = {
   status: "whether you checked in each day",
-  status_vitals: "whether you checked in each day, and whether your heart rate readings are in your usual range",
+  status_vitals: "whether you checked in each day, and how your heart rate checks went",
   all: "whether you checked in, your heart rate readings, your answers, and the things to ask your doctor about",
 };
 
@@ -142,7 +157,7 @@ export function sharingChangedSenior(level: SharingLevel): string {
 export function sharingChangedFamily(name: string, level: SharingLevel): string {
   const sees: Record<SharingLevel, string> = {
     status: `whether ${name} checked in each day`,
-    status_vitals: `whether ${name} checked in each day, and whether heart rate readings are in ${name}'s usual range`,
+    status_vitals: `whether ${name} checked in each day, and how ${name}'s heart rate checks went`,
     all: `${name}'s check-ins, heart rate readings, answers, and things to ask the doctor about`,
   };
   return `${name} changed what you see here. From now on: ${sees[level]}. Urgent alerts still come through as before.`;
@@ -157,8 +172,14 @@ export function familyDailyStatus(input: {
   outcome: DayOutcome;
   answers: AnsweredQuestion[];
   flags: { message: string }[];
-  /** Today's camera heart-rate reading, if any. Shown at "status_vitals" and "all" only. */
-  vitals?: { heartRate: number; inUsualRange: boolean };
+  /**
+   * Today's camera heart-rate reading, if any. Shown at "status_vitals" and "all" only.
+   * `inUsualRange` is left out when the reading isn't compared with her usual range
+   * (no usual range, or atrial fibrillation; see the packet's `usualRange.compareHeartRate`):
+   * then it is shown as an estimate only, with the number at "all" and without it at
+   * "status_vitals", which shows no numbers.
+   */
+  vitals?: { heartRate: number; inUsualRange?: boolean };
 }): string {
   const name = input.seniorName;
   const base =
@@ -170,9 +191,15 @@ export function familyDailyStatus(input: {
 
   let vitals = "";
   if (input.vitals && input.sharing !== "status") {
-    const where = input.vitals.inUsualRange ? `within ${name}'s usual range` : `outside ${name}'s usual range`;
-    const reading = input.sharing === "all" ? `${input.vitals.heartRate} beats a minute, ${where}` : where;
-    vitals = `Heart rate today: ${reading}. This is a camera estimate, not a medical test.`;
+    const { heartRate, inUsualRange } = input.vitals;
+    const estimate = "This is a camera estimate, not a medical test.";
+    if (inUsualRange === undefined) {
+      vitals = input.sharing === "all" ? `Heart rate today: about ${heartRate} beats a minute. ${estimate}` : `Heart rate checked today. ${estimate}`;
+    } else {
+      const where = inUsualRange ? `within ${name}'s usual range` : `outside ${name}'s usual range`;
+      const reading = input.sharing === "all" ? `${heartRate} beats a minute, ${where}` : where;
+      vitals = `Heart rate today: ${reading}. ${estimate}`;
+    }
   }
   if (input.sharing !== "all") return [base, vitals].filter(Boolean).join("\n\n");
 
@@ -194,10 +221,24 @@ export function familyRedFlagAlert(input: {
   questionText: string;
   answer: string;
 }): string {
-  // Wording at "status" is fixed by docs/DESIGN.md "Sharing levels and record consent".
-  const base = `${input.seniorName} reported something she should call her doctor about today. Please check in with her.`;
+  // No medical detail below "all" (docs/DESIGN.md "Sharing levels and record consent").
+  // It asks for a call today, matching what the senior hears (redFlagAdvice).
+  const base = `${input.seniorName} reported something she should call her doctor about. Please call ${input.seniorName} today to check on her.`;
   if (input.sharing !== "all") return base;
   return `${base}\n\nThe question was: ${input.questionText}\n${input.seniorName} answered: "${input.answer}"`;
+}
+
+/**
+ * The reply a family member gets the first time they message the agent (or add it),
+ * sent once when their family chat is linked.
+ */
+export function familyWelcome(seniorName: string): string {
+  return [
+    `Hello. I'm ${seniorName}'s check-in assistant. I'm an AI, not a person.`,
+    `Each day I'll send you an update on ${seniorName}'s check-in here.`,
+    `${seniorName} decides how much you see and can change it any time.`,
+    `If ${seniorName} tells me something urgent, you'll always hear about it here.`,
+  ].join(" ");
 }
 
 export function familyMissedAlert(seniorName: string, time: string): string {
