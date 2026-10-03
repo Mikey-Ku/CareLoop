@@ -24,6 +24,35 @@ The `.env` file lives at the repo root. Run 1 needs no keys: the FinchNode demo 
 
 For the Relay agent, set `PATIENT_RELAY_HANDLE` and `FAMILY_RELAY_HANDLES` in `.env`, then have the senior and each family member send the agent a message from their own Relay app. A Relay chat holds at most one person, so there is no family group: each family member gets updates in their own chat with the agent, starting once they have messaged it. `npm run relay:check` shows who has.
 
+## Try it on your phone (about 10 minutes)
+
+Each person runs their own agent: two programs on the same agent token take each other's messages.
+
+1. Install the Relay app on your phone and sign up.
+2. On your laptop: `npx relaymessenger@latest login`, then create your agent (pick your own handle, 3 to 32 lowercase letters, digits or underscores):
+   ```sh
+   npx relaymessenger agents create --handle yourname_checkin --name "Check-in Companion" --subtitle "Daily check-in assistant (AI)"
+   ```
+   It prints a `Profile:` name and your agent's link. Don't create a webhook subscription; the agent uses WebSocket.
+3. Put the token in `.env` without showing it (repo root; replace `yourname_checkin` with your profile):
+   ```sh
+   cp .env.example .env && TOKEN="$(npx relaymessenger auth token --profile yourname_checkin)" && sed -i '' "s|^RELAY_AGENT_TOKEN=.*|RELAY_AGENT_TOKEN=$TOKEN|" .env && unset TOKEN
+   ```
+4. Get a Gemini API key at https://aistudio.google.com (free tier is fine to try; synthetic data only) and add it the same way:
+   ```sh
+   read -rs 'KEY?Gemini API key: ' && echo && sed -i '' "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=$KEY|" .env && unset KEY
+   ```
+   Without a key everything still works with buttons only.
+5. In `.env`, set `PATIENT_RELAY_HANDLE` to your own Relay handle (you play Harriet). `FAMILY_RELAY_HANDLES` is optional (a second phone plays Sarah).
+6. Open your agent's link on your phone and send it "hi". Relay won't let the agent message you until you've written first.
+7. In `apps/server`: `npm run relay:check` (every line `[ok]`), then:
+   ```sh
+   CLOCK_DATE=2026-09-01 FOLLOW_UP_DELAY_MINUTES=2 npm run agent -- --checkin-now
+   ```
+   The check-in arrives on your phone. Type naturally ("ankles a bit puffy, slept ok") or tap. `CLOCK_DATE` pins the demo day (use a new date for each fresh check-in); `FOLLOW_UP_DELAY_MINUTES=2` makes the same-day follow-up arrive in 2 minutes instead of 3 hours. Stop with Ctrl-C.
+
+The commands above are for macOS (`sed -i ''`, zsh `read`). Your conversation is stored in `apps/server/data/app.db` (not in git).
+
 ## Usage
 
 All commands run in `apps/server`.
@@ -35,6 +64,10 @@ All commands run in `apps/server`.
 | `npm run packet -- patient-demo-polypharmacy` | Prints Harriet's context packet built from the recorded fixtures. Add `--live` to read the FinchNode demo API instead. |
 | `npm run record-fixtures` | Re-records the fixtures in `fixtures/` from the FinchNode demo API. |
 | `npm run dev` | Starts the server on `PORT` (default 3000). For now it serves only `GET /health`; `/webhooks/relay` answers 501 until run 2. |
+| `npm run relay:check` | Checks your Relay setup: token, no webhook subscriptions, who has messaged the agent. |
+| `npm run agent` | Runs the Relay agent (WebSocket, daily scheduler, free text through Gemini). `--checkin-now` sends today's check-in right away. |
+| `npm run llm:check` | One live call of each Gemini job, with timings. |
+| `npm run content:eval` | Runs 119 realistic messages through the safety screen and Gemini; writes `docs/content-eval.md`. |
 
 ### Simulator
 
