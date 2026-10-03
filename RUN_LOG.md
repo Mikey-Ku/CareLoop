@@ -181,8 +181,8 @@ Retest on the phone with `FOLLOW_UP_DELAY_MINUTES=2`; add a second phone as fami
 - Documented the spike result and current limitations in `FEEDBACK.md`.
 
 **What was skipped or changed from spec:**
-- No real video was committed. A human-provided 1620 x 1080, 56.45 second clip was smoke-tested with an authorized key. The corrected runner produced heart rate 72.05/min and breathing 11.88/min with no SDK errors, but combined confidence was 0 and validation briefly reported that the face was not forward.
-- The file runner now defaults to 33 ms interframe pacing, exposes `--interframe-delay-ms` and `--metrics pulse-breathing|all`, ignores SmartSpectra's initial idle status, waits for actual playback completion, coalesces repeated validation events, anchors relative file timestamps to the run start, preserves per-metric confidence/stability, and rejects zero-confidence readings as usable output.
+- No real video was committed. A human-provided 1620 x 1080, 56.45 second clip was smoke-tested with an authorized key. The corrected runner produced heart rate 71.44/min and breathing 11.88/min with no SDK errors; pulse confidence was 13.16, breathing confidence was 0, both stability flags were false, and validation briefly reported that the face was not forward.
+- The file runner now defaults to 33 ms interframe pacing, exposes `--interframe-delay-ms` and `--metrics pulse-breathing|all`, ignores SmartSpectra's initial idle status, waits for actual playback completion, coalesces repeated validation events, anchors relative file timestamps to the run start, and preserves per-metric confidence/stability without rejecting provisional zero-confidence readings. Native timestamp warnings remain an open quality issue for this Photo Booth file.
 - The Relay frame adapter is intentionally not wired into the live call handler because the call/vitals handler does not exist yet and the real `VideoStream` payload shape is unverified.
 - `.env.example` already contained the required empty `PRESAGE_API_KEY` entry, so it required no change.
 

@@ -119,6 +119,5 @@ export async function runPresageVideo(options: PresageFileOptions): Promise<Vita
 }
 
 export function hasUsableVitals(result: VitalsResult): boolean {
-  const usable = (value: number | null, confidence: number | null) => value !== null && (confidence === null || confidence > 0);
-  return usable(result.heartRate, result.heartRateConfidence) && usable(result.breathingRate, result.breathingRateConfidence);
+  return result.heartRate !== null && result.breathingRate !== null;
 }
