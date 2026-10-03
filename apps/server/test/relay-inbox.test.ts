@@ -1,6 +1,6 @@
 import type { Chat, MessageSendParams, RelayWebhookEvent, WebhookSubscription, WebSocketRunOptions } from "@relaymessenger/sdk";
 import { describe, expect, it, vi } from "vitest";
-import { familyWelcome } from "../src/checkin/copy.ts";
+import { familyWelcome, photoNotYet } from "../src/checkin/copy.ts";
 import { familyChats, familyMembers, linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import { openDatabase, upsertPatient, type Db } from "../src/db/index.ts";
 import { FakeMessenger } from "../src/relay/fake-messenger.ts";
@@ -222,8 +222,8 @@ describe("message.received", () => {
     expect(deps.engine.handleInbound).not.toHaveBeenCalled();
   });
 
-  it("skips a photo for now (run 6) without calling the engine", async () => {
-    const { db, inbox, engine, log } = setup();
+  it("answers a photo kindly (it can't be read yet), never reads its caption as an answer, and marks the chat Read", async () => {
+    const { db, inbox, engine, log, relay } = setup();
     const photo = textMessage({
       chatId: HARRIET_CHAT,
       parts: [
@@ -236,6 +236,25 @@ describe("message.received", () => {
     expect(engine.handleInbound).not.toHaveBeenCalled();
     expect(rows(db)[0]).toMatchObject({ processedAt: T, error: null });
     expect(log).toHaveBeenCalledWith("relay_media_skipped", expect.anything());
+    const messageId = (photo.data as { id: string }).id;
+    expect(relay.chats.messages.send).toHaveBeenCalledTimes(1);
+    expect(relay.chats.messages.send).toHaveBeenCalledWith(HARRIET_CHAT, {
+      message: { parts: [{ type: "text", value: photoNotYet("Harriet") }], idempotency_key: `harriet:photo:${messageId}` },
+    });
+    expect(relay.chats.markAsRead).toHaveBeenCalledWith(HARRIET_CHAT);
+  });
+
+  it("a photo in a family chat gets no reply", async () => {
+    const { db, inbox, relay } = setup();
+    linkFamilyMember(db, "sarah.demo", SARAH_CHAT, null, T);
+    const photo = textMessage({
+      chatId: SARAH_CHAT,
+      sender: "sarah.demo",
+      parts: [{ type: "media", id: nextId(), url: "https://files.example.org/signed", filename: "p.jpg", mime_type: "image/jpeg", size_bytes: 10, reactions: null }],
+    });
+    await inbox.onEvent(photo, { sequence: "1" });
+    await inbox.drain();
+    expect(relay.chats.messages.send).not.toHaveBeenCalled();
   });
 
   it("links her chat from her first message when contact.added never came", async () => {

@@ -29,6 +29,10 @@ Answered by Michael on 2026-10-03 (built in run 2c):
 
 Open:
 
+- [ ] Content eval on a held-out set: someone who hasn't seen `fixtures/content/messages.json` or the classifier prompt writes 50 new messages, so the accuracy numbers aren't flattered by tuning.
+
+- [ ] Safety phrase lists (`apps/server/src/safety/screen.ts`, crisis and urgent symptom): a demo starting point. Someone review them against `docs/content-eval.md` before the demo.
+
 - [ ] Red-flag cadence numbers: `redFlagEveryDays = 2` and `followUpDays = 3` in `apps/server/src/context/questions.ts`. Product values, not clinical cutoffs; change them if they feel wrong in rehearsal.
 
 ## Team tasks (humans only, not for Claude Code)

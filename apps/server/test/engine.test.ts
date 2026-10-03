@@ -17,6 +17,7 @@ import {
   redFlagAdvice,
   SHARING_MENU_BUTTON,
   smallTalkFallback,
+  typedReplyUnavailable,
 } from "../src/checkin/copy.ts";
 import { createCheckinEngine } from "../src/checkin/engine.ts";
 import type { CheckinEngine } from "../src/checkin/engine-types.ts";
@@ -427,7 +428,7 @@ describe("red flags", () => {
     await toBreathingQuestion();
     const sent = await say("Yes");
     expect(brief(sent)).toEqual([
-      msg(ME, redFlagAdvice("Harriet", ["Sarah"])), // names the linked family member
+      msg(ME, redFlagAdvice("Harriet", ["Sarah"], 2)), // names the linked family member, and the 2 questions to come
       msg(FAMILY, familyRedFlagAlert({ seniorName: "Harriet", sharing: "status", questionText: breathing.text, answer: "Yes" })),
       msg(ME, bleeding.text, bleeding.buttons),
     ]);
@@ -450,7 +451,7 @@ describe("red flags", () => {
     db.prepare("UPDATE family_members SET chat_id = NULL").run();
     await toBreathingQuestion();
     const sent = await say("Yes");
-    expect(sent[0]!.text).toBe(redFlagAdvice("Harriet", []));
+    expect(sent[0]!.text).toBe(redFlagAdvice("Harriet", [], 2));
     expect(sent[0]!.text.toLowerCase()).not.toContain("family");
     expect(sent[0]!.text).toContain("911");
   });
@@ -461,7 +462,8 @@ describe("red flags", () => {
     await say("Yes"); // bleeding
     const alert = familyRedFlagAlert({ seniorName: "Harriet", sharing: "status", questionText: bleeding.text, answer: "Yes" });
     expect(messenger.inChat(FAMILY).filter((m) => m.text === alert)).toHaveLength(2);
-    expect(messenger.inChat(ME).filter((m) => m.text === redFlagAdvice("Harriet", ["Sarah"]))).toHaveLength(2);
+    expect(messenger.inChat(ME).filter((m) => m.text === redFlagAdvice("Harriet", ["Sarah"], 2))).toHaveLength(1);
+    expect(messenger.inChat(ME).filter((m) => m.text === redFlagAdvice("Harriet", ["Sarah"], 1))).toHaveLength(1);
     expect(getCheckin(db, P, DAY1)?.answers.map((a) => a.answer)).toEqual(["Yes", "Yes"]);
   });
 });
@@ -493,25 +495,27 @@ describe("idempotency and robustness", () => {
     await engine.startDay(P, DAY1);
     for (const t of ["Let's start", "No", "No"]) await say(t);
     const dizzy = question("dizzy-on-standing");
-    expect(brief(await say("what?"))).toEqual([msg(ME, didntUnderstand(dizzy.buttons), dizzy.buttons)]);
+    // Without an LLM the trouble is ours, never "I didn't understand" her.
+    expect(brief(await say("what?"))).toEqual([msg(ME, typedReplyUnavailable(dizzy.buttons), dizzy.buttons)]);
     expect(getCheckin(db, P, DAY1)).toMatchObject({ step: "question", questionIndex: 2 });
     expect(getCheckin(db, P, DAY1)?.answers).toHaveLength(2);
     expect(brief(await say("hello"))).toHaveLength(1); // each unclear message gets its own reply
   });
 
-  it("unrecognised text on a red-flag question is quoted back with its buttons, even with no LLM", async () => {
+  it("unrecognised text on a red-flag question gets its buttons again with no LLM, and records nothing", async () => {
     await engine.startDay(P, DAY1);
     await say("Let's start");
     const breathing = question("hf-breathing-lying-flat");
-    expect(brief(await say("what?"))).toEqual([msg(ME, freeTextConfirm("what?", breathing.text), breathing.buttons)]);
+    expect(brief(await say("what?"))).toEqual([msg(ME, typedReplyUnavailable(breathing.buttons), breathing.buttons)]);
     expect(getCheckin(db, P, DAY1)).toMatchObject({ step: "question", questionIndex: 0, answers: [] });
+    expect(messenger.inChat(FAMILY)).toEqual([]);
   });
 
-  it("unrecognised text at the greeting and at the flag offer", async () => {
+  it("unrecognised text at the greeting and at the flag offer (no LLM)", async () => {
     await engine.startDay(P, DAY1);
-    expect(brief(await say("hmm"))).toEqual([msg(ME, didntUnderstand([BUTTON.start, BUTTON.notToday]), [BUTTON.start, BUTTON.notToday])]);
+    expect(brief(await say("hmm"))).toEqual([msg(ME, typedReplyUnavailable([BUTTON.start, BUTTON.notToday]), [BUTTON.start, BUTTON.notToday])]);
     for (const t of ["Let's start", "No", "No", "No"]) await say(t);
-    expect(brief(await say("maybe"))).toEqual([msg(ME, didntUnderstand([BUTTON.tellMeMore, BUTTON.later]), [BUTTON.tellMeMore, BUTTON.later])]);
+    expect(brief(await say("maybe"))).toEqual([msg(ME, typedReplyUnavailable([BUTTON.tellMeMore, BUTTON.later]), [BUTTON.tellMeMore, BUTTON.later])]);
   });
 
   it("free text before any check-in gets the fixed small-talk reply (no LLM); a button label is ignored", async () => {
@@ -553,7 +557,7 @@ describe("family chats (one per family member)", () => {
     const alert = familyRedFlagAlert({ seniorName: "Harriet", sharing: "status", questionText: breathing.text, answer: "Yes" });
     const sent = await say("Yes"); // red flag
     expect(brief(sent)).toEqual([
-      msg(ME, redFlagAdvice("Harriet", ["Sarah", "Tom"])),
+      msg(ME, redFlagAdvice("Harriet", ["Sarah", "Tom"], 2)),
       msg(FAMILY, alert),
       msg(TOM, alert),
       msg(ME, question("anticoagulant-bleeding").text, question("anticoagulant-bleeding").buttons),

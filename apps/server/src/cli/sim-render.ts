@@ -61,7 +61,8 @@ export function renderTable(headers: string[], rows: string[][], maxWidth = 60):
 
 export const HELP_LINES = [
   "Type a number to tap that button on Harriet's latest message, or any other text to send it as Harriet.",
-  "With --llm, what she types is read by the LLM (an answer to a question, or a chat outside the check-in); without it, buttons only.",
+  "With --llm, what she types is read by the LLM (an answer, detail for her doctor, a medicine question, a message for family, chat);",
+  "without it, buttons only, plus the safety screen and an explicit yes on a red-flag question (no LLM needed). /as stands in for it.",
   "Each family member (--family, default sarah) has their own chat with the agent, shown as its own pane.",
   "Commands:",
   "  /help                 this list",
@@ -71,6 +72,9 @@ export const HELP_LINES = [
   "  /flags                stored flags and their status",
   "  /sharing [level]      she types \"Sharing\" (the menu); with a level she also taps it: status, status_vitals or all",
   "  /paper                start a paper check: read back her discharge paper; on Yes the engine compares it (R6)",
+  "  /later                jump to the next follow-up check-in (after a red flag or an urgent message) and send it",
+  "  /as KIND [answer]     read her next typed message as KIND (answer, more_detail, medicine_question, feeling_low,",
+  "                        urgent_symptom, crisis, family_message, chat) without an LLM; for answer, which button",
   "  /db                   row counts per table",
   "  /quit                 leave",
 ];

@@ -39,6 +39,52 @@ export type SmallTalkReply = {
   complaints: string[];
 };
 
+/**
+ * What kind of message she sent. The LLM sorts; fixed rules react (src/checkin/reactions).
+ * crisis and urgent_symptom are also caught by a fixed phrase screen (src/safety/screen.ts):
+ * either one triggers the reaction, so a model miss never hides an emergency.
+ */
+export type MessageKind =
+  | "answer" // answers the pending question
+  | "more_detail" // wants to explain more, or describes how the symptom felt
+  | "medicine_question" // asks about her medicines (stop, change, side effects)
+  | "feeling_low" // lonely, sad, grieving, worried
+  | "urgent_symptom" // chest pain, a fall, can't breathe, fainting, heavy bleeding now
+  | "crisis" // thoughts of self-harm or not wanting to live
+  | "family_message" // something meant for her family ("tell Sarah I love her")
+  | "chat"; // anything else: news, plans, off-topic
+
+export const MESSAGE_KINDS: readonly MessageKind[] = [
+  "answer",
+  "more_detail",
+  "medicine_question",
+  "feeling_low",
+  "urgent_symptom",
+  "crisis",
+  "family_message",
+  "chat",
+];
+
+export type ClassifyInput = {
+  seniorName: string;
+  message: string;
+  /** The question waiting for an answer, if any. */
+  pending?: { question: string; options: string[] } | undefined;
+};
+
+export type MessageClassification = {
+  kind: MessageKind;
+  /** kind "answer" only: one of pending.options exactly, or "unclear". */
+  answer?: string | undefined;
+  confidence: Confidence;
+  /** Health complaints she mentioned, her words. */
+  complaints: string[];
+  /** Life facts worth remembering, her words. */
+  memories: string[];
+  /** kind "family_message" only: what to pass on, her words. */
+  forFamily?: string | undefined;
+};
+
 export type LlmCallOptions = {
   /** Aborts the whole call, including retries and model fallbacks. */
   signal?: AbortSignal;
@@ -49,6 +95,8 @@ export interface LlmClient {
   readonly provider: string;
   mapAnswer(input: MapAnswerInput, options?: LlmCallOptions): Promise<AnswerMapping>;
   smallTalk(input: SmallTalkInput, options?: LlmCallOptions): Promise<SmallTalkReply>;
+  /** Sort one typed message. Never decides risk on its own: the fixed phrase screen runs first and wins. */
+  classifyMessage(input: ClassifyInput, options?: LlmCallOptions): Promise<MessageClassification>;
 }
 
 /** Every model in the chain failed or the time budget ran out. Callers fall back to buttons or a template. */

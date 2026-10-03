@@ -1,0 +1,28 @@
+# The red-flag conversation from the live run on 2026-10-03, with the new behaviour
+# (check-in date 2026-09-01, sharing "all" so Sarah sees the detail).
+# On the breathing question Harriet typed instead of tapping:
+#   "Not really but I have more info": detail, written down for her doctor, and the
+#     buttons come back (it used to re-send the same confirm).
+#   "Yes but it was weirder...": an explicit yes, so it counts as her "Yes" (a fixed
+#     rule, no LLM needed), with her words kept and shown to Sarah at "all".
+# She is thanked calmly, Sarah is alerted, the other questions still come, no flag is
+# offered today, and the closing says we'll check on her this afternoon. /later jumps
+# to that follow-up.
+# Offline, each /as line stands in for the LLM's reading of the next message. With
+# --llm, delete the /as lines to let Gemini read them.
+# npm run simulate -- --reset --sharing all --script ../../scripts/demo/harriet-red-flag-typed.txt
+#
+# Let's start
+1
+# Did you have trouble breathing when lying flat last night?
+/as more_detail
+Not really but I have more info
+/as more_detail
+Yes but it was weirder I don't know how to explainit
+# Have you had any unusual bruising or bleeding? -> No
+1
+# Have you felt dizzy when standing up? -> No
+1
+# This afternoon: "How is your breathing now?" -> About the same
+/later
+2

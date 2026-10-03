@@ -1,8 +1,10 @@
 import type {
   AnswerMapping,
+  ClassifyInput,
   LlmCallOptions,
   LlmClient,
   MapAnswerInput,
+  MessageClassification,
   SmallTalkInput,
   SmallTalkReply,
 } from "./types.ts";
@@ -15,11 +17,13 @@ import { LlmUnavailableError } from "./types.ts";
 export type FakeLlmScript = {
   mapAnswer?: (input: MapAnswerInput) => AnswerMapping | Error;
   smallTalk?: (input: SmallTalkInput) => SmallTalkReply | Error;
+  classifyMessage?: (input: ClassifyInput) => MessageClassification | Error;
 };
 
 export type FakeLlmCall =
   | { method: "mapAnswer"; input: MapAnswerInput }
-  | { method: "smallTalk"; input: SmallTalkInput };
+  | { method: "smallTalk"; input: SmallTalkInput }
+  | { method: "classifyMessage"; input: ClassifyInput };
 
 export class FakeLlmClient implements LlmClient {
   readonly provider = "fake";
@@ -50,6 +54,17 @@ export class FakeLlmClient implements LlmClient {
     return { ...result, memories: [...result.memories], complaints: [...result.complaints] };
   }
 
+  /** Unscripted: plain chat with low confidence, so the caller takes its safest default path. */
+  async classifyMessage(input: ClassifyInput, options?: LlmCallOptions): Promise<MessageClassification> {
+    this.calls.push({ method: "classifyMessage", input });
+    throwIfAborted(options);
+    const result: MessageClassification | Error = this.script.classifyMessage
+      ? this.script.classifyMessage(input)
+      : { kind: "chat", confidence: "low", complaints: [], memories: [] };
+    if (result instanceof Error) throw result;
+    return { ...result, complaints: [...result.complaints], memories: [...result.memories] };
+  }
+
   /** Inputs of the mapAnswer calls only, in order. */
   get mapAnswerCalls(): MapAnswerInput[] {
     return this.calls.flatMap((c) => (c.method === "mapAnswer" ? [c.input] : []));
@@ -58,6 +73,11 @@ export class FakeLlmClient implements LlmClient {
   /** Inputs of the smallTalk calls only, in order. */
   get smallTalkCalls(): SmallTalkInput[] {
     return this.calls.flatMap((c) => (c.method === "smallTalk" ? [c.input] : []));
+  }
+
+  /** Inputs of the classifyMessage calls only, in order. */
+  get classifyCalls(): ClassifyInput[] {
+    return this.calls.flatMap((c) => (c.method === "classifyMessage" ? [c.input] : []));
   }
 }
 

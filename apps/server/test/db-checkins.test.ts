@@ -12,7 +12,8 @@ import {
   recordCheckinPrompt,
   updateCheckin,
 } from "../src/db/checkins.ts";
-import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
+import { addFamilyRelay, linkFamilyMember, markFamilyRelayPassedOn, syncFamilyMembers, waitingFamilyRelays } from "../src/db/family.ts";
+import { MAX_NOTE_LENGTH, addCheckinNote, addVisitQuestion, checkinNotes, recentCheckinNotes, visitQuestions } from "../src/db/notes.ts";
 import { openDatabase, upsertPatient, type Db } from "../src/db/index.ts";
 
 const P = "harriet";
@@ -47,6 +48,7 @@ describe("checkins rows", () => {
       pendingFlagId: null,
       sentAt: T1,
       finishedAt: null,
+      concernAt: null,
     });
   });
 
@@ -61,6 +63,13 @@ describe("checkins rows", () => {
     updateCheckin(db, id, { answers, mood: "Good", step: "question", questionIndex: 0 });
     updateCheckin(db, id, { status: "answered", finishedAt: T1, step: "done" });
     expect(getCheckinById(db, id)).toMatchObject({ status: "answered", mood: "Good", answers, step: "done", finishedAt: T1 });
+  });
+
+  it("concernAt is stored and patched like the other fields", () => {
+    const id = insertCheckin(db, { patientId: P, date: "2026-09-01", questionIds: [], sentAt: T1 });
+    expect(getCheckinById(db, id)?.concernAt).toBeNull();
+    updateCheckin(db, id, { concernAt: T1 });
+    expect(getCheckinById(db, id)?.concernAt).toBe(T1);
   });
 
   it("keeps the status and step checks", () => {
@@ -149,5 +158,34 @@ describe("patients for the engine", () => {
     expect(patientForChat(db, "chat_family")).toBeUndefined();
     expect(patientForChat(db, "chat_nobody")).toBeUndefined();
     expect(getCheckinPatient(db, P)?.finchnodePatientId).toBe("patient-demo-polypharmacy");
+  });
+});
+
+describe("her notes, visit questions and family relays (migration 6)", () => {
+  it("notes belong to one question of one check-in; blanks are dropped, long ones cut, whitespace collapsed", () => {
+    const id = insertCheckin(db, { patientId: P, date: "2026-09-01", questionIds: ["hf-breathing-lying-flat"], sentAt: T1 });
+    expect(addCheckinNote(db, { patientId: P, checkinId: id, questionId: "hf-breathing-lying-flat", text: "  Not really  but I have\nmore info ", createdAt: T1 })).toBeTypeOf("number");
+    expect(addCheckinNote(db, { patientId: P, checkinId: id, questionId: "hf-breathing-lying-flat", text: "   ", createdAt: T1 })).toBeUndefined();
+    addCheckinNote(db, { patientId: P, checkinId: id, questionId: "hf-breathing-lying-flat", text: "x".repeat(MAX_NOTE_LENGTH + 5), createdAt: "2026-09-01T09:05:00Z" });
+    const notes = checkinNotes(db, id);
+    expect(notes.map((n) => n.text.length)).toEqual(["Not really but I have more info".length, MAX_NOTE_LENGTH]);
+    expect(notes[0]).toMatchObject({ patientId: P, checkinId: id, questionId: "hf-breathing-lying-flat", text: "Not really but I have more info", createdAt: T1 });
+    expect(recentCheckinNotes(db, P, 1).map((n) => n.text.length)).toEqual([MAX_NOTE_LENGTH]);
+    expect(() => addCheckinNote(db, { patientId: P, checkinId: 999, questionId: "q", text: "t", createdAt: T1 })).toThrow(/FOREIGN KEY/);
+  });
+
+  it("visit questions are kept in order", () => {
+    addVisitQuestion(db, { patientId: P, text: "can I skip the water pill on Sunday?", createdAt: T1 });
+    addVisitQuestion(db, { patientId: P, text: " ", createdAt: T1 });
+    addVisitQuestion(db, { patientId: P, text: "is the new pill why I'm dizzy?", createdAt: "2026-09-02T09:00:00Z" });
+    expect(visitQuestions(db, P).map((v) => v.text)).toEqual(["can I skip the water pill on Sunday?", "is the new pill why I'm dizzy?"]);
+  });
+
+  it("family relays wait until passed on", () => {
+    const waiting = addFamilyRelay(db, { patientId: P, text: "Tell Sarah I love her", createdAt: T1, passedOnAt: null });
+    addFamilyRelay(db, { patientId: P, text: "see you Sunday", createdAt: T1, passedOnAt: T1 });
+    expect(waitingFamilyRelays(db, P).map((r) => r.text)).toEqual(["Tell Sarah I love her"]);
+    markFamilyRelayPassedOn(db, waiting, "2026-09-01T10:00:00Z");
+    expect(waitingFamilyRelays(db, P)).toEqual([]);
   });
 });

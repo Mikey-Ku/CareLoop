@@ -171,6 +171,63 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX checkin_prompts_checkin ON checkin_prompts (checkin_id);
   `,
+  // 6: what she types, beyond answers (src/checkin/engine.ts "Typed messages").
+  // checkins.concern_at: when a red flag or a safety hit (crisis, urgent symptom) first came up in
+  // this check-in. Set, it means no flag offer that day and a closing that says she'll hear from us
+  // again. checkin_notes: her own words about a question ("it was weirder than that"), kept for her
+  // doctor's visit-prep sheet and shown to family only at sharing "all". visit_questions: medicine
+  // questions she asked, for her next visit. follow_ups: one later check-in after a red flag or a
+  // safety hit ("How is your breathing now?"). family_relays: things she asked us to pass on to her
+  // family; passed_on_at stays empty until a family chat is linked to take it.
+  `
+  ALTER TABLE checkins ADD COLUMN concern_at TEXT;
+
+  CREATE TABLE checkin_notes (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    checkin_id INTEGER NOT NULL REFERENCES checkins(id) ON DELETE CASCADE,
+    question_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX checkin_notes_checkin ON checkin_notes (checkin_id);
+  CREATE INDEX checkin_notes_patient ON checkin_notes (patient_id, created_at);
+
+  CREATE TABLE visit_questions (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX visit_questions_patient ON visit_questions (patient_id, created_at);
+
+  CREATE TABLE follow_ups (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    checkin_id INTEGER REFERENCES checkins(id) ON DELETE SET NULL,
+    -- the red-flag question id, "crisis", "urgent_symptom", or "general" when several came up
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    sent_at TEXT,
+    -- the sent follow-up message, so a tap on its buttons finds it
+    message_id TEXT,
+    answered_at TEXT,
+    answer TEXT
+  );
+  CREATE INDEX follow_ups_due ON follow_ups (due_at) WHERE sent_at IS NULL;
+  CREATE INDEX follow_ups_patient ON follow_ups (patient_id, sent_at);
+  CREATE UNIQUE INDEX follow_ups_message ON follow_ups (message_id) WHERE message_id IS NOT NULL;
+
+  CREATE TABLE family_relays (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    passed_on_at TEXT
+  );
+  CREATE INDEX family_relays_waiting ON family_relays (patient_id) WHERE passed_on_at IS NULL;
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

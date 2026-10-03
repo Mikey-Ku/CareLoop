@@ -23,13 +23,18 @@ export type CheckinRow = {
   pendingFlagId: number | null;
   sentAt: string | null;
   finishedAt: string | null;
+  /**
+   * When a red flag or a safety hit (crisis, urgent symptom) first came up in this check-in (migration 6).
+   * Set: no flag offer that day, and the closing says she'll hear from us again later.
+   */
+  concernAt: string | null;
 };
 
 type RawRow = Omit<CheckinRow, "answers" | "questionIds"> & { answersJson: string | null; questionIdsJson: string };
 
 const COLUMNS = `id, patient_id AS patientId, date, status, mood, answers_json AS answersJson,
   question_ids_json AS questionIdsJson, step, question_index AS questionIndex, pending_flag_id AS pendingFlagId,
-  sent_at AS sentAt, finished_at AS finishedAt`;
+  sent_at AS sentAt, finished_at AS finishedAt, concern_at AS concernAt`;
 
 function fromRaw(raw: RawRow | undefined): CheckinRow | undefined {
   if (!raw) return undefined;
@@ -76,6 +81,7 @@ export type CheckinPatch = Partial<{
   questionIndex: number;
   pendingFlagId: number | null;
   finishedAt: string | null;
+  concernAt: string | null;
 }>;
 
 const PATCH_COLUMNS: Record<keyof CheckinPatch, string> = {
@@ -86,6 +92,7 @@ const PATCH_COLUMNS: Record<keyof CheckinPatch, string> = {
   questionIndex: "question_index",
   pendingFlagId: "pending_flag_id",
   finishedAt: "finished_at",
+  concernAt: "concern_at",
 };
 
 export function updateCheckin(db: Db, id: number, patch: CheckinPatch): void {

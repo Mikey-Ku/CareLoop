@@ -19,8 +19,10 @@ export type EngineDeps = {
   /** Reads a FinchNode snapshot for a subject (live client or recorded fixture). Throws ConsentInactiveError on 410. */
   loadSnapshot(subject: string): Promise<HealthRecord>;
   /**
-   * Reads what she types instead of tapping (free text). Optional: without it a typed reply counts
-   * only when it equals a button label, as before, and a message outside a check-in gets a fixed reply.
+   * Reads what she types instead of tapping (free text): sorts each typed message into a kind
+   * (classifyMessage) and writes small talk. Optional: without it a typed reply counts only when it
+   * equals a button label (or is an explicit yes on a red-flag question), the safety screen still
+   * runs, and anything else gets a fixed reply. Read on every message, so a getter can swap it.
    */
   llm?: LlmClient | undefined;
 };
@@ -49,9 +51,10 @@ export interface CheckinEngine {
    * paper check's "Yes, that's right" / "No, something's off" and the R6 follow-up buttons.
    * A button tap whose replyTo is not the message waiting for an answer (a stale tap) re-sends the
    * current prompt instead of recording an answer; typed text without replyTo is matched as before.
-   * Free text (with `llm`): typed text that isn't a label is mapped to one of an ordinary question's
-   * buttons, quoted back for a one-tap confirm on a red-flag question, and answered as small talk when
-   * nothing is pending. Never more than one reply per message; a message already handled never reaches the LLM.
+   * Typed messages (engine.ts "Typed messages"): the safety screen first (a crisis or urgent symptom wins
+   * over everything), then the LLM sorts the message and fixed rules react: an answer, detail kept for
+   * her doctor, a medicine question, feeling low, a message for her family, or small talk. A message
+   * already handled never reaches the LLM. Also answers a follow-up's "Better" / "About the same" / "Worse".
    */
   handleInbound(message: InboundMessage): Promise<void>;
   /** Noon job: a check-in still unanswered becomes missed and every linked family chat is told. */
@@ -62,4 +65,15 @@ export interface CheckinEngine {
    * Idempotent per Relay attachment id. Not a check-in.
    */
   startPaperCheck(patientId: string, paper: ExtractedPaper, attachmentId?: string): Promise<{ scanId: number }>;
+  /**
+   * Follow-up job (the agent runs it every minute; the simulator on /later): sends every follow-up
+   * check-in due by `now` (ISO), "Checking in again, Harriet. How is your breathing now?" with
+   * "Better" / "About the same" / "Worse". Each goes out once. Returns how many were sent.
+   */
+  runDueFollowUps(now: string): Promise<number>;
+  /**
+   * Passes on what she asked to be passed to her family while no family chat was linked yet, now that
+   * one is. Returns how many messages went out (0 while still nobody is linked).
+   */
+  passOnFamilyMessages(patientId: string): Promise<number>;
 }

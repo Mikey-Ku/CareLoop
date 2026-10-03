@@ -2,23 +2,40 @@ import { describe, expect, it } from "vitest";
 import * as copy from "../src/checkin/copy.ts";
 import {
   BUTTON,
+  FOLLOW_UP_BUTTONS,
   SHARING_BUTTONS,
   SHARING_MENU_BUTTON,
   QUOTE_MAX_CHARS,
   READING_ACTIVITY,
   checkinDone,
+  checkinDoneAfterConcern,
   checkinGreeting,
   complaintReply,
+  crisisReply,
   didntUnderstand,
+  familyCrisisAlert,
   familyDailyStatus,
+  familyFollowUpUpdate,
+  familyFollowUpWorse,
   familyMissedAlert,
   familyRedFlagAlert,
+  familyRelay,
+  familyRelayDone,
+  familyRelayWaiting,
+  familyUrgentAlert,
   familyWelcome,
+  feelingLowReply,
   flagDetail,
   flagNotedReply,
   flagOffer,
+  followUpAsk,
+  followUpQuestion,
+  followUpReply,
   freeTextConfirm,
+  medicineQuestionReply,
+  noteSaved,
   notTodayReply,
+  photoNotYet,
   recordLinkEndedFamily,
   recordLinkEndedSenior,
   redFlagAdvice,
@@ -27,8 +44,11 @@ import {
   sharingLevelFromButton,
   sharingMenu,
   smallTalkFallback,
+  typedReplyUnavailable,
+  urgentReply,
   type AnsweredQuestion,
   type DayOutcome,
+  type FollowUpTopic,
 } from "../src/checkin/copy.ts";
 import type { SharingLevel } from "../src/db/index.ts";
 import { QUESTION_BANK } from "../src/context/questions.ts";
@@ -39,6 +59,8 @@ import { runRules } from "../src/rules/index.ts";
 
 const NAME = "Harriet";
 const LEVELS: SharingLevel[] = ["status", "status_vitals", "all"];
+const TOPICS: FollowUpTopic[] = ["breathing", "bleeding", "crisis", "general"];
+const CRISIS_WORDS = "I want to end my life"; // synthetic
 const OUTCOMES: DayOutcome[] = ["checked_in", "not_today", "missed"];
 const EM_DASH = /[—–]/; // em and en dash
 
@@ -71,6 +93,18 @@ function allOutputs(): string[] {
   for (const n of [0, 1, 3]) out.push(checkinGreeting(NAME, n));
   out.push(notTodayReply(NAME), flagOffer(), flagNotedReply(), checkinDone(NAME));
   out.push(redFlagAdvice(NAME), redFlagAdvice(NAME, ["Sarah"]), redFlagAdvice(NAME, ["Sarah", "Tom"]), redFlagAdvice(NAME, []));
+  out.push(redFlagAdvice(NAME, ["Sarah"], 1), redFlagAdvice(NAME, [], 2), checkinDoneAfterConcern(NAME));
+  out.push(typedReplyUnavailable(["No", "Yes"]), typedReplyUnavailable([BUTTON.start, BUTTON.notToday]), noteSaved(NAME));
+  out.push(medicineQuestionReply(NAME), feelingLowReply(NAME), photoNotYet(NAME));
+  for (const names of [undefined, [], ["Sarah"], ["Sarah", "Tom"]]) {
+    out.push(crisisReply(NAME, names), urgentReply(NAME, names), familyRelayDone(NAME, names));
+  }
+  out.push(familyRelay(NAME, "Tell Sarah I love her"), familyRelay(NAME, 'say "hi" \u2014 to Tom'), familyRelayWaiting(NAME));
+  for (const topic of TOPICS) {
+    out.push(followUpAsk(topic), followUpQuestion(NAME, topic));
+    for (const answer of ["better", "same"] as const) out.push(familyFollowUpUpdate({ seniorName: NAME, topic, answer }));
+  }
+  for (const topic of TOPICS) out.push(followUpReply(NAME, "better", topic), followUpReply(NAME, "same", topic));
   out.push(familyWelcome(NAME));
   out.push(flagDetail(FLAG_MESSAGE), ...ruleFlagMessages.map(flagDetail));
   out.push(didntUnderstand([BUTTON.start, BUTTON.notToday]), didntUnderstand(["Yes"]));
@@ -82,6 +116,12 @@ function allOutputs(): string[] {
   for (const level of LEVELS) {
     out.push(sharingMenu(level), sharingChangedSenior(level), sharingChangedFamily(NAME, level));
     out.push(familyRedFlagAlert({ seniorName: NAME, sharing: level, ...RED_FLAG }));
+    out.push(familyRedFlagAlert({ seniorName: NAME, sharing: level, ...RED_FLAG, words: "Yes but it was weirder" }));
+    for (const words of [undefined, CRISIS_WORDS]) {
+      out.push(familyCrisisAlert({ seniorName: NAME, sharing: level, ...(words ? { words } : {}) }));
+      out.push(familyUrgentAlert({ seniorName: NAME, sharing: level, ...(words ? { words } : {}) }));
+    }
+    for (const topic of TOPICS) out.push(familyFollowUpWorse({ seniorName: NAME, sharing: level, topic }));
     for (const outcome of OUTCOMES)
       for (const vitals of [undefined, { heartRate: 72, inUsualRange: true }, { heartRate: 104, inUsualRange: false }, { heartRate: 78 }])
         out.push(familyDailyStatus({ seniorName: NAME, sharing: level, outcome, answers: ANSWERS, flags: [{ message: FLAG_MESSAGE }], vitals }));
@@ -95,10 +135,12 @@ describe("copy: style rules across every output", () => {
   it("covers every exported function", () => {
     const fns = Object.entries(copy).filter(([, v]) => typeof v === "function").map(([k]) => k).sort();
     const sampled = [
-      "checkinDone", "checkinGreeting", "complaintReply", "didntUnderstand", "familyDailyStatus", "familyMissedAlert", "familyRedFlagAlert",
-      "familyWelcome", "flagDetail", "flagNotedReply", "flagOffer", "freeTextConfirm", "notTodayReply", "recordLinkEndedFamily",
-      "recordLinkEndedSenior", "redFlagAdvice", "sharingChangedFamily", "sharingChangedSenior", "sharingLevelFromButton", "sharingMenu",
-      "smallTalkFallback",
+      "checkinDone", "checkinDoneAfterConcern", "checkinGreeting", "complaintReply", "crisisReply", "didntUnderstand", "familyCrisisAlert",
+      "familyDailyStatus", "familyFollowUpUpdate", "familyFollowUpWorse", "familyMissedAlert", "familyRedFlagAlert", "familyRelay",
+      "familyRelayDone", "familyRelayWaiting", "familyUrgentAlert", "familyWelcome", "feelingLowReply", "flagDetail", "flagNotedReply",
+      "flagOffer", "followUpAsk", "followUpQuestion", "followUpReply", "freeTextConfirm", "medicineQuestionReply", "noteSaved",
+      "notTodayReply", "photoNotYet", "recordLinkEndedFamily", "recordLinkEndedSenior", "redFlagAdvice", "sharingChangedFamily",
+      "sharingChangedSenior", "sharingLevelFromButton", "sharingMenu", "smallTalkFallback", "typedReplyUnavailable", "urgentReply",
     ].sort();
     expect(fns).toEqual(sampled);
   });
@@ -136,6 +178,7 @@ describe("copy: buttons", () => {
     [BUTTON.tellMeMore, BUTTON.later],
     [BUTTON.willAskDoctor],
     Object.values(SHARING_BUTTONS),
+    Object.values(FOLLOW_UP_BUTTONS),
     ...QUESTION_BANK.map((q) => q.buttons),
   ];
 
@@ -180,16 +223,18 @@ describe("copy: senior messages", () => {
     for (const text of [flagDetail(FLAG_MESSAGE), ...ruleFlagMessages.map(flagDetail)]) expect(text.toLowerCase()).not.toMatch(/you should (stop|start|take)|stop taking/);
   });
 
-  it("red-flag advice leads with who was told, then her doctor, then 911", () => {
+  it("red-flag advice thanks her calmly first, then who was told, then her doctor, then 911", () => {
     expect(redFlagAdvice(NAME, ["Sarah"])).toBe(
-      "Harriet, I've asked Sarah to check on you. Please call your doctor today about this. If it gets worse or feels like an emergency, call 911.",
+      "Thank you for telling me, Harriet. That sounds uncomfortable. I've asked Sarah to check on you. Please call your doctor today about this. If it gets worse or feels like an emergency, call 911.",
     );
-    expect(redFlagAdvice(NAME, ["Sarah", "Tom", "Ann"])).toMatch(/^Harriet, I've asked Sarah, Tom and Ann to check on you\. /);
-    for (const text of [redFlagAdvice(NAME), redFlagAdvice(NAME, ["Sarah"]), redFlagAdvice(NAME, [])]) {
+    expect(redFlagAdvice(NAME, ["Sarah", "Tom", "Ann"])).toMatch(/That sounds uncomfortable\. I've asked Sarah, Tom and Ann to check on you\. /);
+    for (const text of [redFlagAdvice(NAME), redFlagAdvice(NAME, ["Sarah"]), redFlagAdvice(NAME, []), redFlagAdvice(NAME, ["Sarah"], 2)]) {
+      const thanks = text.indexOf("Thank you for telling me");
       const family = text.indexOf("check on you");
       const doctor = text.indexOf("call your doctor today");
       const emergency = text.indexOf("call 911");
-      expect(doctor, text).toBeGreaterThan(family);
+      expect(thanks, text).toBe(0);
+      if (family >= 0) expect(doctor, text).toBeGreaterThan(family);
       expect(emergency, text).toBeGreaterThan(doctor);
       // Short sentences.
       for (const sentence of text.split(/(?<=\.) /)) expect(sentence.split(" ").length, sentence).toBeLessThanOrEqual(12);
@@ -197,9 +242,22 @@ describe("copy: senior messages", () => {
   });
 
   it("red-flag advice without names says 'your family'; with no one linked it claims no one was told", () => {
-    expect(redFlagAdvice(NAME)).toMatch(/^Harriet, I've asked your family to check on you\. Please call your doctor/);
-    expect(redFlagAdvice(NAME, [])).toBe("Harriet, please call your doctor today about this. If it gets worse or feels like an emergency, call 911.");
+    expect(redFlagAdvice(NAME)).toMatch(/I've asked your family to check on you\. Please call your doctor/);
+    expect(redFlagAdvice(NAME, [])).toBe(
+      "Thank you for telling me, Harriet. That sounds uncomfortable. Please call your doctor today about this. If it gets worse or feels like an emergency, call 911.",
+    );
     expect(redFlagAdvice(NAME, [" ", ""])).toBe(redFlagAdvice(NAME, []));
+  });
+
+  it("red-flag advice mentions the questions still to come, so the next one doesn't arrive out of nowhere", () => {
+    expect(redFlagAdvice(NAME, ["Sarah"], 1)).toMatch(/call 911\. When you're ready, I have one more question for you\.$/);
+    expect(redFlagAdvice(NAME, ["Sarah"], 2)).toMatch(/I have 2 more questions for you\.$/);
+    expect(redFlagAdvice(NAME, ["Sarah"], 0)).toBe(redFlagAdvice(NAME, ["Sarah"]));
+  });
+
+  it("after a concern, the closing says we'll check on her again this afternoon, not tomorrow", () => {
+    expect(checkinDoneAfterConcern(NAME)).toBe("Thank you, Harriet. I'll check on you again this afternoon.");
+    expect(checkinDoneAfterConcern(NAME)).not.toMatch(/tomorrow/);
   });
 
   it("red-flag advice uses no pronoun for family members", () => {
@@ -215,6 +273,108 @@ describe("copy: senior messages", () => {
 
   it("didn't-understand lists the buttons", () => {
     expect(didntUnderstand(["Yes", "No"])).toContain('"Yes" and "No"');
+  });
+});
+
+describe("copy: typed messages", () => {
+  it("when typed replies can't be read, it's the assistant's trouble, not hers, and the buttons are offered", () => {
+    expect(typedReplyUnavailable(["No", "Yes"])).toBe(`I'm having trouble reading typed replies right now. You can tap one of these: "No" or "Yes".`);
+    expect(typedReplyUnavailable(["No", "Yes"])).not.toMatch(/didn't understand|sorry/i);
+    expect(typedReplyUnavailable(["Good", "Okay", "Not great"])).toContain('"Good", "Okay" or "Not great"');
+  });
+
+  it("detail she adds is written down for her doctor, and the buttons stay offered", () => {
+    expect(noteSaved(NAME)).toBe("Thank you, Harriet. I've written that down for your doctor. You can keep telling me, or tap an answer below.");
+  });
+
+  it("a medicine question goes to her doctor or pharmacist and she is told not to change anything first", () => {
+    const text = medicineQuestionReply(NAME);
+    expect(text).toContain("doctor or pharmacist");
+    expect(text).toContain("added it to your list for your next visit");
+    expect(text).toContain("Please don't change any medicine before you ask them.");
+  });
+
+  it("feeling low: warm and short, suggests calling someone close, no alarm", () => {
+    const text = feelingLowReply(NAME);
+    expect(text).toMatch(/^I'm sorry you're feeling this way, Harriet\./);
+    expect(text).toContain("call someone you're close to");
+    expect(text).not.toMatch(/911|988|emergency|doctor/);
+  });
+
+  it("crisis: she matters, 988 now, 911 if in danger; family only when someone was told", () => {
+    const text = crisisReply(NAME, ["Sarah"]);
+    expect(text).toContain("You matter");
+    expect(text).toContain("Please call or text 988 now");
+    expect(text).toContain("Suicide & Crisis Lifeline");
+    expect(text).toContain("If you're in danger right now, call 911.");
+    expect(text.indexOf("988")).toBeLessThan(text.indexOf("911"));
+    expect(text).toMatch(/I've let Sarah know\.$/);
+    expect(crisisReply(NAME)).toMatch(/I've let your family know\.$/);
+    expect(crisisReply(NAME, [])).not.toMatch(/family|know\.$/);
+    for (const sentence of text.split(/(?<=\.) /)) expect(sentence.split(" ").length, sentence).toBeLessThanOrEqual(12);
+  });
+
+  it("urgent symptom: 911 now if it's happening, then her doctor; family only when someone was told", () => {
+    const text = urgentReply(NAME, ["Sarah", "Tom"]);
+    expect(text).toMatch(/^Harriet, if this is happening now, please call 911 right away\./);
+    expect(text.indexOf("911")).toBeLessThan(text.indexOf("doctor"));
+    expect(text).toContain("I've let Sarah and Tom know");
+    expect(urgentReply(NAME, [])).toBe("Harriet, if this is happening now, please call 911 right away. After that, call your doctor.");
+  });
+
+  it("a family message passes on her own words; her reply names who got it, or says it waits", () => {
+    expect(familyRelay(NAME, "  Tell Sarah I love her ")).toBe('Harriet asked me to pass this on: "Tell Sarah I love her"');
+    expect(familyRelay(NAME, 'say "hi"\nto Tom')).toBe(`Harriet asked me to pass this on: "say 'hi' to Tom"`);
+    expect(familyRelayDone(NAME, ["Sarah"])).toBe("Thank you, Harriet. I've passed that on to Sarah.");
+    expect(familyRelayDone(NAME, [])).toBe("Thank you, Harriet. I've passed that on to your family.");
+    expect(familyRelayWaiting(NAME)).toBe("Thank you, Harriet. I'll pass it on when your family has connected with me.");
+  });
+
+  it("a photo gets a kind reply pointing to her doctor or pharmacist", () => {
+    expect(photoNotYet(NAME)).toBe("Thanks for the photo, Harriet. I can't read photos yet. Please bring it to your doctor or pharmacist.");
+  });
+});
+
+describe("copy: follow-up check-in", () => {
+  it("asks about the topic of the concern, or how she feels", () => {
+    expect(followUpQuestion(NAME, "breathing")).toBe("Checking in again, Harriet. How is your breathing now?");
+    expect(followUpQuestion(NAME, "bleeding")).toBe("Checking in again, Harriet. How is the bruising or bleeding now?");
+    expect(followUpQuestion(NAME, "general")).toBe("Checking in again, Harriet. How are you feeling now?");
+    expect(Object.values(FOLLOW_UP_BUTTONS)).toEqual(["Better", "About the same", "Worse"]);
+  });
+
+  it("Better and About the same get a short warm reply that still points to the doctor and 911", () => {
+    for (const answer of ["better", "same"] as const) {
+      const text = followUpReply(NAME, answer);
+      expect(text).toContain("Harriet");
+      expect(text).toContain("doctor");
+      expect(text).toContain("911");
+    }
+    expect(followUpReply(NAME, "better")).toMatch(/^I'm glad to hear that, Harriet\./);
+  });
+
+  it("after a crisis the follow-up asks how she feels, and its replies point to 988, not the doctor", () => {
+    expect(followUpQuestion(NAME, "crisis")).toBe("Checking in again, Harriet. How are you feeling now?");
+    for (const answer of ["better", "same"] as const) {
+      const text = followUpReply(NAME, answer, "crisis");
+      expect(text).toContain("call or text 988 any time");
+      expect(text).not.toContain("doctor");
+    }
+    expect(followUpReply(NAME, "same", "crisis")).toContain("If you're in danger, call 911.");
+  });
+
+  it("Worse alerts the family at every level, with the question and answer only at all", () => {
+    for (const sharing of ["status", "status_vitals"] as const) {
+      const text = familyFollowUpWorse({ seniorName: NAME, sharing, topic: "breathing" });
+      expect(text).toBe("Harriet said she feels worse than earlier today. Please call Harriet now to check on her.");
+    }
+    expect(familyFollowUpWorse({ seniorName: NAME, sharing: "all", topic: "breathing" })).toContain('How is your breathing now?\nHarriet answered: "Worse"');
+  });
+
+  it("the family update at all says what she answered", () => {
+    expect(familyFollowUpUpdate({ seniorName: NAME, topic: "bleeding", answer: "same" })).toBe(
+      'I checked in with Harriet again and asked: How is the bruising or bleeding now?\nHarriet answered: "About the same"',
+    );
   });
 });
 
@@ -275,6 +435,35 @@ describe("copy: family messages by sharing level", () => {
     expect(text).toContain(RED_FLAG.questionText);
     expect(text).toContain(`"${RED_FLAG.answer}"`);
     expect(text).toContain("Please call Harriet today to check on her.");
+  });
+
+  it("a red flag she typed carries her words at all only", () => {
+    const words = "Yes but it was weirder";
+    expect(familyRedFlagAlert({ seniorName: NAME, sharing: "all", ...RED_FLAG, words })).toMatch(/answered: "Yes"\nHarriet wrote: "Yes but it was weirder"$/);
+    expect(familyRedFlagAlert({ seniorName: NAME, sharing: "status", ...RED_FLAG, words })).not.toContain(words);
+  });
+
+  it("crisis and urgent alerts reach every level; below all with no detail, at all with her words", () => {
+    for (const sharing of ["status", "status_vitals"] as const) {
+      expect(familyCrisisAlert({ seniorName: NAME, sharing, words: CRISIS_WORDS })).toBe(
+        "Harriet may be going through a very hard time. Please call her now.",
+      );
+      const urgent = familyUrgentAlert({ seniorName: NAME, sharing, words: "I have chest pain" });
+      expect(urgent).toBe("Harriet told me about something that may be urgent. Please call Harriet now to check on her.");
+    }
+    const crisis = familyCrisisAlert({ seniorName: NAME, sharing: "all", words: CRISIS_WORDS });
+    expect(crisis).toContain(`Harriet wrote: "${CRISIS_WORDS}"`);
+    expect(crisis).toContain("988");
+    expect(familyUrgentAlert({ seniorName: NAME, sharing: "all", words: "I have chest pain" })).toContain('Harriet wrote: "I have chest pain"');
+  });
+
+  it("her notes show in the daily status at all only", () => {
+    const notes = [{ questionText: RED_FLAG.questionText, text: "Not really but I have more info" }];
+    const input = { seniorName: NAME, outcome: "checked_in" as const, answers: ANSWERS, flags: [], notes };
+    expect(familyDailyStatus({ ...input, sharing: "all" })).toContain(
+      `Harriet also wrote (kept for the doctor):\n- ${RED_FLAG.questionText} "Not really but I have more info"`,
+    );
+    for (const sharing of ["status", "status_vitals"] as const) expect(familyDailyStatus({ ...input, sharing })).not.toContain("more info");
   });
 
   it("the family welcome says it's an AI assistant, daily updates come here, she decides what they see, urgent alerts always come", () => {

@@ -1,6 +1,10 @@
 # Harriet answers Yes to a red-flag question (check-in date 2026-09-01).
 # On her first check-in both red-flag questions are due: trouble breathing lying
 # flat (red flag on "Yes") and unusual bruising or bleeding (red flag on "Yes").
+# She is thanked calmly, told Sarah was asked to check on her, to call her doctor
+# and 911 if it gets worse; Sarah gets an alert. The other questions still come,
+# but no flag is offered that day, and the closing says we'll check on her again
+# this afternoon. /later jumps to that follow-up.
 # npm run simulate -- --reset --script ../../scripts/demo/harriet-red-flag.txt
 # Add --family sarah,tom to see the alert reach each family member in their own chat.
 #
@@ -12,5 +16,6 @@
 1
 # Have you felt dizzy when standing up? -> No
 1
-# One thing worth asking your doctor about -> Later
-2
+# Three hours later: "How is your breathing now?" -> Better
+/later
+1

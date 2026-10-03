@@ -6,18 +6,19 @@ import type { CheckinEngine, Clock, EngineDeps } from "../checkin/engine-types.t
 import { SHARING_BUTTONS, SHARING_MENU_BUTTON } from "../checkin/copy.ts";
 import { loadConfig, normalizeHandle, resolveCheckinDate, type Config } from "../config.ts";
 import { familyChats, linkFamilyMember, syncFamilyMembers, type FamilyChat } from "../db/family.ts";
+import { nextFollowUp } from "../db/follow-ups.ts";
 import { getSharing, openDatabase, upsertPatient, type Db, type SharingLevel } from "../db/index.ts";
 import { latestPaperScan, type PaperScanRow } from "../db/paper-scans.ts";
 import { ConsentInactiveError, FinchNodeClient } from "../finchnode/client.ts";
 import { FIXTURES_DIR, REPO_ROOT, hasRecordedSnapshot, loadRecorded, loadRxNavCache, replayFetch } from "../finchnode/fixtures.ts";
 import { normalizeHealthRecord, type PatientRecord } from "../finchnode/normalize.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
-import type { LlmClient } from "../llm/types.ts";
+import { LlmUnavailableError, MESSAGE_KINDS, type LlmClient, type MessageClassification, type MessageKind } from "../llm/types.ts";
 import { patientIdFor } from "../patient-id.ts";
 import { FakeMessenger } from "../relay/fake-messenger.ts";
 import type { InboundMessage, SentMessage } from "../relay/messenger.ts";
 import type { ExtractedPaper } from "../rules/paper-diff.ts";
-import { HELP_LINES, painter, renderMessage, renderTable, type Painter, type Style } from "./sim-render.ts";
+import { HELP_LINES, clockTime, painter, renderMessage, renderTable, type Painter, type Style } from "./sim-render.ts";
 
 // Terminal simulator of the daily check-in (npm run simulate). Drives the real
 // check-in engine with a FakeMessenger, a simulated clock and recorded FinchNode
@@ -30,7 +31,13 @@ import { HELP_LINES, painter, renderMessage, renderTable, type Painter, type Sty
 // here they start pre-linked.
 //
 // Free text: with `llm` (npm run simulate -- --llm, real Gemini from .env) what she
-// types is read as in the agent; without it, buttons only and fixed replies.
+// types is read as in the agent; without it, buttons only and fixed replies (the safety
+// screen and an explicit yes on a red-flag question still work, as they need no LLM).
+// `/as <kind> [answer]` stands in for the LLM on the next typed message, so demo scripts
+// show each kind of reaction offline and the same way every run.
+//
+// Follow-ups: after a red flag or a safety hit the engine schedules a follow-up check-in
+// some hours later; /later jumps the clock to it and runs the follow-up job.
 
 export const DEFAULT_SUBJECT = "patient-demo-polypharmacy";
 export const DEFAULT_DB_PATH = join(REPO_ROOT, "data", "simulator.db");
@@ -78,6 +85,13 @@ export class SimClock implements Clock {
   /** Jump forward to a time of day (never backwards). */
   setTime(hour: number, minute = 0): void {
     this.minutes = Math.max(this.minutes, hour * 60 + minute);
+  }
+
+  /** Jump forward to an instant (ISO), at least; never backwards. */
+  jumpTo(iso: string): void {
+    const [y, m, d] = this.day.split("-").map(Number) as [number, number, number];
+    const minutes = Math.ceil((Date.parse(iso) - new Date(y, m - 1, d).getTime()) / 60_000);
+    if (Number.isFinite(minutes)) this.minutes = Math.max(this.minutes, minutes);
   }
 
   tick(): void {
@@ -190,7 +204,29 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
       if (event.kind === "set") note(`${chatLabel(event.chatId)} shows "${event.label}".`);
     },
   });
-  const deps: EngineDeps = { db, messenger, clock, loadSnapshot, llm: options.llm };
+  // `/as <kind>` readings wait here; while one does, it stands in for the LLM (small talk still
+  // goes to the real LLM if there is one).
+  const scripted: MessageClassification[] = [];
+  const scriptLlm: LlmClient = {
+    provider: "script",
+    classifyMessage: async () => {
+      const next = scripted.shift();
+      if (!next) throw new LlmUnavailableError("sim: no /as reading left");
+      return next;
+    },
+    smallTalk: (input, o) => (options.llm ? options.llm.smallTalk(input, o) : Promise.reject(new LlmUnavailableError("sim: no LLM"))),
+    mapAnswer: (input, o) => (options.llm ? options.llm.mapAnswer(input, o) : Promise.reject(new LlmUnavailableError("sim: no LLM"))),
+  };
+  const deps: EngineDeps = {
+    db,
+    messenger,
+    clock,
+    loadSnapshot,
+    // Read by the engine on each message.
+    get llm() {
+      return scripted.length > 0 ? scriptLlm : options.llm;
+    },
+  };
   const engine: CheckinEngine = createCheckinEngine(deps, { missedCheckinTime: config.missedCheckinTime, rxnav });
 
   // The engine dedupes inbound messages by id across the DB, so ids must be unique per run.
@@ -224,10 +260,40 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     };
     const sharingBefore = getSharing(db, patientId);
     const paperBefore = latestPaperScan(db, patientId);
+    const followUpBefore = nextFollowUp(db, patientId);
     await engine.handleInbound(message);
     const sharingAfter = getSharing(db, patientId);
     if (sharingAfter !== sharingBefore) note(`Sharing level set to ${sharingAfter}.`);
     notePaperChange(paperBefore, latestPaperScan(db, patientId));
+    const followUp = nextFollowUp(db, patientId);
+    if (followUp && followUp.id !== followUpBefore?.id)
+      note(`Follow-up check-in scheduled for ${clockTime(followUp.dueAt)} (${followUp.reason}). Type /later to jump there.`);
+  }
+
+  /** /as <kind> [answer]: the next typed message is read as `kind` (and, for "answer", that button). */
+  function asCommand(args: string[]): InputResult {
+    const [kind, ...rest] = args;
+    if (!kind || !(MESSAGE_KINDS as readonly string[]).includes(kind)) {
+      note(`usage: /as <${MESSAGE_KINDS.join("|")}> [answer]`, "red");
+      return "error";
+    }
+    const answer = rest.join(" ");
+    scripted.push({ kind: kind as MessageKind, confidence: "high", complaints: [], memories: [], ...(answer ? { answer } : {}) });
+    note(`Her next typed message is read as ${kind}${answer ? ` "${answer}"` : ""} (a stand-in for the LLM).`);
+    return "ok";
+  }
+
+  /** /later: jump the clock to the next follow-up check-in and run the follow-up job. */
+  async function laterCommand(): Promise<InputResult> {
+    const next = nextFollowUp(db, patientId);
+    if (!next) {
+      note("No follow-up check-in is waiting.");
+      return "ok";
+    }
+    clock.jumpTo(next.dueAt);
+    const sent = await engine.runDueFollowUps(clock.now());
+    note(`Later, ${clockTime(clock.now())}: ${sent} follow-up check-in${sent === 1 ? "" : "s"} sent.`);
+    return "ok";
   }
 
   /** What the engine did with her paper check, for the person running the demo. */
@@ -331,6 +397,10 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
       case "/paper":
         await paperCommand();
         return "ok";
+      case "/later":
+        return laterCommand();
+      case "/as":
+        return asCommand(args);
       case "/db":
         dbCommand();
         return "ok";

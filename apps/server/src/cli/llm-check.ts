@@ -3,12 +3,13 @@ import { fileURLToPath } from "node:url";
 import { ConfigError, loadConfig, type Config } from "../config.ts";
 import { formatAttempt, type AttemptLogEntry } from "../llm/fallback.ts";
 import { createLlmClient, describeLlm, type CreateLlmDeps } from "../llm/index.ts";
-import type { MapAnswerInput } from "../llm/types.ts";
+import type { ClassifyInput, MapAnswerInput, MessageClassification } from "../llm/types.ts";
 
 // `npm run llm:check`: does free-text understanding work from this laptop?
-// Maps three sample replies onto their questions' buttons and asks for one
-// small-talk reply, printing each result, the model that answered and the
-// timings. The only script that calls the LLM on purpose. Prints no secrets.
+// Maps three sample replies onto their questions' buttons, asks for one
+// small-talk reply and sorts six sample messages into kinds, printing each
+// result, the model that answered and the timings. The only script that calls
+// the LLM on purpose. Prints no secrets.
 
 type Sample = MapAnswerInput & { expect: string };
 
@@ -34,6 +35,29 @@ export const SAMPLES: Sample[] = [
 ];
 
 export const SMALL_TALK_SAMPLE = { seniorName: "Harriet", message: "my granddaughter is visiting on Sunday, I'm baking" };
+
+const BREATHING_QUESTION = { question: SAMPLES[1]!.question, options: SAMPLES[1]!.options };
+
+/** One message per main kind; the last one answers a pending red-flag question. */
+export const CLASSIFY_SAMPLES: (ClassifyInput & { expect: string })[] = [
+  { seniorName: "Harriet", message: "Should I stop taking my aspirin?", expect: "medicine_question" },
+  { seniorName: "Harriet", message: "I feel so lonely since Bob died", expect: "feeling_low" },
+  { seniorName: "Harriet", message: "Tell Sarah I love her", expect: "family_message, with forFamily" },
+  { seniorName: "Harriet", message: "Not really but I have more info", expect: "more_detail" },
+  { seniorName: "Harriet", message: "did the Tigers win?", expect: "chat" },
+  { seniorName: "Harriet", message: "Yes but it was weirder", pending: BREATHING_QUESTION, expect: "answer Yes (an explicit yes)" },
+];
+
+/** kind, answer, confidence, then whatever else came back. */
+export function describeClassification(c: MessageClassification): string {
+  const parts = [`kind=${c.kind}`];
+  if (c.answer !== undefined) parts.push(`answer=${c.answer}`);
+  parts.push(`confidence=${c.confidence}`);
+  if (c.forFamily) parts.push(`forFamily=${JSON.stringify(c.forFamily)}`);
+  if (c.complaints.length > 0) parts.push(`complaints=${JSON.stringify(c.complaints)}`);
+  if (c.memories.length > 0) parts.push(`memories=${JSON.stringify(c.memories)}`);
+  return parts.join(" ");
+}
 
 /** What .env needs before the check can call anything. Empty when ready. */
 export function missingSetup(config: Config): string[] {
@@ -98,6 +122,11 @@ export async function main(
     );
   }
   await timed(`smallTalk: "${SMALL_TALK_SAMPLE.message}"`, () => llm.smallTalk(SMALL_TALK_SAMPLE), (r) => JSON.stringify(r));
+  for (const sample of CLASSIFY_SAMPLES) {
+    const { expect, ...input } = sample;
+    const pending = input.pending ? `\n  pending: ${input.pending.question} [${input.pending.options.join(" | ")}]` : "";
+    await timed(`classifyMessage: "${input.message}"${pending}\n  expect: ${expect}`, () => llm.classifyMessage(input), describeClassification);
+  }
 
   out(failures === 0 ? "LLM check: every call answered" : `LLM check: ${failures} call(s) got no answer; the app would fall back to buttons or a template`);
   return failures === 0 ? 0 : 1;

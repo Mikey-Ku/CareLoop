@@ -17,6 +17,10 @@ Done and on `main` (run 1 to run 2c, see `RUN_LOG.md`):
 
 Not built: voice calls, vitals, reading paper photos, family voice messages, the doctor's visit-prep sheet.
 
+## Done means done
+
+`docs/DEFINITION_OF_DONE.md` lists the benchmark for every milestone. A lane is finished when its benchmarks pass, with the evidence in the pull request.
+
 ## Lanes
 
 | Lane | Owner | Builds | Needs | Blocked by |

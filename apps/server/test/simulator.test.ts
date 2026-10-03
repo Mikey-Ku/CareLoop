@@ -3,7 +3,15 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import { familyDailyStatus, familyRedFlagAlert } from "../src/checkin/copy.ts";
+import {
+  checkinDoneAfterConcern,
+  crisisReply,
+  familyCrisisAlert,
+  familyDailyStatus,
+  familyRedFlagAlert,
+  noteSaved,
+  redFlagAdvice,
+} from "../src/checkin/copy.ts";
 import { painter, renderMessage, renderTable, useColor } from "../src/cli/sim-render.ts";
 import { SimClock, nextDay, parseScript, runSimulation } from "../src/cli/simulator.ts";
 import { loadConfig } from "../src/config.ts";
@@ -99,24 +107,87 @@ describe("demo scripts", () => {
     familyRedFlagAlert({ seniorName: "Harriet", sharing, questionText: BREATHING_TEXT, answer: "Yes" });
   const checkedIn = familyDailyStatus({ seniorName: "Harriet", sharing: "status", outcome: "checked_in", answers: [], flags: [] });
 
-  it("harriet-red-flag (her first check-in, no --day): advice to her, alert to the family, then the check-in goes on", async () => {
+  it("harriet-red-flag (her first check-in, no --day): calm advice, alert to the family, the check-in goes on, no flag offer, a follow-up", async () => {
     const { exitCode, lines, bubbles } = await simulate("harriet-red-flag.txt");
     expect(exitCode).toBe(0);
     expect(lines.slice(0, 3).join("\n")).toMatch(/2026-09-01/);
     expectInOrder(bubbles, [
       { chat: PHONE, text: /Good morning, Harriet/ },
       { chat: PHONE, text: /trouble breathing/ },
-      { chat: PHONE, text: /911/ },
+      { chat: PHONE, text: /^Thank you for telling me, Harriet\. That sounds uncomfortable\..*911\. When you're ready, I have 2 more questions/ },
       { chat: FAMILY, text: /^Harriet reported/ },
       { chat: PHONE, text: /bruising or bleeding/ },
       { chat: PHONE, text: /dizzy/ },
-      { chat: PHONE, text: /worth asking your doctor/ },
+      { chat: PHONE, text: /^Thank you, Harriet\. I'll check on you again this afternoon\.$/ },
       { chat: FAMILY, text: /Harriet checked in/ },
+      { chat: PHONE, text: /^Checking in again, Harriet\. How is your breathing now\?$/ },
+      { chat: PHONE, text: /^I'm glad to hear that, Harriet/ },
     ]);
+    // One worry at a time: no flag offer on a red-flag day.
+    expect(bubbles.some((b) => /worth asking your doctor/.test(b.text))).toBe(false);
+    expect(lines.some((l) => /^\[sim\] Follow-up check-in scheduled for 12:02 \(hf-breathing-lying-flat\)\. Type \/later/.test(l))).toBe(true);
+    expect(lines).toContain("[sim] Later, 12:02: 1 follow-up check-in sent.");
+    expect(bubbles.find((b) => /How is your breathing now/.test(b.text))?.buttons).toEqual(["Better", "About the same", "Worse"]);
     // At sharing "status" the alert carries no medical detail.
     const alert = bubbles.find((b) => b.chat === FAMILY && /^Harriet reported/.test(b.text));
     expect(alert?.text).toBe(alertAt("status"));
     expect(alert?.text).not.toMatch(/breathing/);
+  });
+
+  it("harriet-red-flag-typed (the live conversation, at all): detail noted, her typed Yes counted, calm advice, no flag offer, a follow-up", async () => {
+    const { exitCode, lines, bubbles } = await simulate("harriet-red-flag-typed.txt", { sharing: "all" });
+    expect(exitCode).toBe(0);
+    const words = "Yes but it was weirder I don't know how to explainit";
+    expectInOrder(bubbles, [
+      { chat: PHONE, text: /trouble breathing/ },
+      { chat: PHONE, text: new RegExp(`^${noteSaved("Harriet").replace(/[.?]/g, "\\$&")}$`) },
+      { chat: PHONE, text: /^Thank you for telling me, Harriet\. That sounds uncomfortable\./ },
+      { chat: FAMILY, text: /^Harriet reported/ },
+      { chat: PHONE, text: /bruising or bleeding/ },
+      { chat: PHONE, text: /dizzy/ },
+      { chat: PHONE, text: /^Thank you, Harriet\. I'll check on you again this afternoon\.$/ },
+      { chat: FAMILY, text: /Harriet also wrote \(kept for the doctor\):/ },
+      { chat: PHONE, text: /How is your breathing now\?/ },
+      { chat: PHONE, text: /^Thank you for letting me know, Harriet/ },
+    ]);
+    // Detail never re-sends the same confirm; the buttons come back with the note.
+    expect(bubbles.some((b) => /^You wrote:/.test(b.text))).toBe(false);
+    expect(bubbles.find((b) => b.text === noteSaved("Harriet"))?.buttons).toEqual(["No", "Yes"]);
+    expect(bubbles.find((b) => b.chat === PHONE && /That sounds uncomfortable/.test(b.text))?.text).toBe(redFlagAdvice("Harriet", ["Sarah"], 2));
+    const alert = bubbles.find((b) => b.chat === FAMILY && /^Harriet reported/.test(b.text));
+    expect(alert?.text).toBe(familyRedFlagAlert({ seniorName: "Harriet", sharing: "all", questionText: BREATHING_TEXT, answer: "Yes", words }));
+    const status = bubbles.find((b) => b.chat === FAMILY && /checked in today/.test(b.text))?.text ?? "";
+    expect(status).toContain('"Not really but I have more info"');
+    expect(status).toContain(`"${words}"`);
+    expect(bubbles.some((b) => /worth asking your doctor/.test(b.text))).toBe(false);
+    expect(lines.filter((l) => /^\[sim\] Her next typed message is read as more_detail/.test(l))).toHaveLength(2);
+  });
+
+  it("harriet-crisis: the screen catches it without an LLM, Sarah is alerted with no detail, the check-in pauses, then carries on", async () => {
+    const { exitCode, lines, bubbles } = await simulate("harriet-crisis.txt");
+    expect(exitCode).toBe(0);
+    expectInOrder(bubbles, [
+      { chat: PHONE, text: /trouble breathing/ },
+      { chat: PHONE, text: /988/ },
+      { chat: FAMILY, text: /very hard time/ },
+      { chat: PHONE, text: /How are you feeling now\?/ },
+      { chat: PHONE, text: /988 any time/ },
+      { chat: PHONE, text: /trouble breathing/ },
+      { chat: PHONE, text: /bruising or bleeding/ },
+      { chat: PHONE, text: /dizzy/ },
+      { chat: PHONE, text: /^That's everything for today, Harriet\./ },
+      { chat: FAMILY, text: /Harriet checked in/ },
+    ]);
+    const crisisAt = bubbles.findIndex((b) => b.text === crisisReply("Harriet", ["Sarah"]));
+    expect(crisisAt).toBeGreaterThan(0);
+    // Nothing else is asked in the same reply: Sarah's alert comes next, then the follow-up.
+    expect(bubbles[crisisAt + 1]).toEqual({ chat: FAMILY, text: familyCrisisAlert({ seniorName: "Harriet", sharing: "status" }), buttons: [] });
+    expect(bubbles[crisisAt + 2]?.text).toMatch(/^Checking in again/);
+    expect(bubbles.filter((b) => b.chat === FAMILY).map((b) => b.text).join("\n")).not.toMatch(/end my life|988/);
+    expect(lines.some((l) => /Free text off/.test(l))).toBe(true);
+    expect(lines.some((l) => /Follow-up check-in scheduled for \d\d:\d\d \(crisis\)/.test(l))).toBe(true);
+    // The follow-up already came, so the closing doesn't promise another.
+    expect(bubbles.some((b) => b.text === checkinDoneAfterConcern("Harriet"))).toBe(false);
   });
 
   it("harriet-red-flag at sharing all: the family alert says what she answered", async () => {
@@ -244,7 +315,13 @@ describe("simulator inputs", () => {
 
   it("with an LLM: the reading label shows, a typed answer is mapped, a red-flag answer is quoted back for a tap", async () => {
     const llm = new FakeLlmClient({
-      mapAnswer: ({ options }) => ({ answer: options.includes("Sometimes") ? "Sometimes" : "unclear", confidence: "high", otherComplaints: [] }),
+      classifyMessage: ({ pending }) => ({
+        kind: "answer",
+        answer: pending?.options.includes("Sometimes") ? "Sometimes" : "No",
+        confidence: "high",
+        complaints: [],
+        memories: [],
+      }),
     });
     const lines: string[] = [];
     const inputs = ["1", "nah fine, had to prop myself up on pillows", "1", "1", "only when I get up too fast"];
@@ -261,7 +338,36 @@ describe("simulator inputs", () => {
     ]);
     expect(list.find((b) => /^You wrote/.test(b.text))?.buttons).toEqual(["No", "Yes"]);
     expect(lines).toContain(`[sim] Harriet's phone shows "Reading your message".`);
-    expect(llm.mapAnswerCalls.map((c) => c.reply)).toEqual(["nah fine, had to prop myself up on pillows", "only when I get up too fast"]);
+    expect(llm.classifyCalls.map((c) => c.message)).toEqual(["nah fine, had to prop myself up on pillows", "only when I get up too fast"]);
+  });
+
+  it("/as stands in for the LLM on the next typed message only; a bad kind is an error", async () => {
+    const { exitCode, lines, bubbles } = await run(["1", "/as answer No", "nah I slept fine", "/as medicine_question", "should I stop the aspirin?", "/as nonsense"]);
+    expect(exitCode).toBe(1);
+    expectInOrder(bubbles, [
+      { chat: PHONE, text: /trouble breathing/ },
+      // On a red-flag question even the stand-in's "No" goes back to her for one tap.
+      { chat: PHONE, text: /^You wrote: "nah I slept fine"/ },
+      { chat: PHONE, text: /good question for your doctor or pharmacist/ },
+      { chat: PHONE, text: /trouble breathing/ },
+    ]);
+    expect(lines.some((l) => /usage: \/as </.test(l))).toBe(true);
+  });
+
+  it("/later with no follow-up waiting just says so", async () => {
+    const { exitCode, lines } = await run(["/later"]);
+    expect(exitCode).toBe(0);
+    expect(lines).toContain("[sim] No follow-up check-in is waiting.");
+  });
+
+  it("without an LLM, the safety screen and an explicit yes on a red-flag question still work", async () => {
+    const { exitCode, bubbles } = await run(["1", "yeah, had to sit up", "I have chest pain"]);
+    expect(exitCode).toBe(0);
+    expectInOrder(bubbles, [
+      { chat: PHONE, text: /^Thank you for telling me, Harriet/ },
+      { chat: PHONE, text: /bruising or bleeding/ },
+      { chat: PHONE, text: /please call 911 right away/ },
+    ]);
   });
 
   it("a button number that doesn't exist is an error and fails the script", async () => {
@@ -334,6 +440,11 @@ describe("simulator pieces", () => {
     clock.setDay("2026-09-02");
     expect(new Date(clock.now()).getDate()).toBe(2);
     expect(new Date(clock.now()).getHours()).toBe(9);
+    clock.jumpTo(new Date(2026, 8, 2, 12, 3).toISOString());
+    expect(new Date(clock.now()).getHours()).toBe(12);
+    expect(new Date(clock.now()).getMinutes()).toBe(3);
+    clock.jumpTo(new Date(2026, 8, 2, 10, 0).toISOString()); // never backwards
+    expect(new Date(clock.now()).getHours()).toBe(12);
     expect(nextDay("2026-09-30")).toBe("2026-10-01");
   });
 
