@@ -1,0 +1,16 @@
+# Hospital paper check (check-in date 2026-09-01). The photo step comes in run 6;
+# here /paper hands fixtures/papers/harriet-discharge.extracted.json to the engine,
+# which reads it back to her. On "Yes, that's right" it compares the papers with a
+# fresh read of her record (R6): aspirin is stopped on the papers but still active
+# in the record, so an R6 flag is stored and she hears it in plain words.
+# A paper check is not a check-in.
+# npm run simulate -- --reset --script ../../scripts/demo/harriet-paper.txt
+#
+# Not today for the check-in itself
+2
+/paper
+# Yes, that's right
+1
+# I'll ask my doctor
+1
+/flags

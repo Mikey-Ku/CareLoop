@@ -1,0 +1,8 @@
+# Harriet taps "Not today" (check-in date 2026-09-01).
+# The family hears she said "not today", and the noon job has nothing to do:
+# a "not today" is never treated as a missed check-in.
+# npm run simulate -- --reset --script ../../scripts/demo/harriet-not-today.txt
+#
+# Not today
+2
+/noon

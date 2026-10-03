@@ -1,0 +1,149 @@
+import { z } from "zod";
+
+// App configuration from the environment. Secrets live only in .env and never
+// appear in an error message, a log line or a printed config.
+
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+export const DEFAULT_RELAY_API_URL = "https://api.relayapp.im";
+export const DEFAULT_FINCHNODE_SUBJECT = "patient-demo-polypharmacy";
+export const DEFAULT_TIMEZONE = "America/Detroit";
+
+const ConfigSchema = z.object({
+  FINCHNODE_BASE_URL: z.string().url().default("https://api.finchnode.com/demo/v1"),
+  FINCHNODE_API_KEY: z.string().optional(),
+  PORT: z.coerce.number().int().positive().default(3000),
+  DATABASE_PATH: z.string().default("./data/app.db"),
+  CHECKIN_TIME: z.string().regex(TIME, "must be HH:MM (24 hour)").default("09:00"),
+  MISSED_CHECKIN_TIME: z.string().regex(TIME, "must be HH:MM (24 hour)").default("12:00"),
+  /** Demo clock (docs/DESIGN.md "Dates"). Empty means use the snapshot's data as-of date. */
+  CLOCK_DATE: z
+    .string()
+    .optional()
+    .transform((v) => (v ? v : undefined))
+    .refine((v) => v === undefined || DAY.test(v), "CLOCK_DATE must be YYYY-MM-DD"),
+  RELAY_API_URL: z.string().default(DEFAULT_RELAY_API_URL),
+  PATIENT_RELAY_HANDLE: z.string().optional(),
+  FAMILY_RELAY_HANDLES: z.string().optional(),
+  PATIENT_FINCHNODE_SUBJECT: z.string().default(DEFAULT_FINCHNODE_SUBJECT),
+  PATIENT_TIMEZONE: z.string().default(DEFAULT_TIMEZONE),
+});
+
+export type RelayConfig = {
+  /** Origin only (https://api.relayapp.im). The SDK adds /v1 itself. */
+  apiUrl: string;
+  /** RELAY_AGENT_TOKEN. Non-enumerable, so it never shows up when the config is printed or serialized. */
+  agentToken: string | undefined;
+};
+
+export type PatientConfig = {
+  finchnodeSubject: string;
+  /** Her Relay handle, lower case, without a leading "@". */
+  relayHandle: string | undefined;
+  /** Family members' Relay handles, normalized like relayHandle, in .env order, no duplicates. */
+  familyHandles: string[];
+  /** IANA time zone her day runs in. */
+  timezone: string;
+};
+
+export type Config = {
+  finchnode: { baseUrl: string; apiKey: string | undefined };
+  relay: RelayConfig;
+  patient: PatientConfig;
+  port: number;
+  databasePath: string;
+  checkinTime: string;
+  missedCheckinTime: string;
+  clockDate: string | undefined;
+};
+
+/** Thrown for a bad environment. The message names variables and problems, never values. */
+export class ConfigError extends Error {
+  override name = "ConfigError";
+}
+
+export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
+  // RELAY_AGENT_TOKEN is read here and nowhere near the schema, so a parse error can't echo it.
+  const { RELAY_AGENT_TOKEN, ...rest } = env;
+  const cleaned = Object.fromEntries(Object.entries(rest).map(([k, v]) => [k, v === "" ? undefined : v]));
+  const parsed = ConfigSchema.safeParse(cleaned);
+  if (!parsed.success) {
+    const problems = parsed.error.issues.map((i) => `${i.path.join(".") || "env"}: ${i.message}`);
+    throw new ConfigError(`Invalid configuration: ${problems.join("; ")}`);
+  }
+  const c = parsed.data;
+  const relay: RelayConfig = { apiUrl: relayOrigin(c.RELAY_API_URL), agentToken: undefined };
+  const token = RELAY_AGENT_TOKEN?.trim();
+  Object.defineProperty(relay, "agentToken", { value: token ? token : undefined, enumerable: false });
+
+  return {
+    finchnode: { baseUrl: c.FINCHNODE_BASE_URL, apiKey: c.FINCHNODE_API_KEY },
+    relay,
+    patient: {
+      finchnodeSubject: c.PATIENT_FINCHNODE_SUBJECT.trim(),
+      relayHandle: c.PATIENT_RELAY_HANDLE ? normalizeHandle(c.PATIENT_RELAY_HANDLE) || undefined : undefined,
+      familyHandles: parseHandles(c.FAMILY_RELAY_HANDLES),
+      timezone: validTimezone(c.PATIENT_TIMEZONE.trim()),
+    },
+    port: c.PORT,
+    databasePath: c.DATABASE_PATH,
+    checkinTime: c.CHECKIN_TIME,
+    missedCheckinTime: c.MISSED_CHECKIN_TIME,
+    clockDate: c.CLOCK_DATE,
+  };
+}
+
+/**
+ * A Relay handle as the API uses it: trimmed, without a leading "@" (the SDK
+ * docs and payloads use bare handles such as `harriet`), lower case. Matches
+ * normalizeHandle in src/relay/relay-client.ts, which compares handles this way.
+ */
+export function normalizeHandle(handle: string): string {
+  return handle.trim().replace(/^@+/, "").trim().toLowerCase();
+}
+
+/** Comma separated handles: trimmed, "@" stripped, empty entries and repeats dropped. */
+export function parseHandles(value: string | undefined): string[] {
+  if (!value) return [];
+  const seen = new Set<string>();
+  for (const part of value.split(",")) {
+    const handle = normalizeHandle(part);
+    if (handle) seen.add(handle);
+  }
+  return [...seen];
+}
+
+/** The IANA zone, or a ConfigError if Intl doesn't know it. */
+export function validTimezone(timezone: string): string {
+  try {
+    return new Intl.DateTimeFormat("en-US", { timeZone: timezone }).resolvedOptions().timeZone;
+  } catch {
+    throw new ConfigError(`PATIENT_TIMEZONE: "${timezone}" is not a time zone Intl knows (try America/Detroit)`);
+  }
+}
+
+/** RELAY_API_URL must be an origin; the SDK appends /v1 itself, so a path is a mistake. */
+function relayOrigin(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new ConfigError(`RELAY_API_URL: not a URL (expected an origin like ${DEFAULT_RELAY_API_URL})`);
+  }
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))
+    throw new ConfigError(`RELAY_API_URL: must use HTTPS (HTTP only on localhost), like ${DEFAULT_RELAY_API_URL}`);
+  if (url.username || url.password) throw new ConfigError("RELAY_API_URL: must not contain credentials");
+  if (url.pathname.replace(/\/+$/, "") !== "" || url.search || url.hash)
+    throw new ConfigError(`RELAY_API_URL: use the origin only, like ${DEFAULT_RELAY_API_URL} (the SDK adds /v1)`);
+  return url.origin;
+}
+
+/**
+ * The check-in date rules reason about: the demo clock if set, else the snapshot's
+ * data as-of date, else today. Nothing else should read the system clock for rules.
+ */
+export function resolveCheckinDate(clockDate: string | undefined, dataAsOf: string | undefined, now = new Date()): string {
+  return clockDate ?? dataAsOf ?? now.toISOString().slice(0, 10);
+}

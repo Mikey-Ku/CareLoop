@@ -1,0 +1,404 @@
+import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+import { createApp } from "./app.ts";
+import { createCheckinEngine } from "./checkin/engine.ts";
+import type { CheckinEngine, Clock } from "./checkin/engine-types.ts";
+import { snapshotLoader } from "./cli/simulator.ts";
+import { ConfigError, loadConfig, type Config } from "./config.ts";
+import { getCheckin, getCheckinPatient } from "./db/checkins.ts";
+import { familyMembers, syncFamilyMembers } from "./db/family.ts";
+import { openDatabase, upsertPatient, type Db } from "./db/index.ts";
+import { ConsentInactiveError } from "./finchnode/client.ts";
+import { loadRxNavCache } from "./finchnode/fixtures.ts";
+import { normalizeHealthRecord } from "./finchnode/normalize.ts";
+import type { HealthRecord } from "./finchnode/types.ts";
+import { assertNoWebhookSubscriptions, runRelayInbox } from "./relay/inbox.ts";
+import type { Messenger } from "./relay/messenger.ts";
+import { createRelayClient, type RelayClient, type RelayLog } from "./relay/relay-client.ts";
+import { RelayMessenger } from "./relay/relay-messenger.ts";
+import { patientIdFor } from "./patient-id.ts";
+import { createDailyScheduler, localDate, zonedInstant, type CancelTimer, type DailyScheduler } from "./scheduler.ts";
+
+// `npm run agent`: the real Relay agent for one senior. Opens the database,
+// links her FinchNode record, holds the Relay WebSocket inbox, runs the daily
+// check-in (CHECKIN_TIME) and missed check-in (MISSED_CHECKIN_TIME) jobs in her
+// time zone, and serves /health. startAgent takes every dependency so tests
+// run it without a token or network; main() below builds the real ones.
+//
+// Family: there is no family group (a Relay chat holds at most one person,
+// docs/adr/0001-family-chats-not-a-group.md). Each FAMILY_RELAY_HANDLES member
+// gets a family_members row; their own chat with the agent is linked when they
+// first message it (src/relay/inbox.ts), and family messages go to each linked chat.
+
+export const CHECKIN_JOB = "checkin";
+export const MISSED_JOB = "missed-checkin";
+const LINK_POLL_MS = 3_000;
+
+export const MISSING_TOKEN_MESSAGE =
+  "RELAY_AGENT_TOKEN is not set. Put the agent's Agent Token in .env (see FEEDBACK.md \"Relay setup\" and README.md), then run npm run agent again.";
+export const MISSING_HANDLE_MESSAGE =
+  "PATIENT_RELAY_HANDLE is not set. Put the senior's Relay handle in .env (see FEEDBACK.md \"Relay setup\"), then run npm run agent again.";
+
+/** The Relay functions the agent calls; injected so tests can fake them. */
+export type RelayOps = {
+  assertNoWebhookSubscriptions: typeof assertNoWebhookSubscriptions;
+  runRelayInbox: typeof runRelayInbox;
+};
+
+export type AgentDeps = {
+  config: Config;
+  db: Db;
+  relay: RelayClient;
+  /** Defaults to a RelayMessenger over `relay`. */
+  messenger?: Messenger;
+  /** FinchNode snapshot reader (the live client in production). */
+  loadSnapshot: (subject: string) => Promise<HealthRecord>;
+  /**
+   * Run startDay as soon as the senior is linked (--checkin-now). Without it, startDay
+   * still runs once when she is linked between CHECKIN_TIME and MISSED_CHECKIN_TIME
+   * with no check-in for today yet (late-start catch-up).
+   */
+  checkinNow?: boolean;
+  log?: (line: string) => void;
+  /** Current time for the scheduler and stored rows. */
+  now?: () => Date;
+  /** Timer for the scheduler and the link watcher. Defaults to setTimeout. */
+  setTimer?: (fn: () => void, ms: number) => CancelTimer;
+  /** How often to look for her first message while she isn't linked. */
+  linkPollMs?: number;
+  /** Port for /health; defaults to config.port. 0 picks a free one (tests). */
+  port?: number;
+  relayOps?: Partial<RelayOps>;
+};
+
+export type RunningAgent = {
+  patientId: string;
+  engine: CheckinEngine;
+  scheduler: DailyScheduler;
+  server: Server;
+  /** The port /health is served on. */
+  port: number;
+  /** Settles when the Relay inbox ends: after stop(), or rejected when the socket fails for good. */
+  inboxDone: Promise<void>;
+  /** Resolves the first time her Relay chat is linked (and --checkin-now or the late-start catch-up ran). */
+  linked: Promise<void>;
+  stop(): Promise<void>;
+};
+
+export class AgentStartError extends Error {
+  override name = "AgentStartError";
+}
+
+export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
+  const { config, db, relay } = deps;
+  const log = deps.log ?? ((line: string) => console.log(line));
+  const now = deps.now ?? (() => new Date());
+  const setTimer =
+    deps.setTimer ??
+    ((fn: () => void, ms: number): CancelTimer => {
+      const t = setTimeout(fn, ms);
+      return () => clearTimeout(t);
+    });
+  const ops: RelayOps = { assertNoWebhookSubscriptions, runRelayInbox, ...deps.relayOps };
+  const { finchnodeSubject: subject, relayHandle, timezone } = config.patient;
+  if (!relayHandle) throw new AgentStartError(MISSING_HANDLE_MESSAGE);
+  // Her own handle as a family member would send her the family's alerts about herself.
+  const familyHandles = config.patient.familyHandles.filter((h) => h !== relayHandle);
+  if (familyHandles.length < config.patient.familyHandles.length)
+    log(`[agent] FAMILY_RELAY_HANDLES lists the senior @${relayHandle}; she is not added as a family member`);
+
+  log(
+    `[agent] starting: subject ${subject}, senior @${relayHandle}, ${familyHandles.length} family handle(s), ` +
+      `check-in ${config.checkinTime} and missed check-in ${config.missedCheckinTime} ${timezone}` +
+      (config.clockDate ? `, demo check-in date pinned to ${config.clockDate}` : "") +
+      `, Relay ${config.relay.apiUrl}`,
+  );
+
+  // 1. Who she is: her record's given name names the patient row, as in the simulator.
+  const { patientId, preferredName } = await identifyPatient(db, subject, deps.loadSnapshot, log);
+
+  // 2. Patient row. Keep what the inbox stored (her chat id) and her sharing level.
+  const existing = db
+    .prepare(`SELECT relay_handle AS relayHandle, relay_chat_id AS relayChatId FROM patients WHERE id = ?`)
+    .get(patientId) as { relayHandle: string | null; relayChatId: string | null } | undefined;
+  const handleChanged = Boolean(existing?.relayHandle && existing.relayHandle !== relayHandle);
+  if (handleChanged) log(`[agent] PATIENT_RELAY_HANDLE changed from @${existing?.relayHandle} to @${relayHandle}; her old chat link is dropped`);
+  upsertPatient(db, {
+    id: patientId,
+    finchnodePatientId: subject,
+    preferredName,
+    relayHandle,
+    relayChatId: handleChanged ? null : (existing?.relayChatId ?? null),
+    checkinTime: config.checkinTime,
+    timezone,
+  });
+  log(`[agent] patient ${patientId} (${preferredName}) ready in ${config.databasePath}`);
+
+  // 2b. Family members from FAMILY_RELAY_HANDLES. Links made earlier are kept. Each one links
+  // their own chat by messaging the agent; until then family messages skip them (non-blocking).
+  const family = syncFamilyMembers(db, patientId, familyHandles);
+  for (const handle of family.notConfigured)
+    log(`[agent] @${handle} is no longer in FAMILY_RELAY_HANDLES but stays a family member (still linked if it was); delete their family_members row to stop it`);
+  for (const member of familyMembers(db, patientId)) {
+    if (member.chatId) log(`[agent] family @${member.handle} is linked (chat ${member.chatId})`);
+    else log(`[agent] Waiting for @${member.handle} to message the agent (family member; family messages skip them until then)`);
+  }
+
+  // 3. Engine over Relay.
+  const clock: Clock = { now: () => now().toISOString() };
+  const messenger = deps.messenger ?? new RelayMessenger(relay);
+  const engine = createCheckinEngine({ db, messenger, clock, loadSnapshot: deps.loadSnapshot }, { missedCheckinTime: config.missedCheckinTime });
+
+  // 4. WebSocket delivery needs zero webhook subscriptions.
+  await ops.assertNoWebhookSubscriptions(relay);
+  log("[agent] Relay: no webhook subscriptions, WebSocket delivery is available");
+
+  const relayLog: RelayLog = (event, fields) => log(`[relay] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`);
+  const isLinked = () => Boolean(getCheckinPatient(db, patientId)?.relayChatId);
+
+  // 5. Inbox: holds the socket until stop().
+  const abort = new AbortController();
+  const inboxDone = ops.runRelayInbox({ relay, db, engine, patientHandle: relayHandle, signal: abort.signal, log: relayLog });
+  inboxDone.then(
+    () => log("[agent] Relay inbox closed"),
+    (error: unknown) => log(`[agent] Relay inbox stopped: ${errorSummary(error)}`),
+  );
+  log(`[agent] Relay inbox listening for @${relayHandle}`);
+
+  // 6. Daily jobs in her time zone.
+  const scheduler = createDailyScheduler({
+    timezone,
+    clockDate: config.clockDate,
+    clock: now,
+    setTimer,
+    log,
+    jobs: [
+      {
+        name: CHECKIN_JOB,
+        time: config.checkinTime,
+        run: async (day) => {
+          if (!isLinked()) {
+            log(`[agent] Waiting for @${relayHandle} to send the agent a message in Relay; skipping the ${day} check-in`);
+            return;
+          }
+          const result = await engine.startDay(patientId, day);
+          log(`[agent] check-in ${day}: ${describeDay(result)}`);
+        },
+      },
+      {
+        name: MISSED_JOB,
+        time: config.missedCheckinTime,
+        run: async (day) => {
+          if (!isLinked()) return;
+          const result = await engine.runMissedCheckin(patientId, day);
+          log(`[agent] missed check-in ${day}: ${result === "marked_missed" ? "marked missed, family told" : "nothing to do"}`);
+        },
+      },
+    ],
+  });
+  scheduler.start();
+
+  // 7. /health.
+  const server = await listen(createApp({ config }), deps.port ?? config.port);
+  const port = (server.address() as AddressInfo).port;
+  log(`[agent] health check on http://localhost:${port}/health`);
+
+  // 8. Once she's linked: --checkin-now, else the late-start catch-up. The scheduler only
+  // fires at CHECKIN_TIME, so an agent started (or linked) after it would skip today.
+  let cancelWatch: CancelTimer | undefined;
+  let stopping = false;
+  async function onLinked(): Promise<void> {
+    log(`[agent] @${relayHandle} is linked to the agent`);
+    if (deps.checkinNow) {
+      await scheduler.runNow(CHECKIN_JOB);
+      return;
+    }
+    const at = now();
+    const localDay = localDate(at, timezone);
+    const day = config.clockDate ?? localDay;
+    const checkinAt = zonedInstant(localDay, config.checkinTime, timezone);
+    const missedAt = zonedInstant(localDay, config.missedCheckinTime, timezone);
+    if (at.getTime() >= checkinAt && at.getTime() < missedAt && !getCheckin(db, patientId, day)) {
+      log(
+        `[agent] Late start: it's past the ${config.checkinTime} check-in time and before ${config.missedCheckinTime}, ` +
+          `with no check-in for ${day} yet; running it now`,
+      );
+      await scheduler.runNow(CHECKIN_JOB);
+    }
+  }
+  const linked = new Promise<void>((resolve) => {
+    if (isLinked()) {
+      void onLinked().finally(resolve);
+      return;
+    }
+    log(`[agent] Waiting for @${relayHandle} to send the agent a message in Relay`);
+    const poll = () => {
+      cancelWatch = undefined;
+      if (stopping) return;
+      if (isLinked()) {
+        void onLinked().finally(resolve);
+        return;
+      }
+      cancelWatch = setTimer(poll, deps.linkPollMs ?? LINK_POLL_MS);
+    };
+    cancelWatch = setTimer(poll, deps.linkPollMs ?? LINK_POLL_MS);
+  });
+
+  let stopped: Promise<void> | undefined;
+  return {
+    patientId,
+    engine,
+    scheduler,
+    server,
+    port,
+    inboxDone,
+    linked,
+    stop() {
+      stopped ??= (async () => {
+        stopping = true;
+        cancelWatch?.();
+        scheduler.stop();
+        abort.abort();
+        await inboxDone.catch(() => {});
+        await closeServer(server);
+        log("[agent] stopped");
+      })();
+      return stopped;
+    },
+  };
+}
+
+async function identifyPatient(
+  db: Db,
+  subject: string,
+  loadSnapshot: (subject: string) => Promise<HealthRecord>,
+  log: (line: string) => void,
+): Promise<{ patientId: string; preferredName: string }> {
+  try {
+    const record = normalizeHealthRecord(await loadSnapshot(subject), { rxnav: loadRxNavCache() });
+    const givenName = record.demographics?.givenName ?? record.demographics?.name?.split(" ")[0];
+    log(`[agent] FinchNode record for ${subject} read (data as-of ${record.dataAsOf ?? "unknown"})`);
+    return { patientId: patientIdFor(givenName, subject), preferredName: givenName ?? subject };
+  } catch (error) {
+    // Consent ended: still start, so the engine's consent-ended path tells her. FinchNode down: reuse her row.
+    const row = db.prepare(`SELECT id, preferred_name AS preferredName FROM patients WHERE finchnode_patient_id = ?`).get(subject) as
+      | { id: string; preferredName: string }
+      | undefined;
+    if (error instanceof ConsentInactiveError) {
+      log(`[agent] record consent for ${subject} has ended; the check-in will say so`);
+      return row ? { patientId: row.id, preferredName: row.preferredName } : { patientId: patientIdFor(undefined, subject), preferredName: subject };
+    }
+    if (row) {
+      log(`[agent] could not read FinchNode for ${subject} (${errorSummary(error)}); using patient ${row.id} from the database`);
+      return { patientId: row.id, preferredName: row.preferredName };
+    }
+    throw error;
+  }
+}
+
+function describeDay(result: Awaited<ReturnType<CheckinEngine["startDay"]>>): string {
+  if (result.kind === "sent") return `sent with ${result.questionIds.length} question(s): ${result.questionIds.join(", ")}`;
+  if (result.kind === "already_started") return "already started";
+  return "record consent has ended; she was told";
+}
+
+function listen(app: ReturnType<typeof createApp>, port: number): Promise<Server> {
+  return new Promise((resolve, reject) => {
+    const server = app.listen(port, (err?: Error) => (err ? reject(err) : resolve(server)));
+  });
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolve) => {
+    server.close(() => resolve());
+    server.closeIdleConnections();
+  });
+}
+
+function errorSummary(error: unknown): string {
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  return "non-error thrown";
+}
+
+// ---- process entry point ----
+
+const USAGE = "usage: npm run agent [-- --checkin-now]";
+
+export async function main(argv: string[] = process.argv.slice(2), env: Record<string, string | undefined> = process.env): Promise<number> {
+  let checkinNow = false;
+  try {
+    ({
+      values: { "checkin-now": checkinNow = false },
+    } = parseArgs({ args: argv, options: { "checkin-now": { type: "boolean" } }, strict: true }));
+  } catch (error) {
+    console.error(`error: ${errorSummary(error)}\n${USAGE}`);
+    return 2;
+  }
+
+  let config: Config;
+  try {
+    config = loadConfig(env);
+  } catch (error) {
+    console.error(error instanceof ConfigError ? `error: ${error.message}` : `error: ${errorSummary(error)}`);
+    return 1;
+  }
+  const token = config.relay.agentToken;
+  if (!token) {
+    console.error(`error: ${MISSING_TOKEN_MESSAGE}`);
+    return 1;
+  }
+  if (!config.patient.relayHandle) {
+    console.error(`error: ${MISSING_HANDLE_MESSAGE}`);
+    return 1;
+  }
+
+  const db = openDatabase(config.databasePath);
+  let agent: RunningAgent;
+  try {
+    agent = await startAgent({
+      config,
+      db,
+      relay: createRelayClient({ agentToken: token, apiUrl: config.relay.apiUrl }),
+      loadSnapshot: snapshotLoader(config, true),
+      checkinNow,
+    });
+  } catch (error) {
+    console.error(`[agent] could not start: ${errorSummary(error)}`);
+    db.close();
+    return 1;
+  }
+
+  return new Promise<number>((resolve) => {
+    let exiting = false;
+    const shutdown = (code: number, why: string) => {
+      if (exiting) return;
+      exiting = true;
+      console.log(`[agent] ${why}, shutting down`);
+      setTimeout(() => {
+        console.error("[agent] shutdown took too long, exiting");
+        process.exit(code || 1);
+      }, 10_000).unref();
+      void agent.stop().finally(() => {
+        db.close();
+        resolve(code);
+      });
+    };
+    process.once("SIGINT", () => shutdown(0, "SIGINT received"));
+    process.once("SIGTERM", () => shutdown(0, "SIGTERM received"));
+    // The inbox only ends by itself when the socket can't continue (bad token, a webhook was added).
+    agent.inboxDone.then(
+      () => shutdown(0, "Relay inbox ended"),
+      () => shutdown(1, "Relay inbox failed"),
+    );
+  });
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const code = await main();
+  process.exitCode = code;
+  // Anything the SDK left open must not keep a stopped agent alive.
+  setTimeout(() => process.exit(code), 1_000).unref();
+}

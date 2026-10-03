@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Synthetic discharge sheet (demo)</title>
+<!--
+  Synthetic demo document for the MHacks 2026 hospital paper check.
+  Every person, number and organization on it is fictional. It must match
+  fixtures/papers/harriet-discharge.extracted.json exactly: one planted change,
+  aspirin 81 mg STOPPED; every other medicine CONTINUE.
+  Print on US letter, portrait, 100% scale, with "Background graphics" on.
+-->
+<style>
+  @page { size: letter portrait; margin: 0.4in; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #ffffff; color: #000000; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 13pt; line-height: 1.25; }
+  .page { width: 7.7in; margin: 0 auto; }
+  .banner {
+    border: 4px solid #000000; background: #ffe600; color: #000000;
+    text-align: center; font-weight: bold; font-size: 15pt; white-space: nowrap;
+    padding: 0.08in 0.1in; margin: 0 0 0.12in 0;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  .banner.bottom { margin: 0.12in 0 0 0; }
+  header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 3px solid #000000; padding-bottom: 0.06in; }
+  .org { font-size: 20pt; font-weight: bold; }
+  .doc-title { font-size: 16pt; font-weight: bold; text-align: right; }
+  .patient { display: grid; grid-template-columns: 1fr 1fr; gap: 0.02in 0.3in; margin: 0.1in 0; font-size: 13pt; }
+  .patient b { display: inline-block; min-width: 1.45in; }
+  h2 { font-size: 15pt; margin: 0.1in 0 0.05in 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 13pt; }
+  th, td { border: 2px solid #000000; padding: 0.035in 0.07in; text-align: left; vertical-align: top; }
+  th { background: #e6e6e6; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  td.med { font-weight: bold; white-space: nowrap; }
+  td.dose { white-space: nowrap; }
+  td.change { font-weight: bold; white-space: nowrap; }
+  tr.stop td { background: #f2f2f2; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  tr.stop td.change { font-size: 15pt; text-decoration: underline; }
+  .notes { margin-top: 0.08in; font-size: 12pt; }
+  .notes p { margin: 0.03in 0; }
+  .sign { display: flex; justify-content: space-between; margin-top: 0.08in; font-size: 12pt; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="banner">SYNTHETIC DEMO DOCUMENT, NOT A REAL MEDICAL RECORD</div>
+
+  <header>
+    <div class="org">Northstar Health System (Synthetic)</div>
+    <div class="doc-title">Discharge Medication List</div>
+  </header>
+
+  <section class="patient">
+    <div><b>Patient:</b> Harriet Lindqvist</div>
+    <div><b>MRN:</b> SYN-20781</div>
+    <div><b>Date of birth:</b> 1948-03-02</div>
+    <div><b>Discharge date:</b> 2026-08-20</div>
+    <div><b>Unit:</b> 4 West (fictional)</div>
+    <div><b>Doctor:</b> Dr. Wren Halvorsen (fictional)</div>
+  </section>
+
+  <h2>Your medicines after you go home</h2>
+  <table>
+    <thead>
+      <tr><th>Medicine</th><th>Dose</th><th>How to take</th><th>Change</th></tr>
+    </thead>
+    <tbody>
+      <tr class="stop"><td class="med">aspirin</td><td class="dose">81 mg</td><td>Stop taking this medicine.</td><td class="change">STOP</td></tr>
+      <tr><td class="med">apixaban</td><td class="dose">5 mg</td><td>1 tablet by mouth twice daily</td><td class="change">CONTINUE</td></tr>
+      <tr><td class="med">metoprolol succinate ER</td><td class="dose">50 mg</td><td>1 tablet by mouth once daily, do not crush</td><td class="change">CONTINUE</td></tr>
+      <tr><td class="med">furosemide</td><td class="dose">40 mg</td><td>1 tablet by mouth every morning</td><td class="change">CONTINUE</td></tr>
+      <tr><td class="med">lisinopril</td><td class="dose">10 mg</td><td>1 tablet by mouth once daily</td><td class="change">CONTINUE</td></tr>
+      <tr><td class="med">atorvastatin</td><td class="dose">40 mg</td><td>1 tablet by mouth at bedtime</td><td class="change">CONTINUE</td></tr>
+      <tr><td class="med">metformin</td><td class="dose">500 mg</td><td>1 tablet by mouth with the evening meal</td><td class="change">CONTINUE</td></tr>
+      <tr><td class="med">levothyroxine</td><td class="dose">75 mcg</td><td>1 tablet every morning on an empty stomach</td><td class="change">CONTINUE</td></tr>
+      <tr><td class="med">omeprazole</td><td class="dose">20 mg</td><td>1 capsule by mouth before breakfast</td><td class="change">CONTINUE</td></tr>
+      <tr><td class="med">acetaminophen</td><td class="dose">500 mg</td><td>1 tablet every 8 hours as needed for knee pain</td><td class="change">CONTINUE</td></tr>
+      <tr><td class="med">sertraline</td><td class="dose">50 mg</td><td>1 tablet by mouth once daily</td><td class="change">CONTINUE</td></tr>
+      <tr><td class="med">trazodone</td><td class="dose">50 mg</td><td>1 tablet at bedtime as needed for sleep</td><td class="change">CONTINUE</td></tr>
+      <tr><td class="med">potassium chloride ER</td><td class="dose">20 mEq</td><td>1 tablet by mouth once daily with food</td><td class="change">CONTINUE</td></tr>
+      <tr><td class="med">cholecalciferol (vitamin D3)</td><td class="dose">25 mcg</td><td>1 tablet by mouth once daily</td><td class="change">CONTINUE</td></tr>
+    </tbody>
+  </table>
+
+  <div class="notes">
+    <p><b>Follow-up:</b> See your primary care doctor within 7 days. Bring this list to every visit.</p>
+    <p><b>Questions about your medicines:</b> Call the Northstar pharmacy line (fictional) at 555-0100.</p>
+  </div>
+
+  <div class="sign">
+    <div>Reviewed with patient by: N. Okafor-Lind, RN (fictional)</div>
+    <div>Page 1 of 1</div>
+  </div>
+
+  <div class="banner bottom">SYNTHETIC DEMO DOCUMENT, NOT A REAL MEDICAL RECORD</div>
+
+</div>
+</body>
+</html>

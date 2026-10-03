@@ -1,0 +1,50 @@
+{
+  "description": "Expected rule results for Harriet, from docs/DESIGN.md \"Rules engine\" (answer key). Each rule's status must match exactly; details must contain at least these fields and values.",
+  "patient": "patient-demo-polypharmacy",
+  "checkinDate": "2026-09-01",
+  "results": [
+    {
+      "ruleId": "R1",
+      "status": "flag",
+      "why": "Reassess: eGFR 31 and falling (33 on 2026-01-20, 31 on 2026-07-14), on metformin.",
+      "details": { "level": "reassess", "egfr": 31, "previousEgfr": 33, "falling": true },
+      "evidenceDrugs": ["metformin"]
+    },
+    {
+      "ruleId": "R2",
+      "status": "checked",
+      "why": "1 of 3 criteria (creatinine 1.7; age 78 and weight 70.5 kg do not count), so 5 mg is right.",
+      "details": {
+        "criteriaMet": 1,
+        "criteria": { "age": false, "weight": false, "creatinine": true },
+        "age": 78,
+        "weightKg": 70.5,
+        "creatinine": 1.7,
+        "doseMg": 5,
+        "expectedMg": 5
+      },
+      "evidenceDrugs": ["apixaban"]
+    },
+    {
+      "ruleId": "R3",
+      "status": "flag",
+      "why": "Apixaban with aspirin and sertraline.",
+      "details": { "drugs": ["apixaban", "aspirin", "sertraline"] },
+      "evidenceDrugs": ["apixaban", "aspirin", "sertraline"]
+    },
+    {
+      "ruleId": "R4",
+      "status": "flag",
+      "why": "Potassium 4.9 (range 3.5 to 5.1) on lisinopril plus potassium chloride, eGFR falling.",
+      "details": { "potassium": 4.9, "inTopQuarter": true, "egfrFalling": true, "drugs": ["lisinopril", "potassium chloride"] },
+      "evidenceDrugs": ["lisinopril", "potassium chloride"]
+    },
+    {
+      "ruleId": "R5",
+      "status": "skipped",
+      "why": "One fill per drug, so refill timing can't be checked.",
+      "details": { "drugsWithFills": 14, "drugsWithRepeatFills": 0 },
+      "evidenceDrugs": []
+    }
+  ]
+}
