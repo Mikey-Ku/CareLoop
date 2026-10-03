@@ -12,6 +12,8 @@ export type MetricSnapshot = {
   breathingRate?: number;
   heartRateConfidence?: number;
   breathingRateConfidence?: number;
+  heartRateStable?: boolean;
+  breathingRateStable?: boolean;
   heartRateTimestampUs?: number;
   breathingRateTimestampUs?: number;
 };
@@ -74,6 +76,8 @@ export function normalizePresageMetrics(metrics: unknown, fallbackTimestampUs?: 
     ...(respiration?.value === undefined ? {} : { breathingRate: respiration.value }),
     ...(pulse?.confidence === undefined ? {} : { heartRateConfidence: pulse.confidence }),
     ...(respiration?.confidence === undefined ? {} : { breathingRateConfidence: respiration.confidence }),
+    ...(pulse?.stable === undefined ? {} : { heartRateStable: pulse.stable }),
+    ...(respiration?.stable === undefined ? {} : { breathingRateStable: respiration.stable }),
     ...(pulseTimestamp === undefined ? {} : { heartRateTimestampUs: pulseTimestamp }),
     ...(breathingTimestamp === undefined ? {} : { breathingRateTimestampUs: breathingTimestamp }),
   };
@@ -97,11 +101,15 @@ export function mergeMetricSnapshots(previous: MetricSnapshot, next: MetricSnaps
   const breathingRate = latestValue(previous.breathingRate, previous.breathingRateTimestampUs, next.breathingRate, next.breathingRateTimestampUs);
   const heartRateConfidence = useNextHeartRate ? next.heartRateConfidence : previous.heartRateConfidence;
   const breathingRateConfidence = useNextBreathingRate ? next.breathingRateConfidence : previous.breathingRateConfidence;
+  const heartRateStable = useNextHeartRate && next.heartRateStable !== undefined ? next.heartRateStable : previous.heartRateStable;
+  const breathingRateStable = useNextBreathingRate && next.breathingRateStable !== undefined ? next.breathingRateStable : previous.breathingRateStable;
   return {
     ...(heartRate === undefined ? {} : { heartRate }),
     ...(breathingRate === undefined ? {} : { breathingRate }),
     ...(heartRateConfidence === undefined ? {} : { heartRateConfidence }),
     ...(breathingRateConfidence === undefined ? {} : { breathingRateConfidence }),
+    ...(heartRateStable === undefined ? {} : { heartRateStable }),
+    ...(breathingRateStable === undefined ? {} : { breathingRateStable }),
     ...(heartRateTimestampUs === undefined ? {} : { heartRateTimestampUs }),
     ...(breathingRateTimestampUs === undefined ? {} : { breathingRateTimestampUs }),
   };
@@ -134,6 +142,10 @@ export function resultFromSnapshot(
   return {
     heartRate: snapshot.heartRate ?? null,
     breathingRate: snapshot.breathingRate ?? null,
+    heartRateConfidence: snapshot.heartRateConfidence ?? null,
+    breathingRateConfidence: snapshot.breathingRateConfidence ?? null,
+    heartRateStable: snapshot.heartRateStable ?? null,
+    breathingRateStable: snapshot.breathingRateStable ?? null,
     confidence: confidences.length > 0 ? Math.min(...confidences) : null,
     measuredAt: timestampToIso(timestamps.length > 0 ? Math.max(...timestamps) : undefined, options.timestampOriginMs) ?? null,
     source,

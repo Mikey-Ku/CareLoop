@@ -48,10 +48,10 @@ class FakeSession implements PresageSession {
     this.emit("error", 2, "authentication failed", false);
   }
 
-  private emit(event: "processingStatus", status: number): void;
-  private emit(event: "metrics", buffer: Buffer, timestampUs: number): void;
-  private emit(event: "error", code: number, message: string, retryable: boolean): void;
-  private emit(event: EventName, ...args: never[]): void {
+  protected emit(event: "processingStatus", status: number): void;
+  protected emit(event: "metrics", buffer: Buffer, timestampUs: number): void;
+  protected emit(event: "error", code: number, message: string, retryable: boolean): void;
+  protected emit(event: EventName, ...args: never[]): void {
     this.handlers.get(event)?.(...args);
   }
 }
@@ -84,6 +84,23 @@ describe("Presage file runner", () => {
     expect(hasUsableVitals(result)).toBe(false);
     expect(result.heartRate).toBeNull();
     expect(result.breathingRate).toBeNull();
+  });
+
+  it("does not treat a zero-confidence reading as usable", async () => {
+    class LowConfidenceSession extends FakeSession {
+      override start(): void {
+        this.emit("processingStatus", 3);
+        const metrics = Metrics.encode({
+          cardio: { pulseRate: [{ value: 72, confidence: 0, timestamp: 1_760_000_000_000_000 }] },
+          breathing: { rate: [{ value: 16, confidence: 80, timestamp: 1_760_000_000_000_000 }] },
+        }).finish();
+        this.emit("metrics", Buffer.from(metrics), 1_760_000_000_000_000);
+        this.emit("processingStatus", 1);
+      }
+    }
+    const result = await runPresageVideo({ videoPath: "face.mp4", apiKey: "test-key", sdkFactory: () => new LowConfidenceSession() });
+    expect(result.heartRate).toBe(72);
+    expect(hasUsableVitals(result)).toBe(false);
   });
 
   it("captures SDK errors without exposing the API key", async () => {

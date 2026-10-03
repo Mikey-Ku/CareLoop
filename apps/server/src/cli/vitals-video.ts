@@ -52,6 +52,10 @@ export async function main(argv: string[], env: Record<string, string | undefine
     ? {
         heartRate: null,
         breathingRate: null,
+        heartRateConfidence: null,
+        breathingRateConfidence: null,
+        heartRateStable: null,
+        breathingRateStable: null,
         confidence: null,
         measuredAt: null,
         source: "video_file" as const,

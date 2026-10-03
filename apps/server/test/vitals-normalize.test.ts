@@ -14,6 +14,10 @@ describe("Presage metric normalization", () => {
     expect(result).toMatchObject({
       heartRate: 72,
       breathingRate: 16,
+      heartRateConfidence: 88,
+      breathingRateConfidence: 80,
+      heartRateStable: true,
+      breathingRateStable: true,
       confidence: 80,
       measuredAt: "2025-10-09T08:53:20.100Z",
       source: "video_file",

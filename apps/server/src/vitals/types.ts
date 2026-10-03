@@ -15,6 +15,10 @@ export type VitalsError = {
 export type VitalsResult = {
   heartRate: number | null;
   breathingRate: number | null;
+  heartRateConfidence: number | null;
+  breathingRateConfidence: number | null;
+  heartRateStable: boolean | null;
+  breathingRateStable: boolean | null;
   confidence: number | null;
   measuredAt: string | null;
   source: VitalsSource;
@@ -26,6 +30,10 @@ export function emptyVitalsResult(source: VitalsSource, errors: VitalsError[] = 
   return {
     heartRate: null,
     breathingRate: null,
+    heartRateConfidence: null,
+    breathingRateConfidence: null,
+    heartRateStable: null,
+    breathingRateStable: null,
     confidence: null,
     measuredAt: null,
     source,
