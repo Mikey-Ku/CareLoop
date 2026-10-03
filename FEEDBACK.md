@@ -53,3 +53,11 @@ Demo:
 - [ ] Confirm the wording of rules R3 (bleeding combination) and R4 (potassium) against a drug interaction reference.
 - [ ] Check MHacks prize tracks (FinchNode, ElevenLabs, Presage through MLH, Relay) and note them here.
 - [ ] Assign owners: records and rules, Relay agent, voice, vitals, demo and pitch.
+
+Photon care summaries (branch photon/care-summaries):
+
+- [ ] Create a Photon project (https://photon.codes) and put `SPECTRUM_PROJECT_ID` and `SPECTRUM_PROJECT_SECRET` in `.env`.
+- [ ] Copy `care-contacts.example.json` to `care-contacts.json` and put in the doctor's and the emergency contact's real numbers (synthetic patient, real test phones).
+- [ ] From each of those two phones, text the Photon line once before the first summary (Apple marks cold messages as junk).
+- [ ] Check the summaries with `npm run care:send -- --day 2026-09-01 --dry-run`, then run the agent.
+- [ ] Decide whether the doctor's summary should also go out after a voice call (lanes 2 and 3) as a second trigger, or stay one per day.

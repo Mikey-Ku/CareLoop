@@ -1,0 +1,11 @@
+{
+  "doctor": {
+    "name": "Dr. Patel",
+    "phone": "+1 555 555 0100"
+  },
+  "emergencyContact": {
+    "name": "Sarah",
+    "relationship": "daughter",
+    "phone": "+1 555 555 0101"
+  }
+}

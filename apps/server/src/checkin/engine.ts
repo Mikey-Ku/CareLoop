@@ -107,7 +107,15 @@ export type EngineOptions = {
   missedCheckinTime?: string;
   /** RxNav lookups for normalization. Defaults to the recorded cache in fixtures/. */
   rxnav?: RxNavCache;
+  /**
+   * Called once a day's check-in is over (checked in, "not today", or marked missed), after
+   * her messages and the family's went out. The care summaries over Photon hang off this
+   * (src/care/service.ts). Errors it throws are swallowed: it can't undo or fail the check-in.
+   */
+  onDayFinished?: (event: DayFinished) => Promise<void> | void;
 };
+
+export type DayFinished = { patientId: string; day: string; outcome: DayOutcome };
 
 /** Which check-in step a message's buttons belong to; recorded with the sent message id once it is out. */
 type PromptRef = { checkinId: number; step: PromptStep; questionIndex: number };
@@ -137,6 +145,18 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
   let rxnav = options.rxnav;
   const rxnavCache = () => (rxnav ??= loadRxNavCache());
   const paperFlow = createPaperFlow({ db, clock, rxnav: rxnavCache });
+  // Days the current inbound plan finished; read right after its transaction commits.
+  let finishedDays: DayFinished[] = [];
+
+  async function notifyFinished(events: DayFinished[]): Promise<void> {
+    for (const event of events) {
+      try {
+        await options.onDayFinished?.(event);
+      } catch {
+        // The hook owns its errors (the care service logs and never throws).
+      }
+    }
+  }
 
   /**
    * Send in order. Every send is attempted even if an earlier one fails, so one family
@@ -207,6 +227,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
 
   function finishCheckedIn(patient: CheckinPatient, c: CheckinRow, chatId: string): Send[] {
     updateCheckin(db, c.id, { step: "done", pendingFlagId: null, finishedAt: clock.now() });
+    finishedDays.push({ patientId: patient.id, day: c.date, outcome: "checked_in" });
     return [
       {
         chatId,
@@ -235,6 +256,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
 
   function notToday(patient: CheckinPatient, c: CheckinRow, chatId: string): Send[] {
     updateCheckin(db, c.id, { status: "skipped", step: "done", pendingFlagId: null, finishedAt: clock.now() });
+    finishedDays.push({ patientId: patient.id, day: c.date, outcome: "not_today" });
     return [
       { chatId, message: { text: notTodayReply(patient.preferredName) }, key: `${patient.id}:${c.date}:not-today` },
       ...familyStatus(patient, "not_today", c.answers, c.date),
@@ -521,8 +543,15 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
           }
         }
       }
+      finishedDays = [];
       const sends = db.transaction(() => planInbound(msg, fresh))();
-      await deliver(sends);
+      const finished = finishedDays;
+      finishedDays = [];
+      try {
+        await deliver(sends);
+      } finally {
+        await notifyFinished(finished);
+      }
     },
 
     async startPaperCheck(patientId: string, paper: ExtractedPaper, attachmentId?: string): Promise<{ scanId: number }> {
@@ -548,7 +577,11 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         return toFamily(patient, familyMissedAlert(patient.preferredName, missedCheckinTime), `${patientId}:${day}:missed`);
       })();
       if (!sends) return "nothing_to_do";
-      await deliver(sends);
+      try {
+        await deliver(sends);
+      } finally {
+        await notifyFinished([{ patientId, day, outcome: "missed" }]);
+      }
       return "marked_missed";
     },
   };
