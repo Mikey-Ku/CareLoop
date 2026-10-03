@@ -235,7 +235,7 @@ describe("packet: today's questions follow the red-flag cadence", () => {
 
   it("with calm answers yesterday, matching the engine, they wait a day", () => {
     const history = [
-      { day: "2026-09-01", questionId: "hf-breathing-lying-flat", answer: "No" },
+      { day: "2026-09-01", questionId: "hf-breathing-lying-flat", answer: "Fine" },
       { day: "2026-09-01", questionId: "anticoagulant-bleeding", answer: "No" },
     ];
     const p = buildContextPacket({ record: harriet, ruleResults: [], checkinDate: "2026-09-02", history });

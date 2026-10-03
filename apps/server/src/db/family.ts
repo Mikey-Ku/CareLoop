@@ -95,6 +95,34 @@ export function familyMembers(db: Db, patientId: string): FamilyMember[] {
   return db.prepare(`SELECT ${COLUMNS} FROM family_members WHERE patient_id = ? ORDER BY rowid`).all(patientId) as FamilyMember[];
 }
 
+// Family relays (family_relays, migration 6): things she asked the assistant to pass on to
+// her family ("tell Sarah I love her"). Passed on at once to every linked family chat; with
+// none linked yet, kept until one is (CheckinEngine.passOnFamilyMessages).
+
+export type FamilyRelay = { id: number; patientId: string; text: string; createdAt: string; passedOnAt: string | null };
+
+/** Store something to pass on. `passedOnAt` is set when it goes out right away. */
+export function addFamilyRelay(db: Db, input: { patientId: string; text: string; createdAt: string; passedOnAt: string | null }): number {
+  const info = db
+    .prepare(`INSERT INTO family_relays (patient_id, text, created_at, passed_on_at) VALUES (?, ?, ?, ?)`)
+    .run(input.patientId, input.text, input.createdAt, input.passedOnAt);
+  return Number(info.lastInsertRowid);
+}
+
+/** What she asked to pass on that no family chat has had yet, oldest first. */
+export function waitingFamilyRelays(db: Db, patientId: string): FamilyRelay[] {
+  return db
+    .prepare(
+      `SELECT id, patient_id AS patientId, text, created_at AS createdAt, passed_on_at AS passedOnAt FROM family_relays
+       WHERE patient_id = ? AND passed_on_at IS NULL ORDER BY id`,
+    )
+    .all(patientId) as FamilyRelay[];
+}
+
+export function markFamilyRelayPassedOn(db: Db, id: number, at: string): void {
+  db.prepare(`UPDATE family_relays SET passed_on_at = ? WHERE id = ? AND passed_on_at IS NULL`).run(at, id);
+}
+
 /** The family member(s) whose direct chat this is. Never the senior: her chat is patients.relay_chat_id. */
 export function familyMembersForChat(db: Db, chatId: string): FamilyMember[] {
   return db.prepare(`SELECT ${COLUMNS} FROM family_members WHERE chat_id = ? ORDER BY rowid`).all(chatId) as FamilyMember[];

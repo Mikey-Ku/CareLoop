@@ -1,5 +1,5 @@
 import type { MessageWebhookData, RelayWebhookEvent, WebSocketFullSyncContext } from "@relaymessenger/sdk";
-import { familyWelcome } from "../checkin/copy.ts";
+import { familyWelcome, photoNotYet } from "../checkin/copy.ts";
 import type { CheckinEngine } from "../checkin/engine-types.ts";
 import { normalizeHandle as familyHandle } from "../config.ts";
 import { getCheckinPatient, patientForChat } from "../db/checkins.ts";
@@ -36,7 +36,7 @@ export type InboxDeps = {
   patientHandle: string;
   /** Used to mark the senior's chat Read after her message is handled, to list chats on FULL sync, and to send the family welcome. */
   relay: Pick<RelayClient, "chats">;
-  /** Sends the family welcome. Defaults to a RelayMessenger over `relay`. */
+  /** Sends the family welcome and the reply to her photos. Defaults to a RelayMessenger over `relay`. */
   messenger?: Messenger;
   log?: RelayLog;
   now?: () => string;
@@ -243,13 +243,17 @@ export async function processEvent(deps: InboxDeps, event: RelayWebhookEvent): P
   }
 
   if (data.parts.some((part) => part.type === "media")) {
-    // TODO(run 6, hospital paper check): a photo arrives as `message.received`
+    // TODO(lane C, hospital paper check): a photo arrives as `message.received`
     // with a part { type: "media", id, url, filename, mime_type, size_bytes,
     // width?, height? } (MediaPartResponse in the SDK's types.d.ts); `url` is
     // signed and valid about 60 minutes, so download it promptly and store it
-    // in paper_scans. Until then the whole message is skipped, caption included,
-    // so a caption is never read as an answer.
+    // in paper_scans, then hand it to the paper check instead of this reply.
+    // Until then the photo isn't read: she gets photoNotYet (kind, points to her
+    // doctor or pharmacist), and the caption is never read as an answer.
     log("relay_media_skipped", { ...base, chat_id: data.chat.id, patient_id: patient.id });
+    const messenger = deps.messenger ?? new RelayMessenger(deps.relay);
+    await messenger.send(data.chat.id, { text: photoNotYet(patient.preferredName) }, `${patient.id}:photo:${data.id}`);
+    await markRead(deps, log, base, data.chat.id);
     return "media_skipped";
   }
 
@@ -266,15 +270,20 @@ export async function processEvent(deps: InboxDeps, event: RelayWebhookEvent): P
     at: data.sent_at ?? event.created_at,
   };
   await deps.engine.handleInbound(inbound);
+  await markRead(deps, log, base, data.chat.id);
+  return "handled";
+}
 
-  // Read receipts never advance on their own (agent-events.md). Best effort:
-  // a failed receipt must not turn a handled message into an error.
+/**
+ * Read receipts never advance on their own (agent-events.md). Best effort:
+ * a failed receipt must not turn a handled message into an error.
+ */
+async function markRead(deps: InboxDeps, log: RelayLog, base: Record<string, unknown>, chatId: string): Promise<void> {
   try {
-    await deps.relay.chats.markAsRead(data.chat.id);
+    await deps.relay.chats.markAsRead(chatId);
   } catch (error) {
     log("relay_mark_read_failed", { ...base, error: describeRelayError("Marking the chat Read", error) });
   }
-  return "handled";
 }
 
 // ---------------------------------------------------------------------------

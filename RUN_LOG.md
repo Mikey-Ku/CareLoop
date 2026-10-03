@@ -141,3 +141,29 @@ With a Relay token: `npm run relay:check`, then `npm run agent -- --checkin-now`
 Split by lanes in `docs/TEAM_PLAN.md`. Lane 1 (Relay live) first: token, two phones, `npm run relay:check`, `npm run agent -- --checkin-now`.
 
 **Open questions:** `FEEDBACK.md` (red-flag cadence numbers).
+
+## Lane 1 (Relay live): 2026-10-03 23:30
+
+**Goal of this run:** Run the agent on a real phone, let Harriet type instead of tap, and react sensibly to whatever she types.
+
+**What was built:**
+- Relay live: agent @harriet_checkin, WebSocket connected, linked on first message; three real check-ins on a phone with zero processing errors.
+- Typed replies through Gemini (lite models only, `thinkingLevel: minimal`, capped output; about 70 tokens in and 20 out per call), provider-neutral `LlmClient`, model chain that skips a busy model at once, 4 s per try, 12 s budget, then buttons.
+- Content handling: fixed safety phrase screen first (crisis, urgent symptom), then the model sorts each message into eight kinds, then fixed reactions (988 and 911, notes for the doctor, medicine questions to her visit list, warm reply when low, messages passed to family, small talk). Typed explicit yes counts on red-flag questions; anything else still gets the one-tap confirm. After a red flag: warmer reply, no flag offer, a follow-up later the same day. Instruction-like text can't steer answers. Photos get "can't read photos yet".
+- Content eval: 119 realistic messages (`fixtures/content/messages.json`), `npm run content:eval` writes `docs/content-eval.md`. First run: safety 37 of 37, 0 idiom false alarms, kind accuracy 97%, answer mapping 94% (optimistic; held-out set to do). Screen lists extended from its suggestions.
+- `docs/DEFINITION_OF_DONE.md`: milestones M0 to M6 with benchmarks and a cut list.
+- 1153 tests passing; 8 demo scripts exit 0.
+
+**What was skipped or changed from spec:**
+- LLM is Gemini (free tier then $5 paid), not Claude; Claude stays a one-line switch.
+- Migrations 6 (`concern_at`, `checkin_notes`, `visit_questions`, `follow_ups`, `family_relays`).
+- Not yet: second phone for the family chat, red-flag timing, noon alert and sharing change live; held-out content eval.
+
+**Commits:**
+- `feat: lane 1: typed replies through gemini, live relay fixes`
+- `feat: lane 1: content handling, safety screen, follow-ups, content eval`
+
+**Recommended next step:**
+Retest on the phone with `FOLLOW_UP_DELAY_MINUTES=2`; add a second phone as family; then tick the remaining M1 boxes in `docs/DEFINITION_OF_DONE.md` and open the lane 1 PR.
+
+**Open questions:** `FEEDBACK.md` (phrase list review, held-out eval, demo-day LLM backup).

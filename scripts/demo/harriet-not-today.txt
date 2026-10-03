@@ -3,6 +3,6 @@
 # a "not today" is never treated as a missed check-in.
 # npm run simulate -- --reset --script ../../scripts/demo/harriet-not-today.txt
 #
-# Not today
+# Not today (the greeting's second button)
 2
 /noon

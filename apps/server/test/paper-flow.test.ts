@@ -1,12 +1,19 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { BUTTON, familyDailyStatus, flagDetail, flagNotedReply, flagOffer } from "../src/checkin/copy.ts";
+import {
+  BUTTON,
+  familyDailyStatus,
+  flagDetail,
+  flagNotedReply,
+  flagOffer,
+  withTypingHint,
+} from "../src/checkin/copy.ts";
 import { createCheckinEngine } from "../src/checkin/engine.ts";
 import type { CheckinEngine } from "../src/checkin/engine-types.ts";
 import { PAPER_CONFIRM_BUTTONS, paperReadback } from "../src/checkin/paper-check.ts";
 import { PAPER_LATER_REPLY, PAPER_NO_RECORD_REPLY, PAPER_REJECTED_REPLY } from "../src/checkin/paper-flow.ts";
-import { QUESTION_BANK } from "../src/context/questions.ts";
+import { QUESTION_BANK, promptButtons, type Question } from "../src/context/questions.ts";
 import { getCheckin } from "../src/db/checkins.ts";
 import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import {
@@ -96,7 +103,7 @@ const currentQuestion = (day = DAY1) => {
 };
 /** A button that isn't a red-flag answer, so no alert goes out. */
 const safeAnswer = (q: { buttons: string[]; redFlagAnswers: string[] }) => q.buttons.find((b) => !q.redFlagAnswers.includes(b))!;
-const asked = (q: { text: string; buttons: string[] }) => msg(ME, q.text, q.buttons);
+const asked = (q: Pick<Question, "id" | "text" | "buttons">) => msg(ME, withTypingHint(q.text), promptButtons(q));
 /** Answer every remaining question safely; returns what the last answer produced. */
 async function answerAll(day = DAY1): Promise<SentMessage[]> {
   let last: SentMessage[] = [];

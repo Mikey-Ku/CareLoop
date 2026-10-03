@@ -15,6 +15,8 @@ import { ConsentInactiveError } from "./finchnode/client.ts";
 import { loadRxNavCache } from "./finchnode/fixtures.ts";
 import { normalizeHealthRecord } from "./finchnode/normalize.ts";
 import type { HealthRecord } from "./finchnode/types.ts";
+import { createLlmClient, describeLlm } from "./llm/index.ts";
+import type { LlmClient } from "./llm/types.ts";
 import { assertNoWebhookSubscriptions, runRelayInbox } from "./relay/inbox.ts";
 import type { Messenger } from "./relay/messenger.ts";
 import { createRelayClient, type RelayClient, type RelayLog } from "./relay/relay-client.ts";
@@ -32,10 +34,20 @@ import { createDailyScheduler, localDate, zonedInstant, type CancelTimer, type D
 // docs/adr/0001-family-chats-not-a-group.md). Each FAMILY_RELAY_HANDLES member
 // gets a family_members row; their own chat with the agent is linked when they
 // first message it (src/relay/inbox.ts), and family messages go to each linked chat.
+//
+// Free text: with an LLM configured (GEMINI_API_KEY, src/llm) what she types is read
+// (src/checkin/engine.ts "Typed messages"); without one the check-in runs on buttons only,
+// plus the safety screen and an explicit yes on a red-flag question.
+//
+// Follow-ups: every minute the agent sends follow-up check-ins that are due (after a red
+// flag or a safety hit, FOLLOW_UP_DELAY_MINUTES later, default 180) and passes on family
+// messages she left while no family chat was linked yet.
 
 export const CHECKIN_JOB = "checkin";
 export const MISSED_JOB = "missed-checkin";
 const LINK_POLL_MS = 3_000;
+/** How often the follow-up job runs. */
+export const FOLLOW_UP_POLL_MS = 60_000;
 
 export const MISSING_TOKEN_MESSAGE =
   "RELAY_AGENT_TOKEN is not set. Put the agent's Agent Token in .env (see FEEDBACK.md \"Relay setup\" and README.md), then run npm run agent again.";
@@ -54,6 +66,8 @@ export type AgentDeps = {
   relay: RelayClient;
   /** Defaults to a RelayMessenger over `relay`. */
   messenger?: Messenger;
+  /** Reads what she types instead of tapping (main passes createLlmClient(config)). Without it: buttons only. */
+  llm?: LlmClient | undefined;
   /** FinchNode snapshot reader (the live client in production). */
   loadSnapshot: (subject: string) => Promise<HealthRecord>;
   /**
@@ -69,6 +83,10 @@ export type AgentDeps = {
   setTimer?: (fn: () => void, ms: number) => CancelTimer;
   /** How often to look for her first message while she isn't linked. */
   linkPollMs?: number;
+  /** How often to send due follow-ups and waiting family messages. Defaults to FOLLOW_UP_POLL_MS. */
+  followUpPollMs?: number;
+  /** Minutes from a red flag or safety hit to its follow-up (main reads FOLLOW_UP_DELAY_MINUTES). Defaults to the engine's 180. */
+  followUpDelayMinutes?: number;
   /** Port for /health; defaults to config.port. 0 picks a free one (tests). */
   port?: number;
   relayOps?: Partial<RelayOps>;
@@ -147,16 +165,19 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
     else log(`[agent] Waiting for @${member.handle} to message the agent (family member; family messages skip them until then)`);
   }
 
-  // 3. Engine over Relay.
+  // 3. Engine over Relay, with free text when an LLM is configured.
+  const relayLog: RelayLog = (event, fields) => log(`[relay] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`);
   const clock: Clock = { now: () => now().toISOString() };
-  const messenger = deps.messenger ?? new RelayMessenger(relay);
-  const engine = createCheckinEngine({ db, messenger, clock, loadSnapshot: deps.loadSnapshot }, { missedCheckinTime: config.missedCheckinTime });
+  const messenger = deps.messenger ?? new RelayMessenger(relay, { log: relayLog });
+  log(`[agent] ${llmStatus(config, deps.llm)}`);
+  const engine = createCheckinEngine(
+    { db, messenger, clock, loadSnapshot: deps.loadSnapshot, llm: deps.llm },
+    { missedCheckinTime: config.missedCheckinTime, ...(deps.followUpDelayMinutes !== undefined ? { followUpDelayMinutes: deps.followUpDelayMinutes } : {}) },
+  );
 
   // 4. WebSocket delivery needs zero webhook subscriptions.
   await ops.assertNoWebhookSubscriptions(relay);
   log("[agent] Relay: no webhook subscriptions, WebSocket delivery is available");
-
-  const relayLog: RelayLog = (event, fields) => log(`[relay] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`);
   const isLinked = () => Boolean(getCheckinPatient(db, patientId)?.relayChatId);
 
   // 5. Inbox: holds the socket until stop().
@@ -201,10 +222,29 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   });
   scheduler.start();
 
+  // 6b. Follow-ups and waiting family messages, every minute. One run at a time; a failure is
+  // logged (never her words) and the next run tries again.
+  let ticking = false;
+  async function followUpTick(): Promise<void> {
+    if (ticking) return;
+    ticking = true;
+    try {
+      const sent = await engine.runDueFollowUps(now().toISOString());
+      if (sent > 0) log(`[agent] sent ${sent} follow-up check-in(s)`);
+      const passed = await engine.passOnFamilyMessages(patientId);
+      if (passed > 0) log(`[agent] passed on ${passed} message(s) she left for her family`);
+    } catch (error) {
+      log(`[agent] follow-up job failed: ${errorSummary(error)}`);
+    } finally {
+      ticking = false;
+    }
+  }
+
   // 7. /health.
   const server = await listen(createApp({ config }), deps.port ?? config.port);
   const port = (server.address() as AddressInfo).port;
   log(`[agent] health check on http://localhost:${port}/health`);
+  const followUpTimer = setInterval(() => void followUpTick(), deps.followUpPollMs ?? FOLLOW_UP_POLL_MS);
 
   // 8. Once she's linked: --checkin-now, else the late-start catch-up. The scheduler only
   // fires at CHECKIN_TIME, so an agent started (or linked) after it would skip today.
@@ -260,6 +300,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
       stopped ??= (async () => {
         stopping = true;
         cancelWatch?.();
+        clearInterval(followUpTimer);
         scheduler.stop();
         abort.abort();
         await inboxDone.catch(() => {});
@@ -299,6 +340,14 @@ async function identifyPatient(
   }
 }
 
+/** What free text runs on, for the startup log: provider and models, or why it is off. Never a key. */
+export function llmStatus(config: Config, llm: LlmClient | undefined): string {
+  const configured = describeLlm(config);
+  const on = configured.startsWith("free text on");
+  if (!llm) return on ? "free text off: no LLM client (buttons only)" : configured;
+  return on ? configured : `free text on: ${llm.provider}`;
+}
+
 function describeDay(result: Awaited<ReturnType<CheckinEngine["startDay"]>>): string {
   if (result.kind === "sent") return `sent with ${result.questionIds.length} question(s): ${result.questionIds.join(", ")}`;
   if (result.kind === "already_started") return "already started";
@@ -316,6 +365,13 @@ function closeServer(server: Server): Promise<void> {
     server.close(() => resolve());
     server.closeIdleConnections();
   });
+}
+
+/** FOLLOW_UP_DELAY_MINUTES: undefined when unset or blank (use the default), null when invalid. */
+export function parseFollowUpDelay(raw: string | undefined): number | undefined | null {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const minutes = Number(raw);
+  return Number.isFinite(minutes) && minutes > 0 ? minutes : null;
 }
 
 function errorSummary(error: unknown): string {
@@ -355,6 +411,13 @@ export async function main(argv: string[] = process.argv.slice(2), env: Record<s
     return 1;
   }
 
+  // FOLLOW_UP_DELAY_MINUTES: optional, for demos (say 2); the engine's default otherwise.
+  const followUpDelayMinutes = parseFollowUpDelay(env.FOLLOW_UP_DELAY_MINUTES);
+  if (followUpDelayMinutes === null) {
+    console.error(`error: FOLLOW_UP_DELAY_MINUTES must be a positive number of minutes, got "${env.FOLLOW_UP_DELAY_MINUTES}"`);
+    return 1;
+  }
+
   const db = openDatabase(config.databasePath);
   let agent: RunningAgent;
   try {
@@ -363,7 +426,9 @@ export async function main(argv: string[] = process.argv.slice(2), env: Record<s
       db,
       relay: createRelayClient({ agentToken: token, apiUrl: config.relay.apiUrl }),
       loadSnapshot: snapshotLoader(config, true),
+      llm: createLlmClient(config),
       checkinNow,
+      ...(followUpDelayMinutes !== undefined ? { followUpDelayMinutes } : {}),
     });
   } catch (error) {
     console.error(`[agent] could not start: ${errorSummary(error)}`);

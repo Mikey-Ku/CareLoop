@@ -1,9 +1,10 @@
 import type { Question } from "../context/questions.ts";
 
-// Red flags: urgent answers decided by fixed rules, never by the LLM. Each
-// question lists the answers that count (Question.redFlagAnswers, set by the
-// team in the question bank). A red flag tells her to call her doctor and
-// alerts the family at every sharing level. It skips the flag lifecycle.
+// Red flags: level-3 answers on the severity ladder (src/checkin/severity.ts), decided
+// by fixed rules, never by the LLM. Each question lists the answers that count
+// (Question.redFlagAnswers: "Yes, it was hard", "Yes, bleeding"). A red flag tells her
+// to call her doctor today and alerts the family at every sharing level. It skips the
+// flag lifecycle.
 
 export type RedFlag = { questionId: string; questionText: string; answer: string };
 

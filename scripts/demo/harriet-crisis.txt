@@ -1,0 +1,20 @@
+# A crisis message in the middle of the check-in (check-in date 2026-09-01).
+# The fixed safety screen catches it before any LLM (none is needed): she is told she
+# matters, to call or text 988 now, or 911 if she is in danger, and that Sarah knows.
+# Sarah gets an alert at every sharing level, with no detail below "all". The check-in
+# pauses: the question isn't asked again in that reply, and no flag is offered today.
+# A follow-up comes this afternoon ("How are you feeling now?"); after she answers,
+# the paused question comes back and she can carry on.
+# npm run simulate -- --reset --script ../../scripts/demo/harriet-crisis.txt
+#
+# Quick questions: the greeting's buttons instead of her own words
+1
+# How was your breathing last night when you lay down? She types instead:
+I want to end my life
+# This afternoon: "How are you feeling now?" -> About the same
+/later
+2
+# The breathing question comes back: Fine, then No to bleeding and dizziness
+1
+1
+1

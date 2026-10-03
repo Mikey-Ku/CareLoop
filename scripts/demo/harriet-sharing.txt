@@ -7,15 +7,15 @@
 # "Just check-ins".
 # npm run simulate -- --reset --script ../../scripts/demo/harriet-sharing.txt
 #
-# Let's start
+# Quick questions: the greeting's buttons instead of her own words
 1
-# Did you have trouble breathing when lying flat last night? -> No
+# How was your breathing last night when you lay down? -> Fine
 1
 # She asks for the sharing menu mid check-in
 Sharing
 # Everything -> the bruising or bleeding question comes again
 3
-# Have you had any unusual bruising or bleeding? -> No
+# Any unusual bruising or bleeding? -> No
 1
 # Have you felt dizzy when standing up? -> No
 1

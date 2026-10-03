@@ -9,6 +9,14 @@ const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 export const DEFAULT_RELAY_API_URL = "https://api.relayapp.im";
 export const DEFAULT_FINCHNODE_SUBJECT = "patient-demo-polypharmacy";
 export const DEFAULT_TIMEZONE = "America/Detroit";
+/** Tried in order. Measured 2026-10-03: flash-latest is fast but often 503s; flash-lite is slow (7 to 11 s) but answers. */
+// Lite models only: the cheapest tier, and enough for mapping a reply onto buttons and a short reply.
+// Several of them, because load moves between models: on 2026-10-03 one returned 503 for minutes
+// while others answered in under a second. A busy model is skipped at once (src/llm/fallback.ts).
+export const DEFAULT_GEMINI_MODELS = ["gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"];
+/** One try at one model; leaves budget for the next model when one hangs. */
+export const DEFAULT_LLM_ATTEMPT_TIMEOUT_MS = 4_000;
+export const DEFAULT_LLM_TIMEOUT_MS = 12_000;
 
 const ConfigSchema = z.object({
   FINCHNODE_BASE_URL: z.string().url().default("https://api.finchnode.com/demo/v1"),
@@ -28,6 +36,14 @@ const ConfigSchema = z.object({
   FAMILY_RELAY_HANDLES: z.string().optional(),
   PATIENT_FINCHNODE_SUBJECT: z.string().default(DEFAULT_FINCHNODE_SUBJECT),
   PATIENT_TIMEZONE: z.string().default(DEFAULT_TIMEZONE),
+  LLM_PROVIDER: z
+    .string()
+    .default("gemini")
+    .transform((v) => v.trim().toLowerCase())
+    .pipe(z.enum(["gemini", "anthropic"], "LLM_PROVIDER must be gemini or anthropic")),
+  GEMINI_MODELS: z.string().optional(),
+  LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(DEFAULT_LLM_TIMEOUT_MS),
+  LLM_ATTEMPT_TIMEOUT_MS: z.coerce.number().int().min(500).max(120_000).default(DEFAULT_LLM_ATTEMPT_TIMEOUT_MS),
 });
 
 export type RelayConfig = {
@@ -47,10 +63,26 @@ export type PatientConfig = {
   timezone: string;
 };
 
+export type LlmProvider = "gemini" | "anthropic";
+
+export type LlmConfig = {
+  /** LLM_PROVIDER. Only "gemini" has an adapter so far; "anthropic" leaves free text off (buttons only). */
+  provider: LlmProvider;
+  /** GEMINI_API_KEY. Non-enumerable, so it never shows up when the config is printed or serialized. */
+  geminiApiKey: string | undefined;
+  /** GEMINI_MODELS, comma separated, tried in order. */
+  geminiModels: string[];
+  /** LLM_TIMEOUT_MS: the whole budget for one call, across retries and model fallbacks. */
+  timeoutMs: number;
+  /** LLM_ATTEMPT_TIMEOUT_MS: the cap on one try at one model. */
+  attemptTimeoutMs: number;
+};
+
 export type Config = {
   finchnode: { baseUrl: string; apiKey: string | undefined };
   relay: RelayConfig;
   patient: PatientConfig;
+  llm: LlmConfig;
   port: number;
   databasePath: string;
   checkinTime: string;
@@ -64,8 +96,8 @@ export class ConfigError extends Error {
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
-  // RELAY_AGENT_TOKEN is read here and nowhere near the schema, so a parse error can't echo it.
-  const { RELAY_AGENT_TOKEN, ...rest } = env;
+  // Secrets are read here and nowhere near the schema, so a parse error can't echo them.
+  const { RELAY_AGENT_TOKEN, GEMINI_API_KEY, ...rest } = env;
   const cleaned = Object.fromEntries(Object.entries(rest).map(([k, v]) => [k, v === "" ? undefined : v]));
   const parsed = ConfigSchema.safeParse(cleaned);
   if (!parsed.success) {
@@ -76,6 +108,15 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const relay: RelayConfig = { apiUrl: relayOrigin(c.RELAY_API_URL), agentToken: undefined };
   const token = RELAY_AGENT_TOKEN?.trim();
   Object.defineProperty(relay, "agentToken", { value: token ? token : undefined, enumerable: false });
+  const llm: LlmConfig = {
+    provider: c.LLM_PROVIDER,
+    geminiApiKey: undefined,
+    geminiModels: parseList(c.GEMINI_MODELS) ?? [...DEFAULT_GEMINI_MODELS],
+    timeoutMs: c.LLM_TIMEOUT_MS,
+    attemptTimeoutMs: c.LLM_ATTEMPT_TIMEOUT_MS,
+  };
+  const geminiKey = GEMINI_API_KEY?.trim();
+  Object.defineProperty(llm, "geminiApiKey", { value: geminiKey ? geminiKey : undefined, enumerable: false });
 
   return {
     finchnode: { baseUrl: c.FINCHNODE_BASE_URL, apiKey: c.FINCHNODE_API_KEY },
@@ -86,6 +127,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       familyHandles: parseHandles(c.FAMILY_RELAY_HANDLES),
       timezone: validTimezone(c.PATIENT_TIMEZONE.trim()),
     },
+    llm,
     port: c.PORT,
     databasePath: c.DATABASE_PATH,
     checkinTime: c.CHECKIN_TIME,
@@ -112,6 +154,13 @@ export function parseHandles(value: string | undefined): string[] {
     if (handle) seen.add(handle);
   }
   return [...seen];
+}
+
+/** Comma separated values, trimmed, blanks and repeats dropped; undefined when nothing is left. */
+function parseList(value: string | undefined): string[] | undefined {
+  if (!value) return undefined;
+  const items = [...new Set(value.split(",").map((part) => part.trim()).filter(Boolean))];
+  return items.length > 0 ? items : undefined;
 }
 
 /** The IANA zone, or a ConfigError if Intl doesn't know it. */

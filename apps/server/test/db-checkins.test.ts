@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { answerHistory } from "../src/db/answer-history.ts";
 import {
+  finishedCheckinsBefore,
   getCheckin,
   getCheckinById,
   getCheckinPatient,
@@ -12,7 +13,8 @@ import {
   recordCheckinPrompt,
   updateCheckin,
 } from "../src/db/checkins.ts";
-import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
+import { addFamilyRelay, linkFamilyMember, markFamilyRelayPassedOn, syncFamilyMembers, waitingFamilyRelays } from "../src/db/family.ts";
+import { MAX_NOTE_LENGTH, addCheckinNote, addVisitQuestion, checkinNotes, recentCheckinNotes, visitQuestions } from "../src/db/notes.ts";
 import { openDatabase, upsertPatient, type Db } from "../src/db/index.ts";
 
 const P = "harriet";
@@ -47,6 +49,8 @@ describe("checkins rows", () => {
       pendingFlagId: null,
       sentAt: T1,
       finishedAt: null,
+      concernAt: null,
+      explainAt: null,
     });
   });
 
@@ -61,6 +65,36 @@ describe("checkins rows", () => {
     updateCheckin(db, id, { answers, mood: "Good", step: "question", questionIndex: 0 });
     updateCheckin(db, id, { status: "answered", finishedAt: T1, step: "done" });
     expect(getCheckinById(db, id)).toMatchObject({ status: "answered", mood: "Good", answers, step: "done", finishedAt: T1 });
+  });
+
+  it("concernAt is stored and patched like the other fields", () => {
+    const id = insertCheckin(db, { patientId: P, date: "2026-09-01", questionIds: [], sentAt: T1 });
+    expect(getCheckinById(db, id)?.concernAt).toBeNull();
+    updateCheckin(db, id, { concernAt: T1 });
+    expect(getCheckinById(db, id)?.concernAt).toBe(T1);
+  });
+
+  it("explainAt (migration 8) is stored, patched and cleared", () => {
+    const id = insertCheckin(db, { patientId: P, date: "2026-09-01", questionIds: [], sentAt: T1 });
+    expect(getCheckinById(db, id)?.explainAt).toBeNull();
+    updateCheckin(db, id, { explainAt: T1 });
+    expect(getCheckinById(db, id)?.explainAt).toBe(T1);
+    updateCheckin(db, id, { explainAt: null });
+    expect(getCheckinById(db, id)?.explainAt).toBeNull();
+  });
+
+  it("finishedCheckinsBefore counts answered and not-today days before the date, never missed or unfinished ones", () => {
+    const days = ["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-05"];
+    const ids = days.map((date) => insertCheckin(db, { patientId: P, date, questionIds: [], sentAt: T1 }));
+    updateCheckin(db, ids[0]!, { status: "answered" });
+    updateCheckin(db, ids[1]!, { status: "skipped" });
+    updateCheckin(db, ids[2]!, { status: "missed" });
+    updateCheckin(db, ids[4]!, { status: "answered" });
+    expect(finishedCheckinsBefore(db, P, "2026-09-01")).toBe(0);
+    expect(finishedCheckinsBefore(db, P, "2026-09-03")).toBe(2);
+    expect(finishedCheckinsBefore(db, P, "2026-09-05")).toBe(2); // the 3rd was missed, the 4th is still open
+    expect(finishedCheckinsBefore(db, P, "2026-09-06")).toBe(3);
+    expect(finishedCheckinsBefore(db, "someone-else", "2026-09-06")).toBe(0);
   });
 
   it("keeps the status and step checks", () => {
@@ -149,5 +183,34 @@ describe("patients for the engine", () => {
     expect(patientForChat(db, "chat_family")).toBeUndefined();
     expect(patientForChat(db, "chat_nobody")).toBeUndefined();
     expect(getCheckinPatient(db, P)?.finchnodePatientId).toBe("patient-demo-polypharmacy");
+  });
+});
+
+describe("her notes, visit questions and family relays (migration 6)", () => {
+  it("notes belong to one question of one check-in; blanks are dropped, long ones cut, whitespace collapsed", () => {
+    const id = insertCheckin(db, { patientId: P, date: "2026-09-01", questionIds: ["hf-breathing-lying-flat"], sentAt: T1 });
+    expect(addCheckinNote(db, { patientId: P, checkinId: id, questionId: "hf-breathing-lying-flat", text: "  Not really  but I have\nmore info ", createdAt: T1 })).toBeTypeOf("number");
+    expect(addCheckinNote(db, { patientId: P, checkinId: id, questionId: "hf-breathing-lying-flat", text: "   ", createdAt: T1 })).toBeUndefined();
+    addCheckinNote(db, { patientId: P, checkinId: id, questionId: "hf-breathing-lying-flat", text: "x".repeat(MAX_NOTE_LENGTH + 5), createdAt: "2026-09-01T09:05:00Z" });
+    const notes = checkinNotes(db, id);
+    expect(notes.map((n) => n.text.length)).toEqual(["Not really but I have more info".length, MAX_NOTE_LENGTH]);
+    expect(notes[0]).toMatchObject({ patientId: P, checkinId: id, questionId: "hf-breathing-lying-flat", text: "Not really but I have more info", createdAt: T1 });
+    expect(recentCheckinNotes(db, P, 1).map((n) => n.text.length)).toEqual([MAX_NOTE_LENGTH]);
+    expect(() => addCheckinNote(db, { patientId: P, checkinId: 999, questionId: "q", text: "t", createdAt: T1 })).toThrow(/FOREIGN KEY/);
+  });
+
+  it("visit questions are kept in order", () => {
+    addVisitQuestion(db, { patientId: P, text: "can I skip the water pill on Sunday?", createdAt: T1 });
+    addVisitQuestion(db, { patientId: P, text: " ", createdAt: T1 });
+    addVisitQuestion(db, { patientId: P, text: "is the new pill why I'm dizzy?", createdAt: "2026-09-02T09:00:00Z" });
+    expect(visitQuestions(db, P).map((v) => v.text)).toEqual(["can I skip the water pill on Sunday?", "is the new pill why I'm dizzy?"]);
+  });
+
+  it("family relays wait until passed on", () => {
+    const waiting = addFamilyRelay(db, { patientId: P, text: "Tell Sarah I love her", createdAt: T1, passedOnAt: null });
+    addFamilyRelay(db, { patientId: P, text: "see you Sunday", createdAt: T1, passedOnAt: T1 });
+    expect(waitingFamilyRelays(db, P).map((r) => r.text)).toEqual(["Tell Sarah I love her"]);
+    markFamilyRelayPassedOn(db, waiting, "2026-09-01T10:00:00Z");
+    expect(waitingFamilyRelays(db, P)).toEqual([]);
   });
 });

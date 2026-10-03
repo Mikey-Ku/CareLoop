@@ -12,31 +12,77 @@ import type { SharingLevel } from "../db/index.ts";
 //
 // CONTRACT: the signatures below are what the engine calls. The copy agent owns
 // the wording and may add functions, but must not change these signatures.
+//
+// Severity ladder (docs/DESIGN.md, src/checkin/severity.ts): the words match the level.
+// Levels 0 to 2 never mention 911, an emergency or an ambulance (test/copy.test.ts scans
+// them); "if it gets much worse, call 911" starts at level 3, 911 now at level 4.
 
 export const BUTTON = {
-  start: "Let's start",
+  /** On the greeting: today's questions with buttons, for when she'd rather tap than type. */
+  start: "Quick questions",
   notToday: "Not today",
   tellMeMore: "Tell me more",
   later: "Later",
   willAskDoctor: "I'll ask my doctor",
 } as const;
 
+/** Older labels of BUTTON.start, still taken (typed or tapped) at the greeting so old messages and scripts work. */
+export const START_ALIASES: readonly string[] = ["Let's start"];
+
 export type DayOutcome = "checked_in" | "not_today" | "missed";
 
 export type AnsweredQuestion = { questionId: string; questionText: string; answer: string };
 
-/** "a", "a and b", "a, b and c". */
-function listJoin(items: readonly string[]): string {
+/** "a", "a and b", "a, b and c" (or "a, b or c" with `or`). */
+function listJoin(items: readonly string[], word: "and" | "or" = "and"): string {
   if (items.length <= 1) return items.join("");
-  return `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+  return `${items.slice(0, -1).join(", ")} ${word} ${items.at(-1)}`;
+}
+
+/** The family members who were told (display names, blanks dropped): undefined means "your family", [] means no one. */
+function whoWasTold(familyNames: string[] | undefined): string | undefined {
+  const names = familyNames?.map((n) => n.trim()).filter((n) => n.length > 0);
+  return names === undefined ? "your family" : names.length > 0 ? listJoin(names) : undefined;
 }
 
 // Senior-facing
 
+/**
+ * The greeting is the open question (docs/DESIGN.md "Open question first"): she answers in her own
+ * words, and the questions she didn't cover come after with buttons. BUTTON.start is the way to tap
+ * instead; "Not today" is the other button.
+ */
 export function checkinGreeting(name: string, questionCount: number): string {
   if (questionCount <= 0) return `Good morning, ${name}. This is your check-in assistant. There are no questions today. I just wanted to say hello.`;
-  const questions = questionCount === 1 ? "1 short question" : `${questionCount} short questions`;
-  return `Good morning, ${name}. This is your check-in assistant. I have ${questions} for you today. If today isn't a good day, just tap "${BUTTON.notToday}".`;
+  return `Good morning, ${name}. How are you feeling today? Just tell me in your own words, like a text to a friend. Or tap ${BUTTON.start} if you'd rather tap.`;
+}
+
+/** The hint under each question on her first check-ins (HINT_CHECKINS in the engine), so typing is obvious. */
+export const TYPING_HINT = "(Tap an answer, or just tell me.)";
+
+/** A question's text with the typing hint on its own line under it. */
+export function withTypingHint(text: string): string {
+  return `${text}\n${TYPING_HINT}`;
+}
+
+/** Her open reply was read and nothing in it needs a reaction; a question she didn't cover comes next. */
+export function openReplyThanks(name: string): string {
+  return `Thanks, ${name}.`;
+}
+
+/** She answered the open question, but typed replies can't be read right now (no LLM, or it is down). */
+export function openReplyUnavailable(name: string): string {
+  return `Thanks, ${name}. I'm having trouble reading typed replies right now, so let's do a few quick questions.`;
+}
+
+/** Level 1 from her open reply when it is about her mood ("Not great"): short and warm, at most two sentences. */
+export function sorryNotGreat(name: string): string {
+  return `I'm sorry you're not feeling great, ${name}. Thank you for telling me.`;
+}
+
+/** She tapped "Let me explain" on a question: her next message is her own words about it. No buttons. */
+export function explainPrompt(name: string): string {
+  return `Go ahead, ${name}. Tell me in your own words.`;
 }
 
 /** Reply to "Not today". Never implies she should have answered. */
@@ -45,18 +91,21 @@ export function notTodayReply(name: string): string {
 }
 
 /**
- * After a red-flag answer. Leads with who was told, then her doctor, then 911.
+ * Level 3 (a red-flag answer, a typed symptom that bad, or "Worse" on a follow-up). Thanks her
+ * first, calmly, then says who was told, then her doctor today, then 911 only if it gets much worse.
  * `familyNames` are the family members whose chats got the alert: left out, it says
  * "your family"; an empty list (nobody linked) says nothing about family, so she is
  * never told someone was alerted when no one was. No pronouns for family members:
- * the app doesn't know them.
+ * the app doesn't know them. `moreQuestions` (the check-in's questions still to come) adds
+ * a gentle line, so the next question doesn't arrive out of nowhere.
  */
-export function redFlagAdvice(name: string, familyNames?: string[]): string {
-  const names = familyNames?.map((n) => n.trim()).filter((n) => n.length > 0);
-  const who = names === undefined ? "your family" : names.length > 0 ? listJoin(names) : undefined;
-  const doctor = "call your doctor today about this.";
-  const first = who ? [`${name}, I've asked ${who} to check on you.`, `Please ${doctor}`] : [`${name}, please ${doctor}`];
-  return [...first, "If it gets worse or feels like an emergency, call 911."].join(" ");
+export function redFlagAdvice(name: string, familyNames?: string[], moreQuestions = 0): string {
+  const who = whoWasTold(familyNames);
+  const lines = [`Thank you for telling me, ${name}.`];
+  if (who) lines.push(`I've let ${who} know.`);
+  lines.push("Please call your doctor today about this.", "If it gets much worse, call 911.");
+  if (moreQuestions > 0) lines.push(`When you're ready, I have ${moreQuestions === 1 ? "one more question" : `${moreQuestions} more questions`} for you.`);
+  return lines.join(" ");
 }
 
 export function flagOffer(): string {
@@ -76,9 +125,262 @@ export function checkinDone(name: string): string {
   return `That's everything for today, ${name}. Thank you. I'll check in again tomorrow.`;
 }
 
+/** The closing on a day with a red flag or a safety hit: a follow-up check-in comes later today. */
+export function checkinDoneAfterConcern(name: string): string {
+  return `Thank you, ${name}. I'll check on you again this afternoon.`;
+}
+
+/** The model read her words but couldn't match them to an answer. `buttons`: the answers (not "Let me explain"). */
 export function didntUnderstand(buttons: string[]): string {
   const quoted = buttons.map((b) => `"${b}"`);
-  return `Sorry, I didn't understand that. You can tap one of these: ${listJoin(quoted)}.`;
+  return `Sorry, I didn't quite catch that. You can tap one of these, or tell me in a few words: ${listJoin(quoted, "or")}.`;
+}
+
+/**
+ * She typed while a question waits, and the assistant can't read typed replies (no LLM, or it is
+ * down). Says it is the assistant's trouble, never hers, and offers the buttons.
+ */
+export function typedReplyUnavailable(buttons: string[]): string {
+  const quoted = buttons.map((b) => `"${b}"`);
+  return `I'm having trouble reading typed replies right now. You can tap one of these: ${listJoin(quoted, "or")}.`;
+}
+
+// Free text (src/checkin/engine.ts): what she types instead of tapping a button.
+
+/** The activity label her chat shows while the assistant reads what she typed (Relay: 1 to 21 characters). */
+export const READING_ACTIVITY = "Reading your message";
+
+/** How much of her own words a confirm quotes back. */
+export const QUOTE_MAX_CHARS = 120;
+
+/** Her words on one line, cut at a word near QUOTE_MAX_CHARS. Double quotes and long dashes are softened. */
+function quoteHerWords(reply: string): string {
+  const one = reply.replace(/\s+/g, " ").replace(/"/g, "'").replace(/\s*[\u2013\u2014]\s*/g, " - ").trim();
+  if (one.length <= QUOTE_MAX_CHARS) return one;
+  const cut = one.slice(0, QUOTE_MAX_CHARS);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > QUOTE_MAX_CHARS / 2 ? cut.slice(0, space) : cut).replace(/[\s.,;:]+$/, "")}...`;
+}
+
+/** Her words in full on one line (for her family), double quotes and long dashes softened, capped at 1000 characters. */
+function herWordsInFull(text: string): string {
+  const one = text.replace(/\s+/g, " ").replace(/"/g, "'").replace(/\s*[\u2013\u2014]\s*/g, " - ").trim();
+  return one.length > 1000 ? `${one.slice(0, 1000).trimEnd()}...` : one;
+}
+
+/**
+ * She typed an answer to a red-flag question that isn't an explicit yes. The app never records
+ * that answer from what an AI made of her words (an AI never clears a red flag): it quotes them
+ * back and asks the question again with its own buttons, so the red-flag rule acts on her tap.
+ * An explicit yes in her own words ("Yes but it was weirder") counts as her "Yes" without this.
+ */
+export function freeTextConfirm(reply: string, questionText: string): string {
+  return `You wrote: "${quoteHerWords(reply)}"\nJust to check: ${questionText}`;
+}
+
+/**
+ * She mentioned a health complaint in chat, and the model didn't say which symptom or how much.
+ * Level-1 wording (the fallback for symptomNotedReply): a fixed reply, not the model's words, no
+ * advice, no 911, no family alert.
+ */
+export function complaintReply(name: string): string {
+  return `Thank you for telling me, ${name}. I've made a note of that for your doctor.`;
+}
+
+// Severity ladder reactions (src/checkin/severity.ts). Level 1 and 2 lines are folded into the
+// next message of the check-in (withLead), or sent on their own in chat.
+
+/** A short line put before the next message of the check-in, on its own line. */
+export function withLead(lead: string | undefined, text: string): string {
+  return lead ? `${lead}\n\n${text}` : text;
+}
+
+/** Level 1 in a check-in, at most once per check-in: saved for her doctor, nothing more. */
+export function notedForDoctor(): string {
+  return "Thanks, I've made a note of that for your doctor.";
+}
+
+/** Level 2 in a check-in: worth watching. A follow-up comes later today. */
+export function keepAnEye(name: string): string {
+  return `Thanks for telling me, ${name}. Let's keep an eye on that.`;
+}
+
+/** Level 2 in chat: worth watching, and she hears that we'll ask again later. */
+export function keepAnEyeReply(name: string): string {
+  return `${keepAnEye(name)} I'll check on you again later today.`;
+}
+
+/** Words for a question's topic, in a sentence about her ("Sorry to hear about your ..."). */
+const TOPIC_PLAIN: Record<string, string> = {
+  "hf-ankle-swelling": "ankle swelling",
+  "hf-breathing-lying-flat": "breathing",
+  "anticoagulant-bleeding": "bruising or bleeding",
+  "dizzy-on-standing": "dizziness",
+  "morning-medicines": "medicines",
+  mood: "mood",
+};
+
+/** Words for a question's topic, as the family reads it ("Harriet mentioned ..."). */
+const TOPIC_FOR_FAMILY: Record<string, string> = {
+  "hf-ankle-swelling": "some ankle swelling",
+  "hf-breathing-lying-flat": "some trouble breathing",
+  "anticoagulant-bleeding": "some bruising or bleeding",
+  "dizzy-on-standing": "some dizziness",
+  "morning-medicines": "missing some of her morning medicines",
+  mood: "not feeling great",
+};
+
+/** Longest topic, in characters and in words, quoted from her (via the model) in a fixed sentence. */
+const MAX_TOPIC_CHARS = 40;
+const MAX_TOPIC_WORDS = 4;
+
+/**
+ * Her own topic words, fit to put in a fixed sentence ("knee pain"), else undefined: letters, spaces,
+ * apostrophes and hyphens only, a few words, leading "my", "a little" and the like dropped.
+ */
+export function topicWords(topic: string): string | undefined {
+  const bank = TOPIC_PLAIN[topic];
+  if (bank) return bank;
+  const words = topic
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+    .replace(/^(?:(?:a little|a bit of|a bit|a lot of|some|my|her|your|the|a|an)\s+)+/, "");
+  if (!words || words.length > MAX_TOPIC_CHARS || words.split(" ").length > MAX_TOPIC_WORDS) return undefined;
+  return /^[a-z][a-z' -]*$/.test(words) ? words : undefined;
+}
+
+/**
+ * Level 1 in chat: she mentioned something small ("my knee aches"). Sorry, and noted for her doctor;
+ * no advice, no 911. Her topic words when they fit, else a general line.
+ */
+export function symptomNotedReply(name: string, topics: string[]): string {
+  const words = [...new Set(topics.map(topicWords).filter((w): w is string => w !== undefined))].slice(0, 2);
+  const sorry = words.length > 0 ? `Sorry to hear about your ${listJoin(words)}, ${name}.` : `Sorry that's bothering you, ${name}.`;
+  return `${sorry} I've made a note for your doctor.`;
+}
+
+/** "Clarify" buttons: the one question that may follow a typed symptom whose amount is unclear. */
+export const CLARIFY_BUTTONS = { a_little: "A little", a_lot: "A lot" } as const;
+
+/** Asked at most once per symptom, only when the answer changes the level. */
+export function clarifyAmount(name: string): string {
+  return `Thanks, ${name}. Is it a little, or a lot?`;
+}
+
+/**
+ * The reply to a message outside a check-in when the assistant can't read it (no LLM, or it is down).
+ * It can't tell what she wrote, so it points to her doctor and 911 in case it was something worrying.
+ */
+export function smallTalkFallback(name: string): string {
+  return `Thanks for your message, ${name}. I'll be back with your next check-in. If something is worrying you, please call your doctor. If it feels like an emergency, call 911.`;
+}
+
+// Typed messages, sorted by kind (src/checkin/engine.ts "Typed messages"). Fixed wording:
+// the model's own words are used only for plain chat.
+
+/** She added detail while a question waits. Her words are kept for her doctor; the buttons come with it. */
+export function noteSaved(name: string): string {
+  return `Thank you, ${name}. I've written that down for your doctor. You can keep telling me, or tap an answer below.`;
+}
+
+/** She asked about her medicines. Never answered here: it goes on her list for the next visit. */
+export function medicineQuestionReply(name: string): string {
+  return `That's a good question for your doctor or pharmacist, ${name}. I've added it to your list for your next visit. Please don't change any medicine before you ask them.`;
+}
+
+/** She sounds lonely, sad or worried. Warm and short, no alert. */
+export function feelingLowReply(name: string): string {
+  return `I'm sorry you're feeling this way, ${name}. Thank you for telling me. It might help to call someone you're close to today. A friend or family member would be glad to hear from you.`;
+}
+
+/**
+ * Safety screen or model: thoughts of self-harm or not wanting to live. She matters, 988 now, 911 if
+ * in danger. `familyNames` as in redFlagAdvice: the family line only when someone was told.
+ */
+export function crisisReply(name: string, familyNames?: string[]): string {
+  const who = whoWasTold(familyNames);
+  const lines = [
+    `${name}, thank you for telling me. You matter, and you don't have to face this alone.`,
+    "Please call or text 988 now. That's the Suicide & Crisis Lifeline, open day and night.",
+    "If you're in danger right now, call 911.",
+  ];
+  if (who) lines.push(`I've let ${who} know.`);
+  return lines.join(" ");
+}
+
+/** Safety screen or model: an urgent symptom (chest pain, a fall, can't breathe). 911 first, then her doctor. */
+export function urgentReply(name: string, familyNames?: string[]): string {
+  const who = whoWasTold(familyNames);
+  const lines = [`${name}, if this is happening now, please call 911 right away.`, "After that, call your doctor."];
+  if (who) lines.push(`I've let ${who} know so someone can check on you.`);
+  return lines.join(" ");
+}
+
+/** She asked for something to be passed on to her family: what each family member reads. */
+export function familyRelay(name: string, words: string): string {
+  return `${name} asked me to pass this on: "${herWordsInFull(words)}"`;
+}
+
+/** Her reply once it went to her family (`familyNames` as in redFlagAdvice). */
+export function familyRelayDone(name: string, familyNames?: string[]): string {
+  return `Thank you, ${name}. I've passed that on to ${whoWasTold(familyNames) ?? "your family"}.`;
+}
+
+/** Her reply when no family member has connected yet; it is kept and passed on when one does. */
+export function familyRelayWaiting(name: string): string {
+  return `Thank you, ${name}. I'll pass it on when your family has connected with me.`;
+}
+
+/** She sent a photo. Until photos are read (the paper check), it's kind and points to her doctor. */
+export function photoNotYet(name: string): string {
+  return `Thanks for the photo, ${name}. I can't read photos yet. Please bring it to your doctor or pharmacist.`;
+}
+
+// Follow-up check-in, some hours after a red flag or a safety hit.
+
+/** What a follow-up asks about: a question's topic, how she feels after a crisis, or in general. */
+export type FollowUpTopic = "breathing" | "bleeding" | "ankles" | "dizziness" | "crisis" | "general";
+
+/** The follow-up's buttons. Each is at most 80 characters (Relay limit). */
+export const FOLLOW_UP_BUTTONS = { better: "Better", same: "About the same", worse: "Worse" } as const;
+
+export type FollowUpAnswer = keyof typeof FOLLOW_UP_BUTTONS;
+
+/** The follow-up's question on its own, as the family reads it. */
+export function followUpAsk(topic: FollowUpTopic): string {
+  switch (topic) {
+    case "breathing":
+      return "How is your breathing now?";
+    case "bleeding":
+      return "How is the bruising or bleeding now?";
+    case "ankles":
+      return "How are your ankles now?";
+    case "dizziness":
+      return "How is the dizziness now?";
+    case "crisis":
+    case "general":
+      return "How are you feeling now?";
+  }
+}
+
+export function followUpQuestion(name: string, topic: FollowUpTopic): string {
+  return `Checking in again, ${name}. ${followUpAsk(topic)}`;
+}
+
+/**
+ * Her reply to "Better" (level 0: a warm close) or "About the same" (level 2: keep an eye on it,
+ * noted for her doctor). After a crisis it points to 988 whatever she answers.
+ * "Worse" gets redFlagAdvice again (level 3; crisisReply after a crisis).
+ */
+export function followUpReply(name: string, answer: Exclude<FollowUpAnswer, "worse">, topic: FollowUpTopic = "general"): string {
+  if (topic === "crisis") {
+    const lifeline = "You can call or text 988 any time, day or night.";
+    if (answer === "better") return `I'm glad to hear that, ${name}. ${lifeline}`;
+    return `Thank you for letting me know, ${name}. ${lifeline} If you're in danger, call 911.`;
+  }
+  if (answer === "better") return `I'm glad to hear that, ${name}. Thank you for letting me know.`;
+  return `Thank you for letting me know, ${name}. Let's keep an eye on that. I've made a note for your doctor.`;
 }
 
 // Hospital paper check (after the read-back)
@@ -180,6 +482,10 @@ export function familyDailyStatus(input: {
    * "status_vitals", which shows no numbers.
    */
   vitals?: { heartRate: number; inUsualRange?: boolean };
+  /** Her own words about today's questions (checkin_notes). Shown at "all" only. */
+  notes?: { questionText: string; text: string }[];
+  /** The day's highest severity level and its topic (src/checkin/severity.ts). Said in words at "all" only, from level 1. */
+  highest?: { level: number; topic: string };
 }): string {
   const name = input.seniorName;
   const base =
@@ -203,29 +509,84 @@ export function familyDailyStatus(input: {
   }
   if (input.sharing !== "all") return [base, vitals].filter(Boolean).join("\n\n");
 
+  const highest = input.highest ? levelInWords(name, input.highest) : "";
   const answers = input.answers.map((a) => `- ${a.questionText} ${a.answer}`).join("\n");
   const flags = input.flags.map((f) => `- ${f.message}`).join("\n");
+  const notes = (input.notes ?? []).map((n) => `- ${n.questionText} "${herWordsInFull(n.text)}"`).join("\n");
   return [
     base,
     vitals,
+    highest,
     answers && `${name}'s answers:\n${answers}`,
+    notes && `${name} also wrote (kept for the doctor):\n${notes}`,
     flags && `Things for ${name} to ask the doctor about:\n${flags}`,
   ]
     .filter(Boolean)
     .join("\n\n");
 }
 
+/** The day's highest level in words, for the family at "all". Nothing for level 0. */
+function levelInWords(name: string, highest: { level: number; topic: string }): string {
+  const what = TOPIC_FOR_FAMILY[highest.topic] ?? topicWords(highest.topic) ?? "a symptom";
+  if (highest.level >= 4) return `${name} told me about something urgent today.`;
+  if (highest.level === 3) return `${name} reported ${what} and was asked to call the doctor today.`;
+  if (highest.level === 2) return `${name} mentioned ${what} (we're keeping an eye on it).`;
+  if (highest.level === 1) return `${name} mentioned ${what} (noted for the doctor).`;
+  return "";
+}
+
 export function familyRedFlagAlert(input: {
   seniorName: string;
   sharing: SharingLevel;
-  questionText: string;
-  answer: string;
+  /** The question and her answer, when it came from a check-in question. Shown at "all" only. */
+  questionText?: string;
+  answer?: string;
+  /** What she typed, when the answer came from her words. Shown at "all" only. */
+  words?: string;
 }): string {
   // No medical detail below "all" (docs/DESIGN.md "Sharing levels and record consent").
   // It asks for a call today, matching what the senior hears (redFlagAdvice).
   const base = `${input.seniorName} reported something she should call her doctor about. Please call ${input.seniorName} today to check on her.`;
   if (input.sharing !== "all") return base;
-  return `${base}\n\nThe question was: ${input.questionText}\n${input.seniorName} answered: "${input.answer}"`;
+  const lines = [base, ""];
+  if (input.questionText && input.answer) lines.push(`The question was: ${input.questionText}`, `${input.seniorName} answered: "${input.answer}"`);
+  if (input.words) lines.push(`${input.seniorName} wrote: "${herWordsInFull(input.words)}"`);
+  return lines.length > 2 ? lines.join("\n") : base;
+}
+
+/**
+ * Safety screen or model found a crisis. Goes to the family at every sharing level; below "all"
+ * with no detail at all, at "all" with her words and what she was told.
+ */
+export function familyCrisisAlert(input: { seniorName: string; sharing: SharingLevel; words?: string }): string {
+  const name = input.seniorName;
+  const base = `${name} may be going through a very hard time. Please call her now.`;
+  if (input.sharing !== "all") return base;
+  const wrote = input.words ? `\n\n${name} wrote: "${herWordsInFull(input.words)}"` : "";
+  return `${base}${wrote}\n\nI asked ${name} to call or text 988, the Suicide & Crisis Lifeline, or 911 if in danger.`;
+}
+
+/** Safety screen or model found an urgent symptom. Every sharing level, like a red flag; detail at "all". */
+export function familyUrgentAlert(input: { seniorName: string; sharing: SharingLevel; words?: string }): string {
+  const name = input.seniorName;
+  const base = `${name} told me about something that may be urgent. Please call ${name} now to check on her.`;
+  if (input.sharing !== "all") return base;
+  const wrote = input.words ? `\n\n${name} wrote: "${herWordsInFull(input.words)}"` : "";
+  return `${base}${wrote}\n\nI asked ${name} to call 911 if it's happening now, and then her doctor.`;
+}
+
+/** She tapped "Worse" on a follow-up: an alert at every sharing level, the question and answer at "all". */
+export function familyFollowUpWorse(input: { seniorName: string; sharing: SharingLevel; topic: FollowUpTopic }): string {
+  const name = input.seniorName;
+  const base = `${name} said she feels worse than earlier today. Please call ${name} now to check on her.`;
+  if (input.sharing !== "all") return base;
+  return `${base}\n\nI asked: ${followUpAsk(input.topic)}\n${name} answered: "${FOLLOW_UP_BUTTONS.worse}"`;
+}
+
+/** Her "Better" or "About the same" on a follow-up. Sent to the family at sharing "all" only. */
+export function familyFollowUpUpdate(input: { seniorName: string; topic: FollowUpTopic; answer: Exclude<FollowUpAnswer, "worse"> }): string {
+  const name = input.seniorName;
+  return `I checked in with ${name} again and asked: ${followUpAsk(input.topic)}\n${name} answered: "${FOLLOW_UP_BUTTONS[input.answer]}"`;
 }
 
 /**

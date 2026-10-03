@@ -171,6 +171,111 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX checkin_prompts_checkin ON checkin_prompts (checkin_id);
   `,
+  // 6: what she types, beyond answers (src/checkin/engine.ts "Typed messages").
+  // checkins.concern_at: when a red flag or a safety hit (crisis, urgent symptom) first came up in
+  // this check-in. Set, it means no flag offer that day and a closing that says she'll hear from us
+  // again. checkin_notes: her own words about a question ("it was weirder than that"), kept for her
+  // doctor's visit-prep sheet and shown to family only at sharing "all". visit_questions: medicine
+  // questions she asked, for her next visit. follow_ups: one later check-in after a red flag or a
+  // safety hit ("How is your breathing now?"). family_relays: things she asked us to pass on to her
+  // family; passed_on_at stays empty until a family chat is linked to take it.
+  `
+  ALTER TABLE checkins ADD COLUMN concern_at TEXT;
+
+  CREATE TABLE checkin_notes (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    checkin_id INTEGER NOT NULL REFERENCES checkins(id) ON DELETE CASCADE,
+    question_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX checkin_notes_checkin ON checkin_notes (checkin_id);
+  CREATE INDEX checkin_notes_patient ON checkin_notes (patient_id, created_at);
+
+  CREATE TABLE visit_questions (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX visit_questions_patient ON visit_questions (patient_id, created_at);
+
+  CREATE TABLE follow_ups (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    checkin_id INTEGER REFERENCES checkins(id) ON DELETE SET NULL,
+    -- the red-flag question id, "crisis", "urgent_symptom", or "general" when several came up
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    sent_at TEXT,
+    -- the sent follow-up message, so a tap on its buttons finds it
+    message_id TEXT,
+    answered_at TEXT,
+    answer TEXT
+  );
+  CREATE INDEX follow_ups_due ON follow_ups (due_at) WHERE sent_at IS NULL;
+  CREATE INDEX follow_ups_patient ON follow_ups (patient_id, sent_at);
+  CREATE UNIQUE INDEX follow_ups_message ON follow_ups (message_id) WHERE message_id IS NOT NULL;
+
+  CREATE TABLE family_relays (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    passed_on_at TEXT
+  );
+  CREATE INDEX family_relays_waiting ON family_relays (patient_id) WHERE passed_on_at IS NULL;
+  `,
+  // 7: the severity ladder (docs/DESIGN.md "Severity ladder", src/checkin/severity.ts).
+  // symptom_observations: every level the ladder gave something she told us (a button answer,
+  // a typed symptom, a follow-up answer, a safety hit), by check-in date and topic (a question id,
+  // her own short topic words, or a safety kind). Read by the repetition rule (a level-1 topic on
+  // 3 of her last 5 days is level 2), the family's daily status at "all" and the visit-prep
+  // sheet. words: her words for it, when typed. follow_ups.level: the level that asked for the
+  // follow-up (the highest when several joined); "About the same" keeps it, at most 2. Older rows
+  // have none and count as 3 (they were all red flags or safety hits). clarifications: the one
+  // "A little, or a lot?" asked about a typed symptom on a check-in question, never twice.
+  `
+  CREATE TABLE symptom_observations (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    checkin_id INTEGER REFERENCES checkins(id) ON DELETE SET NULL,
+    day TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    question_id TEXT,
+    level INTEGER NOT NULL CHECK (level BETWEEN 0 AND 5),
+    amount TEXT CHECK (amount IS NULL OR amount IN ('none', 'a_little', 'a_lot', 'unknown')),
+    change TEXT CHECK (change IS NULL OR change IN ('new', 'worse', 'same', 'better', 'unknown')),
+    source TEXT NOT NULL CHECK (source IN ('button', 'typed', 'follow_up', 'safety')),
+    words TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX symptom_observations_patient_day ON symptom_observations (patient_id, day);
+
+  ALTER TABLE follow_ups ADD COLUMN level INTEGER CHECK (level IS NULL OR level BETWEEN 0 AND 5);
+
+  CREATE TABLE clarifications (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    checkin_id INTEGER NOT NULL REFERENCES checkins(id) ON DELETE CASCADE,
+    question_id TEXT NOT NULL,
+    change TEXT CHECK (change IS NULL OR change IN ('new', 'worse', 'same', 'better', 'unknown')),
+    words TEXT,
+    asked_at TEXT NOT NULL,
+    answered_at TEXT,
+    answer TEXT,
+    UNIQUE (checkin_id, question_id)
+  );
+  `,
+  // 8: "Let me explain" (src/checkin/engine.ts). checkins.explain_at: when she tapped it on the
+  // pending question; her next typed message is her own words about that question, and is kept
+  // for her doctor even when it can't be matched to an answer. Cleared once that message is
+  // handled or the check-in moves to another question.
+  `
+  ALTER TABLE checkins ADD COLUMN explain_at TEXT;
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

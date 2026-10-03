@@ -58,7 +58,11 @@ describe("schema", () => {
     const db = openDatabase(":memory:");
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((t) => t.name);
     expect(tables).toEqual(
-      ["checkin_prompts", "checkins", "family_members", "family_messages", "flags", "inbound_messages", "memories", "paper_scans", "patients", "record_snapshots", "relay_events", "relay_full_syncs", "vitals_readings"].sort(),
+      [
+        "checkin_notes", "checkin_prompts", "checkins", "clarifications", "family_members", "family_messages", "family_relays", "flags", "follow_ups",
+        "inbound_messages", "memories", "paper_scans", "patients", "record_snapshots", "relay_events", "relay_full_syncs", "symptom_observations",
+        "visit_questions", "vitals_readings",
+      ].sort(),
     );
     expect(schemaVersion(db)).toBe(SCHEMA_VERSION);
     expect(db.pragma("foreign_keys", { simple: true })).toBe(1);

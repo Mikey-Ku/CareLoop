@@ -1,11 +1,13 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentStartError,
   CHECKIN_JOB,
   MISSED_JOB,
   MISSING_HANDLE_MESSAGE,
   MISSING_TOKEN_MESSAGE,
+  llmStatus,
   main as agentMain,
+  parseFollowUpDelay,
   startAgent,
   type AgentDeps,
   type RelayOps,
@@ -15,8 +17,11 @@ import { snapshotLoader } from "../src/cli/simulator.ts";
 import { formatLine, main as relayCheckMain, runRelayCheck } from "../src/cli/relay-check.ts";
 import { loadConfig, type Config } from "../src/config.ts";
 import { getCheckin } from "../src/db/checkins.ts";
-import { familyChats, familyMembers, linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
+import { addFamilyRelay, familyChats, familyMembers, linkFamilyMember, syncFamilyMembers, waitingFamilyRelays } from "../src/db/family.ts";
+import { nextFollowUp, scheduleFollowUp } from "../src/db/follow-ups.ts";
 import { getSharing, openDatabase, setSharing, upsertPatient, type Db } from "../src/db/index.ts";
+import { familyRelay, followUpQuestion, smallTalkFallback } from "../src/checkin/copy.ts";
+import { FakeLlmClient } from "../src/llm/fake.ts";
 import { patientIdFor } from "../src/patient-id.ts";
 import { FakeMessenger } from "../src/relay/fake-messenger.ts";
 import type { RelayClient } from "../src/relay/relay-client.ts";
@@ -310,10 +315,93 @@ describe("startAgent", () => {
     await agent.stop(); // idempotent
   });
 
+  it("logs that free text is off without an LLM, and the engine answers typed text with the fixed reply", async () => {
+    const { db, messenger, lines, start } = setup();
+    linkedBeforeStart(db);
+    const agent = await start();
+    await agent.linked;
+    expect(lines).toContain("[agent] free text off: GEMINI_API_KEY is not set (buttons only)");
+    await agent.engine.handleInbound({ chatId: "chat_harriet", messageId: "in_1", text: "hello there", at: BEFORE_CHECKIN.toISOString() });
+    expect(messenger.lastIn("chat_harriet")?.text).toBe(smallTalkFallback("Harriet"));
+  });
+
+  it("passes the LLM to the engine and logs it", async () => {
+    const llm = new FakeLlmClient({ smallTalk: () => ({ text: "Hello, Harriet. Nice to hear from you.", memories: [], complaints: [] }) });
+    const { db, messenger, lines, start } = setup({ deps: { llm } });
+    linkedBeforeStart(db);
+    const agent = await start();
+    await agent.linked;
+    expect(lines).toContain("[agent] free text on: fake");
+    await agent.engine.handleInbound({ chatId: "chat_harriet", messageId: "in_1", text: "hello there", at: BEFORE_CHECKIN.toISOString() });
+    expect(messenger.lastIn("chat_harriet")?.text).toBe("Hello, Harriet. Nice to hear from you.");
+    expect(llm.smallTalkCalls.map((c) => c.message)).toEqual(["hello there"]);
+  });
+
+  it("llmStatus names the provider and models, or why free text is off, never the key", () => {
+    const withKey = testConfig({ GEMINI_API_KEY: "gem_SECRET_key", GEMINI_MODELS: "gemini-a,gemini-b" });
+    const on = llmStatus(withKey, new FakeLlmClient());
+    expect(on).toMatch(/^free text on: gemini gemini-a, gemini-b/);
+    expect(on).not.toContain("SECRET");
+    expect(llmStatus(withKey, undefined)).toBe("free text off: no LLM client (buttons only)");
+    expect(llmStatus(testConfig(), undefined)).toMatch(/^free text off: .*buttons only/);
+    expect(llmStatus(testConfig(), new FakeLlmClient())).toBe("free text on: fake");
+  });
+
   it("names the patient like the simulator", () => {
     expect(patientIdFor("Harriet", SUBJECT)).toBe("harriet");
     expect(patientIdFor(undefined, SUBJECT)).toBe(SUBJECT);
     expect(patientIdFor("Mary Ann", SUBJECT)).toBe("mary-ann");
+  });
+});
+
+describe("follow-up job", () => {
+  it("every tick sends due follow-ups and passes on waiting family messages; stop() ends it", async () => {
+    const { db, messenger, lines, start } = setup({ deps: { followUpPollMs: 5 } });
+    linkedBeforeStart(db);
+    syncFamilyMembers(db, "harriet", ["sarah"]);
+    linkFamilyMember(db, "sarah", "chat_sarah", "Sarah", BEFORE_CHECKIN.toISOString());
+    // Due before the agent's wall clock (06:00 EDT on 2026-09-01).
+    scheduleFollowUp(db, { patientId: "harriet", checkinId: null, reason: "crisis", createdAt: "2026-09-01T06:00:00Z", dueAt: "2026-09-01T09:00:00Z" });
+    addFamilyRelay(db, { patientId: "harriet", text: "Tell Sarah I love her", createdAt: "2026-09-01T06:00:00Z", passedOnAt: null });
+    const agent = await start();
+    await vi.waitFor(() => expect(messenger.lastIn("chat_harriet")?.text).toBe(followUpQuestion("Harriet", "crisis")));
+    await vi.waitFor(() => expect(messenger.lastIn("chat_sarah")?.text).toBe(familyRelay("Harriet", "Tell Sarah I love her")));
+    expect(nextFollowUp(db, "harriet")).toBeUndefined();
+    expect(waitingFamilyRelays(db, "harriet")).toEqual([]);
+    expect(lines).toContain("[agent] sent 1 follow-up check-in(s)");
+    expect(lines).toContain("[agent] passed on 1 message(s) she left for her family");
+    // Never her words in the log.
+    expect(lines.join("\n")).not.toContain("love her");
+    await agent.stop();
+    scheduleFollowUp(db, { patientId: "harriet", checkinId: null, reason: "crisis", createdAt: "2026-09-01T06:00:00Z", dueAt: "2026-09-01T09:00:00Z" });
+    const sent = messenger.sent.length;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(messenger.sent.length).toBe(sent);
+  });
+
+  it("passes the follow-up delay to the engine", async () => {
+    const { db, start } = setup({ deps: { followUpDelayMinutes: 2 } });
+    linkedBeforeStart(db);
+    const agent = await start();
+    await agent.engine.handleInbound({ chatId: "chat_harriet", messageId: "in_1", text: "I have chest pain", at: BEFORE_CHECKIN.toISOString() });
+    expect(nextFollowUp(db, "harriet")?.dueAt).toBe(new Date(BEFORE_CHECKIN.getTime() + 2 * 60_000).toISOString());
+  });
+
+  it("FOLLOW_UP_DELAY_MINUTES: unset or blank uses the default, a positive number is used, anything else is refused", async () => {
+    expect(parseFollowUpDelay(undefined)).toBeUndefined();
+    expect(parseFollowUpDelay(" ")).toBeUndefined();
+    expect(parseFollowUpDelay("2")).toBe(2);
+    expect(parseFollowUpDelay("0.5")).toBe(0.5);
+    for (const bad of ["0", "-3", "soon"]) expect(parseFollowUpDelay(bad)).toBeNull();
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (line: string) => errors.push(line);
+    try {
+      expect(await agentMain([], { RELAY_AGENT_TOKEN: TOKEN, PATIENT_RELAY_HANDLE: "harriet", FOLLOW_UP_DELAY_MINUTES: "soon" })).toBe(1);
+    } finally {
+      console.error = original;
+    }
+    expect(errors).toEqual(['error: FOLLOW_UP_DELAY_MINUTES must be a positive number of minutes, got "soon"']);
   });
 });
 
