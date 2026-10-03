@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { hasUsableVitals, runPresageVideo } from "../vitals/presage-file.ts";
 
-const USAGE = "usage: npm run vitals:video -- <video.mp4> [--timeout-ms milliseconds] [--interframe-delay-ms milliseconds]";
+const USAGE = "usage: npm run vitals:video -- <video.mp4> [--metrics pulse-breathing|all] [--timeout-ms milliseconds] [--interframe-delay-ms milliseconds]";
 
 export async function main(argv: string[], env: Record<string, string | undefined> = process.env): Promise<number> {
   let parsed;
@@ -13,6 +13,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
       options: {
         "timeout-ms": { type: "string" },
         "interframe-delay-ms": { type: "string" },
+        metrics: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
       },
     });
@@ -41,6 +42,11 @@ export async function main(argv: string[], env: Record<string, string | undefine
     console.error("error: --interframe-delay-ms must be a nonnegative integer");
     return 2;
   }
+  const metricProfile = parsed.values.metrics === undefined ? undefined : parsed.values.metrics;
+  if (metricProfile !== undefined && metricProfile !== "pulse-breathing" && metricProfile !== "all") {
+    console.error("error: --metrics must be pulse-breathing or all");
+    return 2;
+  }
 
   const result = !existsSync(videoPath)
     ? {
@@ -57,6 +63,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
         apiKey: env.PRESAGE_API_KEY,
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         ...(interframeDelayMs === undefined ? {} : { interframeDelayMs }),
+        ...(metricProfile === undefined ? {} : { metricProfile }),
       });
 
   console.log(JSON.stringify(result, null, 2));

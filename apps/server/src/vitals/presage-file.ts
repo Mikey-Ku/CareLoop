@@ -1,4 +1,4 @@
-import { breathingMetrics, cardioMetrics, ProcessingStatus, SmartSpectraSDK } from "@smartspectra/node-sdk";
+import { breathingMetrics, cardioMetrics, MetricType, ProcessingStatus, SmartSpectraSDK } from "@smartspectra/node-sdk";
 import { decodeMetrics } from "@smartspectra/node-sdk/messages";
 import { mergeMetricSnapshots, normalizePresageMetrics, resultFromSnapshot } from "./normalize.ts";
 import { emptyVitalsResult, type VitalsError, type VitalsResult, type ValidationEvent } from "./types.ts";
@@ -6,6 +6,7 @@ import { emptyVitalsResult, type VitalsError, type VitalsResult, type Validation
 export type PresageSession = {
   useFile(videoPath: string, options?: { interframeDelayMs?: number }): PresageSession;
   start(): void;
+  stopAsync(): Promise<void>;
   destroy(): Promise<void>;
   on(event: "processingStatus", callback: (status: number) => void): PresageSession;
   on(event: "validationStatus", callback: (code: number, timestampUs: number, hint: string) => void): PresageSession;
@@ -17,12 +18,21 @@ export type PresageSdkFactory = (options: { apiKey: string; requestedMetrics: nu
 
 const defaultSdkFactory: PresageSdkFactory = (options) => new SmartSpectraSDK(options);
 
+export type PresageMetricProfile = "pulse-breathing" | "all";
+
+const requestedMetricsFor = (profile: PresageMetricProfile): number[] =>
+  profile === "pulse-breathing"
+    ? [MetricType.BREATHING_RATE, MetricType.PULSE_RATE]
+    : [...breathingMetrics, ...cardioMetrics];
+
 export type PresageFileOptions = {
   videoPath: string;
   apiKey: string | undefined;
   timeoutMs?: number;
   /** Defaults to 33 ms so remote model loading can finish before a short clip ends. */
   interframeDelayMs?: number;
+  /** Defaults to the full breathing + cardio bundle. */
+  metricProfile?: PresageMetricProfile;
   sdkFactory?: PresageSdkFactory;
 };
 
@@ -34,6 +44,9 @@ export async function runPresageVideo(options: PresageFileOptions): Promise<Vita
   const errors: VitalsError[] = [];
   let snapshot = {};
   let session: PresageSession | undefined;
+  let sawStartedState = false;
+  let lastValidationKey: string | undefined;
+  const timestampOriginMs = Date.now();
   let settled = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let settle: (() => void) | undefined;
@@ -49,7 +62,7 @@ export async function runPresageVideo(options: PresageFileOptions): Promise<Vita
   try {
     session = (options.sdkFactory ?? defaultSdkFactory)({
       apiKey,
-      requestedMetrics: [...breathingMetrics, ...cardioMetrics],
+      requestedMetrics: requestedMetricsFor(options.metricProfile ?? "all"),
     });
     session.on("metrics", (buffer, timestampUs) => {
       try {
@@ -59,6 +72,9 @@ export async function runPresageVideo(options: PresageFileOptions): Promise<Vita
       }
     });
     session.on("validationStatus", (code, timestampUs, hint) => {
+      const validationKey = `${code}:${hint}`;
+      if (validationKey === lastValidationKey) return;
+      lastValidationKey = validationKey;
       validation.push({ code, timestampUs, hint });
     });
     session.on("error", (code, message, retryable) => {
@@ -69,7 +85,9 @@ export async function runPresageVideo(options: PresageFileOptions): Promise<Vita
       if (status === ProcessingStatus.kError) {
         errors.push({ code: "processing_status_error", message: "SmartSpectra ended in an error state" });
         finish();
-      } else if (status === ProcessingStatus.kIdle) {
+      } else if (status === ProcessingStatus.kStarting || status === ProcessingStatus.kRunning) {
+        sawStartedState = true;
+      } else if (status === ProcessingStatus.kIdle && sawStartedState) {
         finish();
       }
     });
@@ -89,6 +107,7 @@ export async function runPresageVideo(options: PresageFileOptions): Promise<Vita
     if (timer) clearTimeout(timer);
     if (session) {
       try {
+        await session.stopAsync();
         await session.destroy();
       } catch (error) {
         errors.push({ code: "destroy", message: error instanceof Error ? error.message : String(error) });
@@ -96,7 +115,7 @@ export async function runPresageVideo(options: PresageFileOptions): Promise<Vita
     }
   }
 
-  return resultFromSnapshot("video_file", snapshot, validation, errors);
+  return resultFromSnapshot("video_file", snapshot, validation, errors, { timestampOriginMs });
 }
 
 export function hasUsableVitals(result: VitalsResult): boolean {

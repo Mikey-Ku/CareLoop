@@ -34,4 +34,10 @@ describe("Presage metric normalization", () => {
       breathingRateConfidence: 51,
     });
   });
+
+  it("anchors relative file timestamps to the run start", () => {
+    const snapshot = normalizePresageMetrics({ breathing: { rate: [{ value: 18, timestamp: 50_000_000 }] } });
+    const result = resultFromSnapshot("video_file", snapshot, [], [], { timestampOriginMs: 1_700_000_000_000 });
+    expect(result.measuredAt).toBe(new Date(1_700_000_000_000 + 50_000).toISOString());
+  });
 });

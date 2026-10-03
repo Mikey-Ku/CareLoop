@@ -18,6 +18,7 @@ class FakeSession implements PresageSession {
   }
 
   useFile(_videoPath?: string, _options?: { interframeDelayMs?: number }): PresageSession {
+    this.emit("processingStatus", 1);
     return this;
   }
 
@@ -41,6 +42,8 @@ class FakeSession implements PresageSession {
 
   async destroy(): Promise<void> {}
 
+  async stopAsync(): Promise<void> {}
+
   emitError(): void {
     this.emit("error", 2, "authentication failed", false);
   }
@@ -54,6 +57,21 @@ class FakeSession implements PresageSession {
 }
 
 describe("Presage file runner", () => {
+  it("can request only pulse and breathing for model-access diagnostics", async () => {
+    let requestedMetrics: number[] | undefined;
+    const result = await runPresageVideo({
+      videoPath: "face.mp4",
+      apiKey: "test-key",
+      metricProfile: "pulse-breathing",
+      sdkFactory: (options) => {
+        requestedMetrics = options.requestedMetrics;
+        return new FakeSession();
+      },
+    });
+    expect(requestedMetrics).toEqual([2, 15]);
+    expect(hasUsableVitals(result)).toBe(true);
+  });
+
   it("returns normalized readings after the file settles", async () => {
     const result = await runPresageVideo({ videoPath: "face.mp4", apiKey: "test-key", sdkFactory: () => new FakeSession() });
     expect(hasUsableVitals(result)).toBe(true);

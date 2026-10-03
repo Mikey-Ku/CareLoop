@@ -107,9 +107,14 @@ export function mergeMetricSnapshots(previous: MetricSnapshot, next: MetricSnaps
   };
 }
 
-function timestampToIso(timestamp: number | undefined): string | undefined {
+function timestampToIso(timestamp: number | undefined, timestampOriginMs?: number): string | undefined {
   if (timestamp === undefined || !Number.isFinite(timestamp) || timestamp <= 0) return undefined;
-  const date = new Date(timestamp / 1000);
+  // File playback and Relay frames commonly use a relative microsecond clock;
+  // protobuf packets from other sources may contain epoch microseconds.
+  const epochMs = timestamp >= 1_000_000_000_000
+    ? timestamp / 1000
+    : (timestampOriginMs ?? Date.now()) + timestamp / 1000;
+  const date = new Date(epochMs);
   return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }
 
@@ -118,6 +123,7 @@ export function resultFromSnapshot(
   snapshot: MetricSnapshot,
   validation: ValidationEvent[] = [],
   errors: VitalsError[] = [],
+  options: { timestampOriginMs?: number } = {},
 ): VitalsResult {
   const confidences = [snapshot.heartRateConfidence, snapshot.breathingRateConfidence].filter(
     (value): value is number => value !== undefined && Number.isFinite(value),
@@ -129,7 +135,7 @@ export function resultFromSnapshot(
     heartRate: snapshot.heartRate ?? null,
     breathingRate: snapshot.breathingRate ?? null,
     confidence: confidences.length > 0 ? Math.min(...confidences) : null,
-    measuredAt: timestampToIso(timestamps.length > 0 ? Math.max(...timestamps) : undefined) ?? null,
+    measuredAt: timestampToIso(timestamps.length > 0 ? Math.max(...timestamps) : undefined, options.timestampOriginMs) ?? null,
     source,
     validation: [...validation],
     errors: [...errors],
