@@ -1,0 +1,28 @@
+# Harriet changes her sharing level from her own chat (check-in date 2026-09-01).
+# Halfway through the check-in she types "Sharing", picks "Everything", and the
+# question she was on comes back so she can carry on. Each family member is told in
+# their own chat that the level changed, not why, and that day's family status shows
+# her answers and the flag.
+# At the end she uses the Sharing button on the last message to go back to
+# "Just check-ins".
+# npm run simulate -- --reset --script ../../scripts/demo/harriet-sharing.txt
+#
+# Let's start
+1
+# Have you felt dizzy when standing up? -> No
+1
+# She asks for the sharing menu mid check-in
+Sharing
+# Everything -> the morning medicines question comes again
+3
+# Did you take your morning medicines? -> Yes
+1
+# How are you feeling today? -> Good
+1
+# One thing worth asking your doctor about -> Tell me more
+1
+# I'll ask my doctor -> done, family status at "all"
+1
+# The Sharing button on the last message, then "Just check-ins"
+1
+1

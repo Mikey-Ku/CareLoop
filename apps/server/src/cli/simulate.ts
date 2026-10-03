@@ -2,7 +2,7 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
-import { loadConfig } from "../config.ts";
+import { loadConfig, parseHandles } from "../config.ts";
 import { ConsentInactiveError, FinchNodeError, SubjectNotFoundError } from "../finchnode/client.ts";
 import { painter, useColor } from "./sim-render.ts";
 import {
@@ -18,12 +18,13 @@ import {
 } from "./simulator.ts";
 
 // npm run simulate -- [subject] [--day YYYY-MM-DD] [--db path] [--reset] [--live]
-//                     [--script file] [--sharing status|status_vitals|all]
-// Runs the daily check-in in the terminal: Harriet's phone and the family group
-// as two chats, her replies typed at the prompt. See src/cli/simulator.ts.
+//                     [--script file] [--sharing status|status_vitals|all] [--family sarah,tom]
+// Runs the daily check-in in the terminal: Harriet's phone and each family
+// member's own chat with the agent as separate panes, her replies typed at the
+// prompt. See src/cli/simulator.ts.
 
 const USAGE =
-  "usage: npm run simulate -- [subject] [--day YYYY-MM-DD] [--db path] [--reset] [--live] [--script file] [--sharing status|status_vitals|all]";
+  "usage: npm run simulate -- [subject] [--day YYYY-MM-DD] [--db path] [--reset] [--live] [--script file] [--sharing status|status_vitals|all] [--family sarah,tom]";
 
 /** Delete the simulator DB file (and its WAL siblings). Refuses the app database. */
 function resetDatabase(dbPath: string, appDbPath: string): void {
@@ -46,6 +47,7 @@ async function main(argv: string[]): Promise<number> {
         live: { type: "boolean", default: false },
         script: { type: "string" },
         sharing: { type: "string" },
+        family: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
       },
     });
@@ -85,6 +87,8 @@ async function main(argv: string[]): Promise<number> {
     config,
     ...(values.day ? { day: values.day } : {}),
     ...(values.sharing && isSharingLevel(values.sharing) ? { sharing: values.sharing } : {}),
+    // Comma separated handles; "--family ''" means no family members.
+    ...(values.family !== undefined ? { family: parseHandles(values.family) } : {}),
   };
 
   try {

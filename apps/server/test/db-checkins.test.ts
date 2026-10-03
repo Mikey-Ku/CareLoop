@@ -9,6 +9,7 @@ import {
   patientForChat,
   updateCheckin,
 } from "../src/db/checkins.ts";
+import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import { openDatabase, upsertPatient, type Db } from "../src/db/index.ts";
 
 const P = "harriet";
@@ -22,8 +23,9 @@ beforeEach(() => {
     finchnodePatientId: "patient-demo-polypharmacy",
     preferredName: "Harriet",
     relayChatId: "chat_harriet",
-    familyChatId: "chat_family",
   });
+  syncFamilyMembers(db, P, ["sarah"]);
+  linkFamilyMember(db, "sarah", "chat_family", null, T1);
 });
 
 describe("checkins rows", () => {
@@ -82,8 +84,8 @@ describe("inbound dedupe", () => {
 });
 
 describe("patients for the engine", () => {
-  it("finds the senior by her own chat, not by the family group", () => {
-    expect(patientForChat(db, "chat_harriet")).toMatchObject({ id: P, preferredName: "Harriet", familyChatId: "chat_family", sharing: "status" });
+  it("finds the senior by her own chat, never by a family chat", () => {
+    expect(patientForChat(db, "chat_harriet")).toMatchObject({ id: P, preferredName: "Harriet", relayChatId: "chat_harriet", sharing: "status" });
     expect(patientForChat(db, "chat_family")).toBeUndefined();
     expect(patientForChat(db, "chat_nobody")).toBeUndefined();
     expect(getCheckinPatient(db, P)?.finchnodePatientId).toBe("patient-demo-polypharmacy");

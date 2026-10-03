@@ -51,7 +51,7 @@ This folder is a git repo with a GitHub remote (`Mikey-Ku/Mhacks_2026`). The tea
 
 A daily check-in companion for older adults who live alone with several chronic conditions.
 
-Each morning a Relay agent sends a short, friendly chat with buttons and at most 3 questions picked from the senior's FinchNode record. She can then choose a voice call to talk (ElevenLabs) or a video call to check her vitals (Presage heart rate compared with her usual range from the record; breathing rate recorded). Photos of hospital papers are read back and checked against her medication list, voice messages go to and from her family group, and the family gets a heads-up if she doesn't check in by noon.
+Each morning a Relay agent sends a short, friendly chat with buttons and at most 3 questions picked from the senior's FinchNode record. She can then choose a voice call to talk (ElevenLabs) or a video call to check her vitals (Presage heart rate compared with her usual range from the record; breathing rate recorded). Photos of hospital papers are read back and checked against her medication list, voice messages are passed between her chat and her family's chats, and the family gets a heads-up if she doesn't check in by noon.
 
 ## Architecture
 
@@ -91,7 +91,7 @@ Definition of done for this run:
 
 1. **[THIS RUN]** Scaffold, FinchNode client, fixtures, tests.
 2. **[THIS RUN]** Context packet, question picker, rules R1 to R5, answer key test.
-3. Relay agent: webhook server with signature check, morning check-in with buttons, answers saved, family group, missed check-in job.
+3. Relay agent: webhook server with signature check, morning check-in with buttons, answers saved, family chats, missed check-in job.
 4. Chat call: ElevenLabs bridge on `call.created`, context packet as initiation data, memories saved, voice memo to family.
 5. Vitals call: Relay video frames into Presage (team spike decides C++ sidecar vs fallback scan screen).
 6. Hospital paper check: photo to Claude vision, read-back and confirm buttons, rule R6.

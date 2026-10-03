@@ -7,7 +7,7 @@ Plan doc with diagrams: https://claude.ai/code/artifact/3b6c7a92-f524-40dc-85cf-
 ```
 Harriet (Relay iOS app) --\                         /--> FinchNode demo API (record, read-only)
                            >-- Relay API -- our backend --> ElevenLabs Agent (voice, via Relay bridge)
-Sarah (Relay group chat) --/   (webhooks,     |         \--> Presage SmartSpectra SDK (vitals from frames)
+Sarah (her own Relay chat) -/   (webhooks,     |         \--> Presage SmartSpectra SDK (vitals from frames)
                                  calls)        |
                                                +--> Anthropic Claude (chat wording, reading paper photos)
                                                +--> SQLite (our database)
@@ -21,7 +21,7 @@ Backend parts:
 | `context` builder | One "context packet" per reply or call: record + our notes |
 | `rules` engine | Medication checks, red flags, paper discrepancies. Deterministic, unit tested |
 | `db` | SQLite tables below |
-| `relay` agent | Webhook server, check-in messages, buttons, family group, photos, voice memos, scheduled jobs |
+| `relay` agent | Webhook server, check-in messages, buttons, family chats, photos, voice memos, scheduled jobs |
 | `calls` handler | Relay call events, ElevenLabs bridge, video frames to Presage |
 | `llm` | Claude for friendly wording and reading paper photos. Never decides what is risky |
 
@@ -140,7 +140,7 @@ A rule result is recomputed on every snapshot and shown to no one. A rule result
 ## Daily questions and red flags
 
 - Question bank keyed by condition or drug class: heart failure (ankle swelling; trouble breathing lying flat), anticoagulant (unusual bruising or bleeding), beta blocker or loop diuretic (dizziness on standing), everyone (morning medicines taken). Pick at most 3, rotate across days.
-- Red flags are urgent and come from her answers, not from the health record. They are fixed rules, not LLM judgment: for example heart failure plus "trouble breathing" answer, or anticoagulant plus "bleeding" answer. Action: tell her to call her doctor and alert the family group at every sharing level (see Sharing levels for how much the alert says). Thresholds are config values the team sets; do not invent clinical cutoffs.
+- Red flags are urgent and come from her answers, not from the health record. They are fixed rules, not LLM judgment: for example heart failure plus "trouble breathing" answer, or anticoagulant plus "bleeding" answer. Action: tell her to call her doctor and alert every family chat at every sharing level (see Sharing levels for how much the alert says). Thresholds are config values the team sets; do not invent clinical cutoffs.
 - Usual range (heart rate only): lowest to highest clinic heart-rate reading in the health record (LOINC 8867-4). Needs at least `USUAL_RANGE_MIN_READINGS` readings (default 3), otherwise no comparison. Harriet: 65 to 91 bpm from 10 readings. A camera reading outside it gets a gentle mention, not an alarm.
 - Camera readings are saved in `vitals_readings` for trends and never change the usual range.
 - Breathing rate is said back and saved, never compared: no breathing-rate readings exist in Harriet's record.
@@ -187,23 +187,28 @@ For calls, the packet goes to ElevenLabs as dynamic variables through the bridge
 
 | Table | Key columns |
 | --- | --- |
-| patients | id, finchnode_patient_id, preferred_name, relay_handle, relay_chat_id, family_chat_id, checkin_time, timezone, sharing |
+| patients | id, finchnode_patient_id, preferred_name, relay_handle, relay_chat_id, family_chat_id (unused since migration 4), checkin_time, timezone, sharing |
+| family_members | patient_id, handle, display_name, chat_id, linked_at (one row per family chat; linked when they first message the agent) |
 | record_snapshots | patient_id, fetched_at, scenario, sync_status, raw_json |
-| checkins | id, patient_id, date, status (sent, answered, skipped, missed), mood, answers_json |
+| checkins | id, patient_id, date, status (sent, answered, skipped, missed), mood, answers_json, question_ids_json, step, question_index, pending_flag_id, sent_at, finished_at |
 | vitals_readings | id, patient_id, taken_at, heart_rate, breathing_rate, method (relay_call, scan_screen), confidence |
 | memories | id, patient_id, text, created_at, deleted_at |
 | flags | id, patient_id, rule_id, fingerprint, status (new, told, noted, cleared), severity, message, evidence_json, created_at, offered_on, told_on, told_at, noted_at, cleared_at |
 | paper_scans | id, patient_id, relay_attachment_id, extracted_json, confirmed_at, discrepancies_json |
 | family_messages | id, patient_id, direction (to_senior, to_family), kind (voice, text, photo), from_name, relay_message_id, created_at, played_at |
+| inbound_messages | message_id, chat_id, received_at (an inbound Relay message is handled once) |
+| relay_events | event_id, sequence, event_type, payload_json, received_at, processed_at, error (WebSocket inbox, committed before ACK) |
+| relay_full_syncs | when a Relay full sync re-linked chats |
 
 ## Relay facts (from docs.relayapp.im)
 
 - API base `https://api.relayapp.im`; Agent Token auth; send with idempotency keys.
-- Local dev: `npx relaymessenger connect`, then `npx relaymessenger listen --forward-to http://localhost:3000/webhooks/relay`. Verify the Standard Webhooks signature on the raw body with `RELAY_WEBHOOK_SECRET`.
+- **Delivery: WebSocket, not webhooks** (decided 2026-10-03). `relay.websocket.run({ onEvent, onFullSync })` from `@relaymessenger/sdk` runs from a laptop with no public URL. The agent must have zero webhook subscriptions. `onEvent` commits the event by `event_id` to SQLite before it resolves (the SDK ACKs after); work happens from that inbox. Pattern: Relay-SDK `cookbook/websocket-agent`. `RELAY_WEBHOOK_SECRET` is not needed.
+- First contact: the agent cannot open a chat with someone who never wrote to it (its message sits as a silent request). Harriet and each family member send the agent a message first; `contact.added` gives the direct `chat_id`.
 - Buttons: 1 to 5 per message, label up to 80 chars; a tap arrives as `message.received` with text equal to the label and `reply_to`.
 - Forms: multi-page, answers in a `form_response` part.
 - Photos: `message.received` media part with a signed URL valid 60 minutes; attachments up to 100 MiB.
-- Group chats: up to 7 active members, at least one agent, several people allowed.
+- **No chat holds two people** (docs.relayapp.im/chats). A direct chat is one person and one agent; a group is one person with agents, or agents only (3 to 7). So there is no shared family group: each family member has a **family chat**, their own direct chat with the agent, and the agent sends family updates to each one and forwards voice memos between Harriet's chat and theirs. Creating a group with two people fails with 403 code 2003.
 - Calls: agent can call a person who added it, turned on Allow Calls, and has replied. `ElevenLabsCall.connect({ relay, callId, elevenlabs: { apiKey, agentId }, initiationData })` from the `call.created` handler.
 - Video: remote camera track decoded with `VideoStream` (RGBA, I420 and others), up to 1080p at 30 fps.
 - Activity label: 1 to 21 visible chars, 90 second lease, renew every 60 seconds.
@@ -221,7 +226,7 @@ For calls, the packet goes to ElevenLabs as dynamic variables through the bridge
 1. Scaffold the repo (TypeScript server, lint, vitest, SQLite schema). FinchNode client for the demo API with typed models, scenario handling, normalization, source merge. Record fixtures. Tests.
 2. Context packet builder, question picker, rules R1 to R5, answer key test.
 2a. Terminal simulator (done): check-in engine behind a `Messenger` interface (`src/relay/messenger.ts`), `FakeMessenger`, fixed message copy (`src/checkin/copy.ts`), red flags, missed check-in job, R6 paper diff, `npm run simulate` and `scripts/demo/*.txt`.
-3. Relay agent: implement `Messenger` with the Relay SDK, webhook server with signature check that turns `message.received` into `engine.handleInbound`, family group creation, schedule `startDay` and `runMissedCheckin`.
+3. Relay agent: `RelayMessenger` implementing `Messenger`, WebSocket inbox (durable by `event_id`) that turns `message.received` into `engine.handleInbound`, patient and family linking on `contact.added` (one family chat per family member), scheduler for `startDay` and `runMissedCheckin`, `npm run agent`.
 4. Chat call: ElevenLabs bridge on `call.created`, context packet as initiation data, memories saved after the call, voice memo to family.
 5. Vitals call: Relay video frames into Presage (spike decides C++ sidecar vs fallback scan screen), heart rate compared with her usual range, breathing rate recorded, both spoken back.
 6. Hospital paper check: photo to Claude vision, read-back and confirm buttons, rule R6 against the record.

@@ -3,6 +3,7 @@
 # hf-ankle-swelling, hf-breathing-lying-flat (red flag on "Yes") and
 # anticoagulant-bleeding (red flag on "Yes"). On 2026-09-01 it picks none of them.
 # npm run simulate -- --reset --day 2026-09-02 --script ../../scripts/demo/harriet-red-flag.txt
+# Add --family sarah,tom to see the alert reach each family member in their own chat.
 #
 # Let's start
 1

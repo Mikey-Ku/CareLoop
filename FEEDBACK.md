@@ -19,19 +19,31 @@ Team notes between Claude Code runs. Claude Code reads this at the start of ever
 - [ ] Family messages: run 1 picked `direction` to_senior/to_family and `kind` voice/text/photo in the schema. Check against how the Relay agent stores messages in run 2.
 - [ ] Red-flag advice adds "If it gets worse or feels like an emergency, call 911." Beyond the spec; keep or drop?
 - [ ] Stale button taps: a tap on an old message counts as the answer to whatever is pending now. Fine for the demo; tighten with `replyTo` in run 2?
-- [ ] Sharing changes: the copy and buttons exist (`SHARING_BUTTONS`), but there is no chat flow yet; `/sharing` in the simulator just sets the level. Build it in run 2 or 7?
-- [ ] R6 results aren't stored as flags yet (the simulator only shows them). Run 6 should sync R6 into the flag lifecycle after Harriet confirms the read-back.
-- [ ] Branches: run 1 was built on branch `claude/workflow-review-deep-dive-3eaa2f`, not `main`. Also, local `main` has commit d7a795a (docs) that was never pushed to origin. Merge or fast-forward when ready.
+- [ ] "Later" on a flag she has heard: a record flag becomes told (not offered again), a paper (R6) flag stays new (offered again). Make them match? Suggested: both told.
+- [ ] Family members get no reply when they first message the agent, so they can't tell they're set up. Send a short welcome ("You'll get Harriet's daily updates here")? Suggested: yes, next run.
+- [x] [done] Sharing changes: chat flow built in run 2b.
+- [x] [done] R6 results enter the flag lifecycle after Harriet confirms the read-back (run 2b).
+- [x] [done] Branches: merged to `main` through a pull request (run 2b).
 
 ## Team tasks (humans only, not for Claude Code)
 
-- [ ] Relay: create an agent in Relay Console and save its Agent Token; create a webhook subscription secret. Put `RELAY_AGENT_TOKEN` and `RELAY_WEBHOOK_SECRET` in `.env`.
-- [ ] Relay: install the Relay iOS app on two iPhones (one plays Harriet, one plays Sarah). Add the agent on both and turn on Allow Calls on Harriet's phone.
-- [ ] ElevenLabs: create an Agent with a warm stock voice. Its prompt says it is an AI, keeps calls short, never gives medical or dosing advice, and ends by suggesting a real person. Put `ELEVENLABS_API_KEY` and `ELEVENLABS_AGENT_ID` in `.env`.
+Relay setup (WebSocket, so no public URL and no webhook secret):
+
+- [ ] On the laptop that runs the agent: `npx relaymessenger@latest login`, then create the agent in Relay Console (or the CLI) and put its Agent Token in `.env` as `RELAY_AGENT_TOKEN`. Don't create a webhook subscription: WebSocket needs zero.
+- [ ] Two phones with the Relay app: one plays Harriet, one plays Sarah. Put their handles in `.env` as `PATIENT_RELAY_HANDLE` and `FAMILY_RELAY_HANDLES`.
+- [ ] From EACH phone, send the agent a first message ("hi"). The agent can't message someone who hasn't written to it. Turn on Allow Calls on Harriet's phone.
+- [ ] Run `npm run relay:check` in `apps/server`; every line should be green. Then `npm run agent -- --checkin-now` and answer on Harriet's phone.
+
+Voice, vitals, vision:
+
+- [ ] ElevenLabs: create an Agent with a warm stock voice. Its prompt says it is an AI, keeps calls short, never gives medical or dosing advice, and ends by suggesting a real person. Put `ELEVENLABS_API_KEY` and `ELEVENLABS_AGENT_ID` in `.env`. (Relay-SDK `cookbook/elevenlabs-agents-call` is the reference.)
 - [ ] Presage: sign up for the free tier (https://www.mlh.com/partners/presage) and put `PRESAGE_API_KEY` in `.env`.
-- [ ] Anthropic: put `ANTHROPIC_API_KEY` in `.env`.
-- [ ] Day-one spike: run one Relay video call with the ElevenLabs bridge and video frame reading at the same time. Compare heart rate with Presage's own app on the same person in the same minute. Write the result here; it decides build step 5 (C++ sidecar or fallback scan screen).
+- [ ] Presage spike, the riskiest unknown: try `@smartspectra/node-sdk` (npm, 3.4.0, has a darwin-arm64 build) with raw RGBA frames first. If it accepts frames from Relay's `VideoStream`, it replaces the C++ sidecar. Compare its heart rate with Presage's own app on the same person in the same minute. Write the result here.
+- [ ] Anthropic: put `ANTHROPIC_API_KEY` in `.env` (reads paper photos in step 6).
+
+Demo:
+
+- [x] Synthetic discharge sheet: `fixtures/papers/harriet-discharge.html` (aspirin stopped). Print it on letter paper.
 - [ ] Confirm the wording of rules R3 (bleeding combination) and R4 (potassium) against a drug interaction reference.
-- [ ] Print the synthetic discharge sheet for Harriet from "Northstar Health System" with one planted change (aspirin stopped). Label it clearly as synthetic.
-- [ ] Check MHacks prize tracks (FinchNode, ElevenLabs, Presage through MLH) and note them here.
+- [ ] Check MHacks prize tracks (FinchNode, ElevenLabs, Presage through MLH, Relay) and note them here.
 - [ ] Assign owners: records and rules, Relay agent, voice, vitals, demo and pitch.

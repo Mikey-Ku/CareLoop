@@ -114,18 +114,20 @@ export type CheckinPatient = {
   finchnodePatientId: string;
   preferredName: string;
   relayChatId: string | null;
-  familyChatId: string | null;
   sharing: SharingLevel;
 };
 
 const PATIENT_COLUMNS = `id, finchnode_patient_id AS finchnodePatientId, preferred_name AS preferredName,
-  relay_chat_id AS relayChatId, family_chat_id AS familyChatId, sharing`;
+  relay_chat_id AS relayChatId, sharing`;
 
 export function getCheckinPatient(db: Db, patientId: string): CheckinPatient | undefined {
   return db.prepare(`SELECT ${PATIENT_COLUMNS} FROM patients WHERE id = ?`).get(patientId) as CheckinPatient | undefined;
 }
 
-/** The senior whose own chat this is. A family group chat id matches no one. */
+/**
+ * The senior whose own chat this is. Only her chat matches: a family chat (family_members.chat_id)
+ * matches no one, so family members can never answer a check-in or change her sharing level.
+ */
 export function patientForChat(db: Db, chatId: string): CheckinPatient | undefined {
   return db.prepare(`SELECT ${PATIENT_COLUMNS} FROM patients WHERE relay_chat_id = ?`).get(chatId) as CheckinPatient | undefined;
 }

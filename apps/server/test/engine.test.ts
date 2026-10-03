@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BUTTON,
   checkinDone,
@@ -12,11 +12,13 @@ import {
   flagOffer,
   notTodayReply,
   redFlagAdvice,
+  SHARING_MENU_BUTTON,
 } from "../src/checkin/copy.ts";
 import { createCheckinEngine } from "../src/checkin/engine.ts";
 import type { CheckinEngine } from "../src/checkin/engine-types.ts";
 import { QUESTION_BANK } from "../src/context/questions.ts";
 import { getCheckin } from "../src/db/checkins.ts";
+import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import {
   latestSnapshot,
   openDatabase,
@@ -50,7 +52,10 @@ let inbound = 0;
 
 function setup(loadSnapshotImpl: (subject: string) => Promise<ReturnType<typeof loadSnapshot>> = async (s) => loadSnapshot(s)) {
   db = openDatabase(":memory:");
-  upsertPatient(db, { id: P, finchnodePatientId: SUBJECT, preferredName: "Harriet", relayChatId: ME, familyChatId: FAMILY });
+  upsertPatient(db, { id: P, finchnodePatientId: SUBJECT, preferredName: "Harriet", relayChatId: ME });
+  // One family member, Sarah, already linked: FAMILY is her own chat with the agent.
+  syncFamilyMembers(db, P, ["sarah"]);
+  linkFamilyMember(db, "sarah", FAMILY, "Sarah", `${DAY1}T08:00:00.000Z`);
   now = `${DAY1}T09:00:00.000Z`;
   messenger = new FakeMessenger({ now: () => now });
   engine = createCheckinEngine(
@@ -110,7 +115,7 @@ describe("a full Harriet day", () => {
     const answers = row.answers.map(({ questionId, questionText, answer }) => ({ questionId, questionText, answer }));
     expect(brief(last)).toEqual([
       msg(ME, flagNotedReply()),
-      msg(ME, checkinDone("Harriet")),
+      msg(ME, checkinDone("Harriet"), [SHARING_MENU_BUTTON]),
       msg(FAMILY, familyDailyStatus({ seniorName: "Harriet", sharing: "all", outcome: "checked_in", answers, flags: [{ message: r1.message }] })),
     ]);
 
@@ -156,7 +161,7 @@ describe("a full Harriet day", () => {
     for (const t of ["Let's start", "No", "Yes", "Good"]) await say(t);
     const r1 = flagsByRule().get("R1")!;
     expect(brief(await say("later"))).toEqual([
-      msg(ME, checkinDone("Harriet")),
+      msg(ME, checkinDone("Harriet"), [SHARING_MENU_BUTTON]),
       msg(FAMILY, familyDailyStatus({ seniorName: "Harriet", sharing: "status", outcome: "checked_in", answers: [], flags: [] })),
     ]);
     expect(flagsByRule().get("R1")?.status).toBe("new");
@@ -170,7 +175,7 @@ describe("a full Harriet day", () => {
   it("Later after hearing the detail leaves the flag told", async () => {
     await engine.startDay(P, DAY1);
     for (const t of ["Let's start", "No", "Yes", "Good", "Tell me more"]) await say(t);
-    expect(brief(await say("Later"))[0]).toEqual(msg(ME, checkinDone("Harriet")));
+    expect(brief(await say("Later"))[0]).toEqual(msg(ME, checkinDone("Harriet"), [SHARING_MENU_BUTTON]));
     expect(flagsByRule().get("R1")?.status).toBe("told");
   });
 
@@ -179,7 +184,7 @@ describe("a full Harriet day", () => {
     db.prepare("UPDATE flags SET status = 'noted', noted_at = ?").run(now);
     for (const t of ["Let's start", "No", "Yes"]) await say(t);
     expect(brief(await say("Good"))).toEqual([
-      msg(ME, checkinDone("Harriet")),
+      msg(ME, checkinDone("Harriet"), [SHARING_MENU_BUTTON]),
       msg(FAMILY, familyDailyStatus({ seniorName: "Harriet", sharing: "status", outcome: "checked_in", answers: [], flags: [] })),
     ]);
     expect(getCheckin(db, P, DAY1)).toMatchObject({ status: "answered", step: "done" });
@@ -306,11 +311,117 @@ describe("idempotency and robustness", () => {
     expect(getCheckin(db, P, DAY1)?.step).toBe("greeting");
   });
 
-  it("messages in the family group are ignored", async () => {
+  it("messages in a family chat are ignored", async () => {
     await engine.startDay(P, DAY1);
     expect(await say("Let's start", FAMILY)).toEqual([]);
     expect(await say("Not today", FAMILY)).toEqual([]);
     expect(getCheckin(db, P, DAY1)).toMatchObject({ status: "sent", step: "greeting" });
+  });
+});
+
+describe("family chats (one per family member)", () => {
+  const TOM = "chat_tom";
+  const ANN = "chat_ann";
+  const statusText = familyDailyStatus({ seniorName: "Harriet", sharing: "status", outcome: "checked_in", answers: [], flags: [] });
+
+  /** Family sends with their idempotency keys, from a spy on the messenger. */
+  function familyKeys(spy: { mock: { calls: Parameters<FakeMessenger["send"]>[] } }): [string, string][] {
+    return spy.mock.calls.filter(([chatId]) => chatId !== ME).map(([chatId, , key]) => [chatId, key]);
+  }
+
+  it("two family members both get the daily status and the red-flag alert, each keyed by handle", async () => {
+    syncFamilyMembers(db, P, ["sarah", "tom"]);
+    linkFamilyMember(db, "tom", TOM, "Tom", now);
+    const send = vi.spyOn(messenger, "send");
+    now = `${DAY2}T09:00:00.000Z`;
+    await engine.startDay(P, DAY2);
+    await say("Let's start");
+    await say("No"); // ankle swelling
+    const breathing = question("hf-breathing-lying-flat");
+    const alert = familyRedFlagAlert({ seniorName: "Harriet", sharing: "status", questionText: breathing.text, answer: "Yes" });
+    const sent = await say("Yes"); // red flag
+    expect(brief(sent)).toEqual([
+      msg(ME, redFlagAdvice("Harriet")),
+      msg(FAMILY, alert),
+      msg(TOM, alert),
+      msg(ME, question("anticoagulant-bleeding").text, question("anticoagulant-bleeding").buttons),
+    ]);
+    for (const t of ["No", "Later"]) await say(t);
+    expect(messenger.inChat(FAMILY).map((m) => m.text)).toEqual([alert, statusText]);
+    expect(messenger.inChat(TOM).map((m) => m.text)).toEqual([alert, statusText]);
+    expect(familyKeys(send)).toEqual([
+      [FAMILY, `${P}:${DAY2}:red-flag:hf-breathing-lying-flat:family:sarah`],
+      [TOM, `${P}:${DAY2}:red-flag:hf-breathing-lying-flat:family:tom`],
+      [FAMILY, `${P}:${DAY2}:status:family:sarah`],
+      [TOM, `${P}:${DAY2}:status:family:tom`],
+    ]);
+  });
+
+  it("the missed alert goes to each linked family chat once", async () => {
+    syncFamilyMembers(db, P, ["sarah", "tom"]);
+    linkFamilyMember(db, "tom", TOM, null, now);
+    const send = vi.spyOn(messenger, "send");
+    await engine.startDay(P, DAY1);
+    await engine.runMissedCheckin(P, DAY1);
+    await engine.runMissedCheckin(P, DAY1);
+    expect(familyKeys(send)).toEqual([
+      [FAMILY, `${P}:${DAY1}:missed:family:sarah`],
+      [TOM, `${P}:${DAY1}:missed:family:tom`],
+    ]);
+  });
+
+  it("an unlinked family member is skipped, and gets messages once they link", async () => {
+    syncFamilyMembers(db, P, ["sarah", "ann"]); // Ann hasn't messaged the agent yet
+    await engine.startDay(P, DAY1);
+    await say("Not today");
+    expect(messenger.sent.map((m) => m.chatId)).toEqual([ME, ME, FAMILY]);
+
+    // Ann messages the agent; her chat is linked (src/relay/inbox.ts does this from contact.added).
+    linkFamilyMember(db, "ann", ANN, "Ann", now);
+    now = `${DAY2}T09:00:00.000Z`;
+    await engine.startDay(P, DAY2);
+    await say("Not today");
+    const notToday = familyDailyStatus({ seniorName: "Harriet", sharing: "status", outcome: "not_today", answers: [], flags: [] });
+    expect(messenger.inChat(ANN).map((m) => m.text)).toEqual([notToday]);
+    expect(messenger.inChat(FAMILY)).toHaveLength(2);
+  });
+
+  it("with no family member linked, family sends are skipped and her check-in carries on", async () => {
+    db.prepare("UPDATE family_members SET chat_id = NULL").run();
+    await engine.startDay(P, DAY1);
+    for (const t of ["Let's start", "No", "Yes", "Good"]) await say(t);
+    expect(brief(await say("Later"))).toEqual([msg(ME, checkinDone("Harriet"), [SHARING_MENU_BUTTON])]);
+    expect(await engine.runMissedCheckin(P, DAY1)).toBe("nothing_to_do");
+    expect(messenger.sent.every((m) => m.chatId === ME)).toBe(true);
+  });
+
+  it("family chats can't answer a check-in, even a linked member tapping her buttons", async () => {
+    syncFamilyMembers(db, P, ["sarah", "tom"]);
+    linkFamilyMember(db, "tom", TOM, null, now);
+    await engine.startDay(P, DAY1);
+    for (const chat of [FAMILY, TOM]) {
+      expect(await say("Let's start", chat)).toEqual([]);
+      expect(await say("Not today", chat)).toEqual([]);
+    }
+    expect(getCheckin(db, P, DAY1)).toMatchObject({ status: "sent", step: "greeting", answers: [] });
+    expect(await engine.runMissedCheckin(P, DAY1)).toBe("marked_missed");
+  });
+
+  it("one family chat refusing a message doesn't hold back the others or her next question", async () => {
+    syncFamilyMembers(db, P, ["sarah", "tom"]);
+    linkFamilyMember(db, "tom", TOM, null, now);
+    const realSend = messenger.send.bind(messenger);
+    vi.spyOn(messenger, "send").mockImplementation(async (chatId, message, key) => {
+      if (chatId === FAMILY) throw new Error("Sarah blocked the agent");
+      return realSend(chatId, message, key);
+    });
+    now = `${DAY2}T09:00:00.000Z`;
+    await engine.startDay(P, DAY2);
+    await say("Let's start");
+    await say("No");
+    await expect(engine.handleInbound({ chatId: ME, messageId: "red_1", text: "Yes", at: now })).rejects.toThrow("Sarah blocked the agent");
+    expect(messenger.inChat(TOM)).toHaveLength(1);
+    expect(messenger.lastIn(ME)?.text).toBe(question("anticoagulant-bleeding").text);
   });
 });
 

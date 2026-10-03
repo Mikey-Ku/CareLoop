@@ -1,0 +1,3 @@
+# Family chats, not a family group
+
+Relay Messenger chats hold at most one person (a direct chat is one person and one agent; a group is one person with agents, or agents only), so the original "family group chat" with Harriet and her family together can't exist. Each family member gets their own direct chat with the agent (a family chat); the agent sends the same family update to each and forwards voice memos between Harriet's chat and theirs. Considered: one Relay group per family member with extra agents (adds nothing over a direct chat), or a non-Relay channel for family (breaks the "Relay carries everything" design).

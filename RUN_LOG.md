@@ -77,3 +77,36 @@ Run 2 (build order step 3): Relay agent. Webhook signature check on the raw body
 Run 2 (Relay): a `RelayMessenger` implementing `Messenger` with `@relaymessenger/sdk`, the webhook route verifying the Standard Webhooks signature on the raw body and calling `engine.handleInbound`, family group creation, and a scheduler for `startDay` (CHECKIN_TIME) and `runMissedCheckin` (MISSED_CHECKIN_TIME). Needs Relay keys in `.env`.
 
 **Open questions:** see `FEEDBACK.md` (911 line, stale taps, sharing flow, R6 as a flag, plus run 1 items).
+
+## Run 2b: 2026-10-03 19:30
+
+**Goal of this run:** Everything the real Relay agent needs that doesn't need a token: WebSocket transport, scheduler, `npm run agent`, `npm run relay:check`, CI, the sharing flow, paper-check flags, and family chats.
+
+**What was built:**
+- Relay over WebSocket (ADR 0002): `RelayMessenger` (text plus buttons in SDK 0.5.0 shape), a durable inbox that commits each event by `event_id` before the SDK ACKs, then turns `message.received` into `engine.handleInbound`, links Harriet and family members on `contact.added` (or their first message), and re-links chats on full sync. Refuses to start if any webhook subscription exists.
+- Family chats, not a family group (ADR 0001): Relay chats hold at most one person, so each family member has their own chat with the agent and every family message goes to each linked one.
+- Daily scheduler in the patient's timezone (DST-safe, CLOCK_DATE aware), late-start catch-up, `npm run agent` (`--checkin-now` for demos), `npm run relay:check` checklist.
+- Sharing-change chat flow ("Sharing" any time, family told it changed, check-in resumes) and the paper check through the engine (read-back, confirm, R6 into the flag lifecycle).
+- Config: relay and patient sections, token kept out of every error and printout.
+- CI: GitHub Actions runs typecheck and tests on push and pull requests.
+- Simulator: one pane per family member (`--family sarah,tom`), `/sharing` and `/paper` go through the engine; new demo `harriet-sharing.txt`.
+- 453 tests passing (was 313); all six demo scripts exit 0.
+
+**What was skipped or changed from spec:**
+- Webhooks replaced by WebSocket; `RELAY_WEBHOOK_SECRET` no longer needed. New env: `PATIENT_RELAY_HANDLE`, `FAMILY_RELAY_HANDLES`, `PATIENT_FINCHNODE_SUBJECT`, `PATIENT_TIMEZONE`.
+- Migrations 3 (`relay_events`, `relay_full_syncs`) and 4 (`family_members`); `patients.family_chat_id` unused.
+- Nothing ran against real Relay (no token). Unverified until then: event order of `contact.added` vs first message, full-sync paging, SDK behaviour on a webhook conflict.
+- Work split across four agents (transport; scheduler, agent and CI; sharing and paper; family chats) plus integration here.
+
+**Files touched:**
+- `apps/server/src/relay/{relay-client,relay-messenger,inbox}.ts`, `src/{agent,scheduler,patient-id,config}.ts`, `src/cli/relay-check.ts`, `src/checkin/{engine,engine-types,copy,paper-flow}.ts`, `src/db/{schema,family,paper-scans,checkins,index}.ts`, simulator files.
+- Tests: relay-inbox, relay-transport, scheduler, config, agent, sharing, paper-flow, family, and updates to engine, copy, db, simulator.
+- `.github/workflows/ci.yml`, `scripts/demo/*`, `README.md`, `docs/DESIGN.md`, `docs/BRIEF.md`, `docs/adr/0001`, `docs/adr/0002`, `CONTEXT.md`, `CLAUDE_CODE_BRIEF.md`, `.env.example`, `FEEDBACK.md`.
+
+**Commits:**
+- `feat: run 2b: relay websocket agent, scheduler, family chats, ci`
+
+**Recommended next step:**
+With a Relay token: `npm run relay:check`, then `npm run agent -- --checkin-now` on two phones, and fix whatever the real SDK disagrees with. Then build step 4 (ElevenLabs call on `call.created`, answered within 32 seconds; Relay-SDK `cookbook/elevenlabs-agents-call`).
+
+**Open questions:** see `FEEDBACK.md` (flag "Later" consistency, family welcome message, plus earlier items).

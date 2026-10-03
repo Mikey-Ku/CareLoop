@@ -60,6 +60,7 @@ function allOutputs(): string[] {
   out.push(didntUnderstand([BUTTON.start, BUTTON.notToday]), didntUnderstand(["Yes"]));
   out.push(recordLinkEndedSenior(NAME), recordLinkEndedFamily(NAME), familyMissedAlert(NAME, "12:00 PM"));
   out.push(sharingMenu());
+  out.push(copy.PAPER_REJECTED_REPLY, copy.PAPER_LATER_REPLY, copy.PAPER_NOTHING_TO_COMPARE, copy.PAPER_NO_RECORD_REPLY);
   for (const level of LEVELS) {
     out.push(sharingMenu(level), sharingChangedSenior(level), sharingChangedFamily(NAME, level));
     out.push(familyRedFlagAlert({ seniorName: NAME, sharing: level, ...RED_FLAG }));
@@ -227,12 +228,22 @@ describe("copy: family messages by sharing level", () => {
     expect(familyDailyStatus({ ...input, sharing: "status_vitals" })).toBe(familyDailyStatus({ ...input, sharing: "status" }));
   });
 
-  it("sharing change tells the family what changed, not why", () => {
+  it("sharing change tells the family member what changed, not why", () => {
     for (const level of LEVELS) {
       const text = sharingChangedFamily(NAME, level);
-      expect(text).toContain("Harriet changed what this group sees");
+      expect(text).toContain("Harriet changed what you see here.");
       expect(text.toLowerCase()).not.toMatch(/because|reason|why/);
     }
+  });
+
+  it("speaks to one family member in their own chat, never to a group", () => {
+    const family: string[] = [recordLinkEndedFamily(NAME), familyMissedAlert(NAME, "12:00")];
+    for (const sharing of LEVELS) {
+      family.push(sharingChangedFamily(NAME, sharing), familyRedFlagAlert({ seniorName: NAME, sharing, ...RED_FLAG }));
+      for (const outcome of OUTCOMES)
+        family.push(familyDailyStatus({ seniorName: NAME, sharing, outcome, answers: ANSWERS, flags: [{ message: FLAG_MESSAGE }] }));
+    }
+    for (const text of family) expect(text.toLowerCase(), text).not.toMatch(/\bgroup\b|everyone|all of you|you all/);
   });
 
   it("record link ended messages name no cause and no blame", () => {

@@ -34,7 +34,8 @@ export function clockTime(iso: string): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-export type ChatLabel = "Harriet's phone" | "Family group" | string;
+/** "Harriet's phone", or a family member's own chat such as "Sarah's phone (family)". */
+export type ChatLabel = string;
 
 /** One message as the lines a phone would show: header, text, numbered buttons. */
 export function renderMessage(message: SentMessage, chatLabel: ChatLabel, paint: Painter, family: boolean): string[] {
@@ -60,14 +61,15 @@ export function renderTable(headers: string[], rows: string[][], maxWidth = 60):
 
 export const HELP_LINES = [
   "Type a number to tap that button on Harriet's latest message, or any other text to send it as Harriet.",
+  "Each family member (--family, default sarah) has their own chat with the agent, shown as its own pane.",
   "Commands:",
   "  /help                 this list",
   "  /noon                 run the noon missed check-in job for the day",
   "  /next                 move to the next day and start its check-in",
   "  /day YYYY-MM-DD       jump to a day and start its check-in",
   "  /flags                stored flags and their status",
-  "  /sharing <level>      set her sharing level: status, status_vitals or all",
-  "  /paper                read back her discharge paper and, on Yes, compare it with the record (R6)",
+  "  /sharing [level]      she types \"Sharing\" (the menu); with a level she also taps it: status, status_vitals or all",
+  "  /paper                start a paper check: read back her discharge paper; on Yes the engine compares it (R6)",
   "  /db                   row counts per table",
   "  /quit                 leave",
 ];

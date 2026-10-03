@@ -3,27 +3,37 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createCheckinEngine } from "../checkin/engine.ts";
 import type { CheckinEngine, Clock, EngineDeps } from "../checkin/engine-types.ts";
-import { PAPER_CONFIRM_BUTTONS, paperReadback } from "../checkin/paper-check.ts";
-import { loadConfig, resolveCheckinDate, type Config } from "../config.ts";
-import { getSharing, openDatabase, setSharing, upsertPatient, type Db, type SharingLevel } from "../db/index.ts";
+import { SHARING_BUTTONS, SHARING_MENU_BUTTON } from "../checkin/copy.ts";
+import { loadConfig, normalizeHandle, resolveCheckinDate, type Config } from "../config.ts";
+import { familyChats, linkFamilyMember, syncFamilyMembers, type FamilyChat } from "../db/family.ts";
+import { getSharing, openDatabase, upsertPatient, type Db, type SharingLevel } from "../db/index.ts";
+import { latestPaperScan, type PaperScanRow } from "../db/paper-scans.ts";
 import { ConsentInactiveError, FinchNodeClient } from "../finchnode/client.ts";
 import { FIXTURES_DIR, REPO_ROOT, hasRecordedSnapshot, loadRecorded, loadRxNavCache, replayFetch } from "../finchnode/fixtures.ts";
 import { normalizeHealthRecord, type PatientRecord } from "../finchnode/normalize.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
+import { patientIdFor } from "../patient-id.ts";
 import { FakeMessenger } from "../relay/fake-messenger.ts";
 import type { InboundMessage, SentMessage } from "../relay/messenger.ts";
-import { diffPaper, type ExtractedPaper } from "../rules/paper-diff.ts";
+import type { ExtractedPaper } from "../rules/paper-diff.ts";
 import { HELP_LINES, painter, renderMessage, renderTable, type Painter, type Style } from "./sim-render.ts";
 
 // Terminal simulator of the daily check-in (npm run simulate). Drives the real
 // check-in engine with a FakeMessenger, a simulated clock and recorded FinchNode
 // fixtures, so the team can run a whole morning without phones. The core here is
 // process-free so tests can drive it; src/cli/simulate.ts adds argv and stdin.
+//
+// Like Relay, there is no family group: each family member (--family, default
+// "sarah") has their own family chat with the agent, printed as its own pane
+// ("Sarah's phone (family)"). In Relay they link it by messaging the agent first;
+// here they start pre-linked.
 
 export const DEFAULT_SUBJECT = "patient-demo-polypharmacy";
 export const DEFAULT_DB_PATH = join(REPO_ROOT, "data", "simulator.db");
 export const PAPER_FIXTURE = join(FIXTURES_DIR, "papers", "harriet-discharge.extracted.json");
 export const SHARING_LEVELS: readonly SharingLevel[] = ["status", "status_vitals", "all"];
+/** Family members when --family isn't given. */
+export const DEFAULT_FAMILY: readonly string[] = ["sarah"];
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -89,6 +99,8 @@ export type SimulatorOptions = {
   dbPath: string;
   live?: boolean;
   sharing?: SharingLevel;
+  /** Family members' handles, each with their own pre-linked family chat. Defaults to DEFAULT_FAMILY; [] for none. */
+  family?: readonly string[];
   output: (line: string) => void;
   color?: boolean;
   config?: Config;
@@ -104,6 +116,8 @@ export type Simulator = {
   readonly day: string;
   readonly messenger: FakeMessenger;
   readonly db: Db;
+  /** Each linked family member's chat, in --family order. */
+  readonly family: readonly FamilyChat[];
   /** Banner and the day's startDay. */
   start(): Promise<void>;
   /** One line typed as Harriet: a button number, free text or a /command. */
@@ -133,33 +147,38 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
   }
   const givenName = record?.demographics?.givenName ?? record?.demographics?.name?.split(" ")[0];
   const seniorName = givenName ?? subject;
-  const patientId = (givenName ?? subject).toLowerCase().replace(/[^a-z0-9-]+/g, "-");
+  const patientId = patientIdFor(givenName, subject);
   const seniorChat = `chat:${patientId}`;
-  const familyChat = `chat:${patientId}:family`;
   const dataAsOf = record?.dataAsOf ?? undefined;
 
   let day = options.day ?? resolveCheckinDate(config.clockDate, dataAsOf);
   if (!isDay(day)) throw new SimUsageError(`--day must be YYYY-MM-DD, got "${day}"`);
 
+  const clock = new SimClock(day);
   const db = openDatabase(options.dbPath);
   upsertPatient(db, {
     id: patientId,
     finchnodePatientId: subject,
     preferredName: seniorName,
     relayChatId: seniorChat,
-    familyChatId: familyChat,
     checkinTime: config.checkinTime,
     ...(options.sharing ? { sharing: options.sharing } : {}),
   });
 
-  const clock = new SimClock(day);
-  const chatLabel = (chatId: string) =>
-    chatId === seniorChat ? `${seniorName}'s phone` : chatId === familyChat ? "Family group" : chatId;
+  // Family members, each in their own chat, linked as if they had already messaged the agent.
+  const familyHandles = [...new Set((options.family ?? DEFAULT_FAMILY).map(normalizeHandle).filter(Boolean))];
+  const synced = syncFamilyMembers(db, patientId, familyHandles);
+  for (const handle of familyHandles) linkFamilyMember(db, handle, `chat:${patientId}:family:${handle}`, displayName(handle), clock.now());
+  // Rows from an earlier run's --family stay linked, as in the agent (syncFamilyMembers never deletes).
+  const family = familyChats(db, patientId);
+  const familyLabels = new Map(family.map((f) => [f.chatId, `${f.displayName ?? f.handle}'s phone (family)`]));
+
+  const chatLabel = (chatId: string) => (chatId === seniorChat ? `${seniorName}'s phone` : (familyLabels.get(chatId) ?? chatId));
   const messenger = new FakeMessenger({
     now: () => clock.now(),
     onSend: (m: SentMessage) => {
       out("");
-      for (const line of renderMessage(m, chatLabel(m.chatId), paint, m.chatId === familyChat)) out(line);
+      for (const line of renderMessage(m, chatLabel(m.chatId), paint, familyLabels.has(m.chatId))) out(line);
     },
   });
   const deps: EngineDeps = { db, messenger, clock, loadSnapshot };
@@ -169,8 +188,6 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
   const runId = randomUUID().slice(0, 8);
   let inboundCount = 0;
   let paperCount = 0;
-  /** Set while her paper read-back waits for "Yes". */
-  let pendingPaper: { paper: ExtractedPaper } | undefined;
 
   const latestInSeniorChat = (): SentMessage | undefined => messenger.lastIn(seniorChat);
   const latestWithButtons = (): SentMessage | undefined => {
@@ -196,37 +213,33 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
       ...(replyTo ? { replyTo } : {}),
       at: clock.now(),
     };
-    if (pendingPaper) {
-      const pending = pendingPaper;
-      pendingPaper = undefined;
-      await answerPaper(pending.paper, text);
-      return;
-    }
+    const sharingBefore = getSharing(db, patientId);
+    const paperBefore = latestPaperScan(db, patientId);
     await engine.handleInbound(message);
+    const sharingAfter = getSharing(db, patientId);
+    if (sharingAfter !== sharingBefore) note(`Sharing level set to ${sharingAfter}.`);
+    notePaperChange(paperBefore, latestPaperScan(db, patientId));
   }
 
-  async function answerPaper(paper: ExtractedPaper, text: string): Promise<void> {
-    const confirm = PAPER_CONFIRM_BUTTONS[0] ?? "Yes";
-    const key = `${patientId}:${day}:sim-paper:${paperCount}`;
-    if (text.trim().toLowerCase() !== confirm.toLowerCase() && text.trim().toLowerCase() !== "yes") {
-      note("Paper check stopped: she didn't confirm the read-back, so nothing was compared.");
-      return;
-    }
-    const fresh = normalizeHealthRecord(await loadSnapshot(subject), { rxnav });
-    const result = diffPaper(fresh, paper);
-    await messenger.send(seniorChat, { text: result.message }, `${key}:result`);
-    note(`R6 ${result.status}${result.severity ? ` (${result.severity})` : ""}. Local to the simulator: not stored as a flag until run 6.`);
+  /** What the engine did with her paper check, for the person running the demo. */
+  function notePaperChange(before: PaperScanRow | undefined, after: PaperScanRow | undefined): void {
+    if (!after || (before?.id === after.id && before.phase === after.phase)) return;
+    const outcome = after.outcome;
+    if (after.phase === "rejected") note("Paper check stopped: she said the read-back was wrong, so nothing was compared.");
+    else if (outcome && outcome.outcome !== "rejected")
+      note(
+        outcome.outcome === "flag"
+          ? `R6 flag (${outcome.discrepancies.length} discrepanc${outcome.discrepancies.length === 1 ? "y" : "ies"}), stored as flag ${outcome.flagId}. See /flags.`
+          : `R6 ${outcome.outcome}${outcome.reason ? ` (${outcome.reason})` : ""}: nothing stored as a flag.`,
+      );
   }
 
   async function paperCommand(): Promise<void> {
     const paper = JSON.parse(readFileSync(PAPER_FIXTURE, "utf8")) as ExtractedPaper;
+    // The engine dedupes by attachment id; a fresh id per /paper makes each one a new check.
     paperCount += 1;
-    await messenger.send(
-      seniorChat,
-      { text: paperReadback(paper), buttons: [...PAPER_CONFIRM_BUTTONS] },
-      `${patientId}:${day}:sim-paper:${paperCount}:readback`,
-    );
-    pendingPaper = { paper };
+    const { scanId } = await engine.startPaperCheck(patientId, paper, `sim-${runId}-paper-${paperCount}`);
+    note(`Paper check ${scanId}: read-back sent from ${PAPER_FIXTURE.slice(REPO_ROOT.length + 1)}.`);
   }
 
   function flagsCommand(): void {
@@ -288,13 +301,22 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
         flagsCommand();
         return "ok";
       case "/sharing": {
+        // Same path as her typing "Sharing", then (with a level) tapping that level's button.
         const level = args[0];
-        if (!level || !isSharingLevel(level)) {
-          note(`usage: /sharing ${SHARING_LEVELS.join("|")} (now ${getSharing(db, patientId)})`, "red");
+        if (level !== undefined && !isSharingLevel(level)) {
+          note(`usage: /sharing [${SHARING_LEVELS.join("|")}] (now ${getSharing(db, patientId)})`, "red");
           return "error";
         }
-        setSharing(db, patientId, level);
-        note(`Sharing level set to ${level}.`);
+        clock.tick();
+        out(paint(`   (types "${SHARING_MENU_BUTTON}")`, "green"));
+        await sendAsSenior(SHARING_MENU_BUTTON, undefined);
+        if (level) {
+          const menu = latestInSeniorChat();
+          const label = SHARING_BUTTONS[level];
+          clock.tick();
+          out(paint(`   (taps "${label}")`, "green"));
+          await sendAsSenior(label, menu?.messageId);
+        }
         return "ok";
       }
       case "/paper":
@@ -312,7 +334,6 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
   async function goToDay(target: string): Promise<InputResult> {
     day = target;
     clock.setDay(day);
-    pendingPaper = undefined;
     out("");
     out(paint(`===== ${day} =====`, "bold", "yellow"));
     await startDay();
@@ -352,11 +373,16 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     },
     messenger,
     db,
+    family,
     async start() {
       const sharing = getSharing(db, patientId) ?? "status";
       out(paint(`Check-in simulator: ${seniorName} (${subject}), patient id ${patientId}, sharing ${sharing}`, "bold"));
       out(`Check-in date ${day}, data as-of ${dataAsOf ?? (consentEnded ? "unknown (record consent ended)" : "unknown")}, ${live ? "live FinchNode demo API" : "recorded fixtures"}`);
       out(paint("Synthetic data only. Type a button number or text as her, or /help.", "dim"));
+      if (family.length === 0) note("No family members (--family is empty), so family messages go nowhere.");
+      else note(`Family, each in their own chat with the agent (pre-linked here): ${family.map((f) => `${familyLabels.get(f.chatId)} @${f.handle}`).join(", ")}.`);
+      for (const handle of synced.notConfigured)
+        note(`@${handle} is not in --family but is still linked from an earlier run in this database (--reset clears it).`, "yellow");
       await startDay();
     },
     handle,
@@ -364,6 +390,11 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
       db.close();
     },
   };
+}
+
+/** "sarah" -> "Sarah": the name a family pane is labelled with. */
+export function displayName(handle: string): string {
+  return handle.charAt(0).toUpperCase() + handle.slice(1);
 }
 
 export type RunSimulationOptions = SimulatorOptions & {

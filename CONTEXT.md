@@ -72,6 +72,6 @@ _Avoid_: Consent, privacy setting, permissions
 The older adult the app checks in with each day; Harriet in the demo.
 _Avoid_: User, patient (outside FinchNode code), client
 
-**Family group**:
-The Relay group chat where the senior's family receives status, alerts and messages.
-_Avoid_: Caregivers, family chat, circle
+**Family chat**:
+One family member's own Relay chat with the agent, where they receive status, alerts and messages; the senior and her family never share a chat.
+_Avoid_: Family group, group chat, circle

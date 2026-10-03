@@ -25,7 +25,7 @@ Older adults with several conditions face two problems at once: medicines and re
 | Person | Gets | Where |
 | --- | --- | --- |
 | Harriet (senior) | Friendly check-ins, plain answers about her own medicines, heart rate compared with her usual range, messages from family | Relay chat and calls |
-| Sarah (daughter, caregiver) | Daily status, missed check-in alerts, flags, limited to what Harriet allows | Relay group chat |
+| Sarah (daughter, caregiver) | Daily status, missed check-in alerts, flags, limited to what Harriet allows | Her own Relay chat with the agent (Relay chats hold at most one person, so there is no shared group) |
 | Doctor | Vitals trend, reported symptoms, medication flags with sources, her questions | Visit-prep PDF (stretch) |
 
 Demo patient: Harriet Lindqvist, FinchNode synthetic scenario `polypharmacy-senior` (patient id `patient-demo-polypharmacy`): 78, CKD stage 3, atrial fibrillation, heart failure, type 2 diabetes, 14 medicines.
@@ -37,7 +37,7 @@ Demo patient: Harriet Lindqvist, FinchNode synthetic scenario `polypharmacy-seni
 3. "Check my vitals": Relay video call, quiet minute, Presage heart rate compared with her usual range from clinic readings in the record; breathing rate said back and saved, not compared (her record has no breathing-rate readings).
 4. Voice messages between Harriet and family through Relay, both ways.
 5. Hospital paper check: photo of discharge or visit papers, read back for her to confirm, compared with her FinchNode medication list.
-6. Missed check-in alert to the family group.
+6. Missed check-in alert to each family chat.
 
 If time: medication rules shown to the user, consent controls and revocation, visit-prep PDF, weekly family summary.
 Slide only: plain-language lab explanations, other languages, story capture.

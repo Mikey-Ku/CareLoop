@@ -2,7 +2,9 @@
 // See docs/DESIGN.md "Database (SQLite)". Append new migrations; never edit a shipped one.
 
 export const MIGRATIONS: readonly string[] = [
-  // 1: initial schema
+  // 1: initial schema. patients.family_chat_id is unused since migration 4 (family_members):
+  // Relay chats hold at most one person, so there is no family group chat to store. The
+  // column stays because dropping a column in SQLite means rebuilding the table.
   `
   CREATE TABLE patients (
     id TEXT PRIMARY KEY,
@@ -116,6 +118,44 @@ export const MIGRATIONS: readonly string[] = [
     chat_id TEXT NOT NULL,
     received_at TEXT NOT NULL
   );
+  `,
+  // 3: Relay WebSocket inbox. An event is committed here before the SDK ACKs it;
+  // a processor works through unprocessed rows in arrival order (src/relay/inbox.ts).
+  `
+  CREATE TABLE relay_events (
+    event_id TEXT PRIMARY KEY,
+    sequence TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    processed_at TEXT,
+    error TEXT
+  );
+  CREATE INDEX relay_events_unprocessed ON relay_events (processed_at) WHERE processed_at IS NULL;
+
+  -- Each FULL sync Relay asked for: the boundary it superseded events through.
+  CREATE TABLE relay_full_syncs (
+    id INTEGER PRIMARY KEY,
+    through_sequence TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    chats_seen INTEGER NOT NULL,
+    completed_at TEXT NOT NULL
+  );
+  `,
+  // 4: family chats (docs/adr/0001-family-chats-not-a-group.md). One row per family member
+  // configured for a senior (FAMILY_RELAY_HANDLES, handles normalized). chat_id is that
+  // person's own direct chat with the agent, filled in when they first message the agent
+  // (contact.added, or their first direct message). Replaces patients.family_chat_id.
+  `
+  CREATE TABLE family_members (
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    handle TEXT NOT NULL,
+    display_name TEXT,
+    chat_id TEXT,
+    linked_at TEXT,
+    PRIMARY KEY (patient_id, handle)
+  );
+  CREATE INDEX family_members_chat ON family_members (chat_id) WHERE chat_id IS NOT NULL;
   `,
 ];
 

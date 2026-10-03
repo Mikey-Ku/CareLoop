@@ -44,23 +44,24 @@ export type PatientRow = {
   preferredName: string;
   relayHandle?: string | null;
   relayChatId?: string | null;
-  familyChatId?: string | null;
   checkinTime?: string | null;
   timezone?: string | null;
   sharing?: SharingLevel;
 };
 
-/** Insert a patient, or update the given fields if the id exists. Sharing is only changed when passed. */
+/**
+ * Insert a patient, or update the given fields if the id exists. Sharing is only changed when passed.
+ * Family chats live in family_members (src/db/family.ts); patients.family_chat_id is unused.
+ */
 export function upsertPatient(db: Db, p: PatientRow): void {
   db.prepare(
-    `INSERT INTO patients (id, finchnode_patient_id, preferred_name, relay_handle, relay_chat_id, family_chat_id, checkin_time, timezone, sharing)
-     VALUES (@id, @finchnodePatientId, @preferredName, @relayHandle, @relayChatId, @familyChatId, @checkinTime, @timezone, COALESCE(@sharing, 'status'))
+    `INSERT INTO patients (id, finchnode_patient_id, preferred_name, relay_handle, relay_chat_id, checkin_time, timezone, sharing)
+     VALUES (@id, @finchnodePatientId, @preferredName, @relayHandle, @relayChatId, @checkinTime, @timezone, COALESCE(@sharing, 'status'))
      ON CONFLICT (id) DO UPDATE SET
        finchnode_patient_id = excluded.finchnode_patient_id,
        preferred_name = excluded.preferred_name,
        relay_handle = excluded.relay_handle,
        relay_chat_id = excluded.relay_chat_id,
-       family_chat_id = excluded.family_chat_id,
        checkin_time = excluded.checkin_time,
        timezone = excluded.timezone,
        sharing = COALESCE(@sharing, patients.sharing)`,
@@ -70,7 +71,6 @@ export function upsertPatient(db: Db, p: PatientRow): void {
     preferredName: p.preferredName,
     relayHandle: p.relayHandle ?? null,
     relayChatId: p.relayChatId ?? null,
-    familyChatId: p.familyChatId ?? null,
     checkinTime: p.checkinTime ?? null,
     timezone: p.timezone ?? null,
     sharing: p.sharing ?? null,

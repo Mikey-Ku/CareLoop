@@ -70,6 +70,20 @@ export function didntUnderstand(buttons: string[]): string {
   return `Sorry, I didn't understand that. You can tap one of these: ${listJoin(quoted)}.`;
 }
 
+// Hospital paper check (after the read-back)
+
+/** After "No, something's off". */
+export const PAPER_REJECTED_REPLY =
+  "Thank you for checking. I won't use what I read. Please bring the papers to your doctor or pharmacist so they can go over them with you.";
+/** After "Later" on the paper result. The flag stays new, so a later check-in offers it again. */
+export const PAPER_LATER_REPLY = "That's fine. I'll bring it up again another day.";
+/** No medicines were read off the papers. */
+export const PAPER_NOTHING_TO_COMPARE =
+  "There were no medicines on the papers to compare with your medication list, so there's nothing to check.";
+/** Record consent ended between the read-back and her "Yes". */
+export const PAPER_NO_RECORD_REPLY =
+  "I can't compare the papers with your medication list, because the link to your health record has ended. Please bring the papers to your doctor or pharmacist.";
+
 // Record consent (docs/DESIGN.md "Sharing levels and record consent")
 
 /** Record consent ended (FinchNode 410). Plain words, no cause, no blame. */
@@ -124,17 +138,18 @@ export function sharingChangedSenior(level: SharingLevel): string {
   return `Done. Your family now sees ${SEES[level]}. You can change this any time with the "${SHARING_MENU_BUTTON}" button.`;
 }
 
-/** The family is told it changed, not why. */
+/** The family is told it changed, not why. Sent to each family member in their own chat with the agent. */
 export function sharingChangedFamily(name: string, level: SharingLevel): string {
   const sees: Record<SharingLevel, string> = {
     status: `whether ${name} checked in each day`,
     status_vitals: `whether ${name} checked in each day, and whether heart rate readings are in ${name}'s usual range`,
     all: `${name}'s check-ins, heart rate readings, answers, and things to ask the doctor about`,
   };
-  return `${name} changed what this group sees. From now on: ${sees[level]}. Urgent alerts still come through as before.`;
+  return `${name} changed what you see here. From now on: ${sees[level]}. Urgent alerts still come through as before.`;
 }
 
-// Family-facing
+// Family-facing. Each family member reads these in their own chat with the agent
+// (a family chat), so they speak to one person, never to "the group".
 
 export function familyDailyStatus(input: {
   seniorName: string;

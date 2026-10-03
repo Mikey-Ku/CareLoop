@@ -14,7 +14,7 @@ const RED_FLAG_DAY = "2026-09-02";
 
 type Bubble = { chat: string; text: string; buttons: string[] };
 
-async function simulate(script: string, extra: { day?: string; sharing?: "status" | "status_vitals" | "all" } = {}) {
+async function simulate(script: string, extra: { day?: string; sharing?: "status" | "status_vitals" | "all"; family?: string[] } = {}) {
   const lines: string[] = [];
   const exitCode = await runSimulation({
     dbPath: ":memory:",
@@ -62,7 +62,9 @@ function expectInOrder(list: Bubble[], matchers: { chat: string; text: RegExp }[
 }
 
 const PHONE = "Harriet's phone";
-const FAMILY = "Family group";
+/** Sarah, the default family member, in her own chat with the agent. */
+const FAMILY = "Sarah's phone (family)";
+const TOM = "Tom's phone (family)";
 
 describe("demo scripts", () => {
   it("harriet-day1: greeting, three answers, a flag she'll ask her doctor about, family status", async () => {
@@ -111,6 +113,30 @@ describe("demo scripts", () => {
     expect(alert?.text).toMatch(/breathing/);
   });
 
+  it("harriet-red-flag with two family members: each gets the alert and the status in their own chat", async () => {
+    const { exitCode, lines, bubbles } = await simulate("harriet-red-flag.txt", { day: RED_FLAG_DAY, family: ["sarah", "tom"] });
+    expect(exitCode).toBe(0);
+    expect(lines.some((l) => l.includes("[sim] Family, each in their own chat with the agent (pre-linked here): Sarah's phone (family) @sarah, Tom's phone (family) @tom."))).toBe(true);
+    for (const chat of [FAMILY, TOM])
+      expect(bubbles.filter((b) => b.chat === chat).map((b) => b.text)).toEqual([
+        "Harriet reported something she should call her doctor about today. Please check in with her.",
+        "Harriet checked in today.",
+      ]);
+    expectInOrder(bubbles, [
+      { chat: PHONE, text: /call your doctor/ },
+      { chat: FAMILY, text: /should call her doctor/ },
+      { chat: TOM, text: /should call her doctor/ },
+      { chat: PHONE, text: /bruising or bleeding/ },
+    ]);
+  });
+
+  it("--family with no one: family messages go nowhere and the check-in still runs", async () => {
+    const { exitCode, lines, bubbles } = await simulate("harriet-not-today.txt", { family: [] });
+    expect(exitCode).toBe(0);
+    expect(lines.some((l) => /\[sim\] No family members/.test(l))).toBe(true);
+    expect(bubbles.every((b) => b.chat === PHONE)).toBe(true);
+  });
+
   it("harriet-not-today: kind reply, family told, noon job does nothing", async () => {
     const { exitCode, lines, bubbles } = await simulate("harriet-not-today.txt");
     expect(exitCode).toBe(0);
@@ -141,17 +167,46 @@ describe("demo scripts", () => {
     expect(lines.find((l) => /^\d+\s+R3\s/.test(l))).toMatch(/noted/);
   });
 
-  it("harriet-paper: read-back with confirm buttons, then the R6 result mentions aspirin", async () => {
+  it("harriet-paper: read-back through the engine, R6 stored as a flag, then noted", async () => {
     const { exitCode, lines, bubbles } = await simulate("harriet-paper.txt");
     expect(exitCode).toBe(0);
-    const readback = bubbles.find((b) => /discharge papers/.test(b.text) && b.buttons.length > 0);
+    const readback = bubbles.find((b) => /Here's what I read/.test(b.text));
     expect(readback?.chat).toBe(PHONE);
-    expect(readback?.buttons[0]).toMatch(/^Yes/);
+    expect(readback?.buttons).toEqual(["Yes, that's right", "No, something's off"]);
     expectInOrder(bubbles, [
       { chat: PHONE, text: /Here's what I read/ },
       { chat: PHONE, text: /aspirin.*(active|medication list)/s },
+      { chat: PHONE, text: /added it to your list/ },
     ]);
+    expect(bubbles.find((b) => /aspirin.*active/s.test(b.text))?.buttons).toEqual(["I'll ask my doctor", "Later"]);
     expect(lines.some((l) => /\[sim\] R6 flag/.test(l))).toBe(true);
+    // /flags at the end: R6 noted, the record flags untouched.
+    expect(lines.find((l) => /^\d+\s+R6\s/.test(l))).toMatch(/noted/);
+    expect(lines.find((l) => /^\d+\s+R1\s/.test(l))).toMatch(/new/);
+    // A paper check is not a check-in: the family heard only her "not today".
+    expect(bubbles.filter((b) => b.chat === FAMILY)).toHaveLength(1);
+  });
+
+  it("harriet-sharing: menu mid check-in, the question comes back, family told, status at all, then back to status", async () => {
+    const { exitCode, lines, bubbles } = await simulate("harriet-sharing.txt");
+    expect(exitCode).toBe(0);
+    expectInOrder(bubbles, [
+      { chat: PHONE, text: /morning medicines/ },
+      { chat: PHONE, text: /You decide how much your family sees/ },
+      { chat: PHONE, text: /^Done\. Your family now sees/ },
+      { chat: FAMILY, text: /^Harriet changed what you see here\./ },
+      { chat: PHONE, text: /morning medicines/ },
+      { chat: PHONE, text: /feeling/ },
+      { chat: PHONE, text: /That's everything for today/ },
+      { chat: FAMILY, text: /Harriet's answers:/ },
+      { chat: PHONE, text: /You decide how much your family sees/ },
+      { chat: FAMILY, text: /From now on: whether Harriet checked in each day/ },
+    ]);
+    expect(bubbles.find((b) => /You decide/.test(b.text))?.buttons).toEqual(["Just check-ins", "Check-ins and heart rate", "Everything"]);
+    expect(bubbles.find((b) => /That's everything for today/.test(b.text))?.buttons).toEqual(["Sharing"]);
+    // The family is told it changed, never why.
+    for (const b of bubbles.filter((x) => x.chat === FAMILY && /changed what you see here/.test(x.text))) expect(b.text).not.toMatch(/because|why/i);
+    expect(lines.filter((l) => /\[sim\] Sharing level set to/.test(l))).toEqual(["[sim] Sharing level set to all.", "[sim] Sharing level set to status."]);
   });
 });
 
@@ -192,6 +247,34 @@ describe("simulator inputs", () => {
     expect(lines).toContain("===== 2026-09-04 =====");
     expect(lines.find((l) => /^checkins\s/.test(l))).toMatch(/\s2$/);
     expect(lines.some((l) => /Sharing level set to all/.test(l))).toBe(true);
+    expect(lines.some((l) => /usage: \/sharing/.test(l))).toBe(true);
+  });
+
+  it("/sharing goes through the engine like her typing Sharing; with a level it taps it, and the check-in carries on", async () => {
+    const { exitCode, bubbles } = await run(["1", "/sharing", "/sharing status_vitals", "1"]);
+    expect(exitCode).toBe(0);
+    expectInOrder(bubbles, [
+      { chat: PHONE, text: /dizzy/ },
+      { chat: PHONE, text: /You decide how much your family sees/ },
+      { chat: PHONE, text: /You decide how much your family sees/ },
+      { chat: PHONE, text: /^Done\./ },
+      { chat: FAMILY, text: /changed what you see here/ },
+      { chat: PHONE, text: /dizzy/ },
+      { chat: PHONE, text: /morning medicines/ },
+    ]);
+  });
+
+  it("/paper then No: nothing compared, the check-in question comes back", async () => {
+    const { exitCode, lines, bubbles } = await run(["1", "/paper", "2", "1"]);
+    expect(exitCode).toBe(0);
+    expectInOrder(bubbles, [
+      { chat: PHONE, text: /dizzy/ },
+      { chat: PHONE, text: /Here's what I read/ },
+      { chat: PHONE, text: /doctor or pharmacist/ },
+      { chat: PHONE, text: /dizzy/ },
+      { chat: PHONE, text: /morning medicines/ },
+    ]);
+    expect(lines.some((l) => /nothing was compared/.test(l))).toBe(true);
   });
 });
 
@@ -223,8 +306,8 @@ describe("simulator pieces", () => {
 
   it("renders a message with numbered buttons and a table", () => {
     const at = new Date(2026, 8, 1, 9, 5).toISOString();
-    const lines = renderMessage({ chatId: "c", messageId: "m", at, text: "Hi\nthere", buttons: ["A", "B"] }, "Family group", painter(false), true);
-    expect(lines).toEqual(["--- Family group, 09:05 ---", "Hi", "there", "   [1] A", "   [2] B"]);
+    const lines = renderMessage({ chatId: "c", messageId: "m", at, text: "Hi\nthere", buttons: ["A", "B"] }, "Sarah's phone (family)", painter(false), true);
+    expect(lines).toEqual(["--- Sarah's phone (family), 09:05 ---", "Hi", "there", "   [1] A", "   [2] B"]);
     expect(renderTable(["a", "bb"], [["1", "2"]])).toEqual(["a  bb", "-  --", "1  2"]);
   });
 });
@@ -237,7 +320,18 @@ describe("npm run simulate", () => {
       { cwd: SERVER_DIR, env: { ...process.env, NO_COLOR: "1", CLOCK_DATE: "" } },
     );
     expect(stdout).toMatch(/Good morning, Harriet/);
-    expect(stdout).toMatch(/--- Family group, \d\d:\d\d ---\nHarriet checked in/);
+    expect(stdout).toMatch(/--- Sarah's phone \(family\), \d\d:\d\d ---\nHarriet checked in/);
     expect(stdout).not.toMatch(/\x1b\[/);
+  }, 30_000);
+
+  it("--family sarah,tom gives each family member their own pane", async () => {
+    const { stdout } = await promisify(execFile)(
+      process.execPath,
+      ["src/cli/simulate.ts", "--script", "../../scripts/demo/harriet-not-today.txt", "--db", ":memory:", "--family", "sarah,@Tom"],
+      { cwd: SERVER_DIR, env: { ...process.env, NO_COLOR: "1", CLOCK_DATE: "" } },
+    );
+    expect(stdout).toMatch(/--- Sarah's phone \(family\), \d\d:\d\d ---\nHarriet said "not today"/);
+    expect(stdout).toMatch(/--- Tom's phone \(family\), \d\d:\d\d ---\nHarriet said "not today"/);
+    expect(stdout).not.toMatch(/Family group/);
   }, 30_000);
 });

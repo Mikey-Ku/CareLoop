@@ -6,7 +6,7 @@ A daily check-in companion for older adults living alone with several chronic co
 
 ## What it does
 
-Each morning a Relay agent starts a short, friendly chat with at most three questions picked from the senior's FinchNode health record. She can choose a voice call to talk or a video call that compares her heart rate with her usual range from clinic visits and records her breathing rate. Photos of hospital papers are checked against her medication list, and her family follows along in a Relay group chat.
+Each morning a Relay agent starts a short, friendly chat with at most three questions picked from the senior's FinchNode health record. She can choose a voice call to talk or a video call that compares her heart rate with her usual range from clinic visits and records her breathing rate. Photos of hospital papers are checked against her medication list, and each family member follows along in their own Relay chat with the agent.
 
 All data in this project is synthetic.
 
@@ -22,6 +22,8 @@ cp ../../.env.example ../../.env   # optional for run 1
 
 The `.env` file lives at the repo root. Run 1 needs no keys: the FinchNode demo API is open and every other value has a default.
 
+For the Relay agent, set `PATIENT_RELAY_HANDLE` and `FAMILY_RELAY_HANDLES` in `.env`, then have the senior and each family member send the agent a message from their own Relay app. A Relay chat holds at most one person, so there is no family group: each family member gets updates in their own chat with the agent, starting once they have messaged it. `npm run relay:check` shows who has.
+
 ## Usage
 
 All commands run in `apps/server`.
@@ -36,10 +38,10 @@ All commands run in `apps/server`.
 
 ### Simulator
 
-`npm run simulate` runs Harriet's morning check-in in the terminal, with no phones: her chat ("Harriet's phone") and the family group print as separate chats, and you type her replies. A number taps that button on her latest message; any other text is sent as her message. Synthetic data, offline by default (recorded fixtures; `--live` reads the FinchNode demo API).
+`npm run simulate` runs Harriet's morning check-in in the terminal, with no phones: her chat ("Harriet's phone") and each family member's own chat with the agent ("Sarah's phone (family)") print as separate panes, and you type her replies. Family members start already linked, as if they had messaged the agent; `--family sarah,tom` sets who they are (default `sarah`). A number taps that button on her latest message; any other text is sent as her message. Synthetic data, offline by default (recorded fixtures; `--live` reads the FinchNode demo API).
 
 ```
-npm run simulate -- [subject] [--day YYYY-MM-DD] [--db path] [--reset] [--live] [--script file] [--sharing status|status_vitals|all]
+npm run simulate -- [subject] [--day YYYY-MM-DD] [--db path] [--reset] [--live] [--script file] [--sharing status|status_vitals|all] [--family sarah,tom]
 ```
 
 - Days carry over in `data/simulator.db`; `--reset` deletes that file first. `--day` defaults to `CLOCK_DATE`, else her data as-of date (2026-09-01).
