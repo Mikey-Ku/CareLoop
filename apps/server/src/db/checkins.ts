@@ -1,0 +1,131 @@
+import type { Db, SharingLevel } from "./index.ts";
+
+// One row per patient and check-in date. Besides the outcome (status, mood,
+// answers) a row keeps what the conversation is waiting for: the step, which
+// question, and the flag on offer. See src/checkin/engine.ts.
+
+export type CheckinStatus = "sent" | "answered" | "skipped" | "missed";
+/** greeting: waiting for "Let's start" / "Not today"; question: waiting for an answer to question_index; flag_offer / flag_detail: a flag is on offer; done: nothing pending. */
+export type CheckinStep = "greeting" | "question" | "flag_offer" | "flag_detail" | "done";
+
+export type StoredAnswer = { questionId: string; questionText: string; answer: string; at: string };
+
+export type CheckinRow = {
+  id: number;
+  patientId: string;
+  date: string;
+  status: CheckinStatus;
+  mood: string | null;
+  answers: StoredAnswer[];
+  questionIds: string[];
+  step: CheckinStep;
+  questionIndex: number;
+  pendingFlagId: number | null;
+  sentAt: string | null;
+  finishedAt: string | null;
+};
+
+type RawRow = Omit<CheckinRow, "answers" | "questionIds"> & { answersJson: string | null; questionIdsJson: string };
+
+const COLUMNS = `id, patient_id AS patientId, date, status, mood, answers_json AS answersJson,
+  question_ids_json AS questionIdsJson, step, question_index AS questionIndex, pending_flag_id AS pendingFlagId,
+  sent_at AS sentAt, finished_at AS finishedAt`;
+
+function fromRaw(raw: RawRow | undefined): CheckinRow | undefined {
+  if (!raw) return undefined;
+  const { answersJson, questionIdsJson, ...rest } = raw;
+  return {
+    ...rest,
+    answers: answersJson ? (JSON.parse(answersJson) as StoredAnswer[]) : [],
+    questionIds: JSON.parse(questionIdsJson) as string[],
+  };
+}
+
+export function insertCheckin(db: Db, input: { patientId: string; date: string; questionIds: string[]; sentAt: string }): number {
+  const info = db
+    .prepare(
+      `INSERT INTO checkins (patient_id, date, status, answers_json, question_ids_json, step, question_index, sent_at)
+       VALUES (?, ?, 'sent', '[]', ?, 'greeting', 0, ?)`,
+    )
+    .run(input.patientId, input.date, JSON.stringify(input.questionIds), input.sentAt);
+  return Number(info.lastInsertRowid);
+}
+
+export function getCheckin(db: Db, patientId: string, date: string): CheckinRow | undefined {
+  return fromRaw(db.prepare(`SELECT ${COLUMNS} FROM checkins WHERE patient_id = ? AND date = ?`).get(patientId, date) as RawRow | undefined);
+}
+
+export function getCheckinById(db: Db, id: number): CheckinRow | undefined {
+  return fromRaw(db.prepare(`SELECT ${COLUMNS} FROM checkins WHERE id = ?`).get(id) as RawRow | undefined);
+}
+
+/** The most recent check-in (latest date) for a patient, finished or not. */
+export function latestCheckin(db: Db, patientId: string): CheckinRow | undefined {
+  return fromRaw(
+    db.prepare(`SELECT ${COLUMNS} FROM checkins WHERE patient_id = ? ORDER BY date DESC, id DESC LIMIT 1`).get(patientId) as
+      | RawRow
+      | undefined,
+  );
+}
+
+export type CheckinPatch = Partial<{
+  status: CheckinStatus;
+  mood: string | null;
+  answers: StoredAnswer[];
+  step: CheckinStep;
+  questionIndex: number;
+  pendingFlagId: number | null;
+  finishedAt: string | null;
+}>;
+
+const PATCH_COLUMNS: Record<keyof CheckinPatch, string> = {
+  status: "status",
+  mood: "mood",
+  answers: "answers_json",
+  step: "step",
+  questionIndex: "question_index",
+  pendingFlagId: "pending_flag_id",
+  finishedAt: "finished_at",
+};
+
+export function updateCheckin(db: Db, id: number, patch: CheckinPatch): void {
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  for (const [key, value] of Object.entries(patch) as [keyof CheckinPatch, unknown][]) {
+    if (value === undefined) continue;
+    sets.push(`${PATCH_COLUMNS[key]} = ?`);
+    values.push(key === "answers" ? JSON.stringify(value) : value);
+  }
+  if (sets.length === 0) return;
+  db.prepare(`UPDATE checkins SET ${sets.join(", ")} WHERE id = ?`).run(...values, id);
+}
+
+/** Record an inbound Relay message id. Returns false if it was already handled (a webhook retry). */
+export function markInboundHandled(db: Db, messageId: string, chatId: string, receivedAt: string): boolean {
+  return (
+    db
+      .prepare(`INSERT INTO inbound_messages (message_id, chat_id, received_at) VALUES (?, ?, ?) ON CONFLICT (message_id) DO NOTHING`)
+      .run(messageId, chatId, receivedAt).changes === 1
+  );
+}
+
+export type CheckinPatient = {
+  id: string;
+  finchnodePatientId: string;
+  preferredName: string;
+  relayChatId: string | null;
+  familyChatId: string | null;
+  sharing: SharingLevel;
+};
+
+const PATIENT_COLUMNS = `id, finchnode_patient_id AS finchnodePatientId, preferred_name AS preferredName,
+  relay_chat_id AS relayChatId, family_chat_id AS familyChatId, sharing`;
+
+export function getCheckinPatient(db: Db, patientId: string): CheckinPatient | undefined {
+  return db.prepare(`SELECT ${PATIENT_COLUMNS} FROM patients WHERE id = ?`).get(patientId) as CheckinPatient | undefined;
+}
+
+/** The senior whose own chat this is. A family group chat id matches no one. */
+export function patientForChat(db: Db, chatId: string): CheckinPatient | undefined {
+  return db.prepare(`SELECT ${PATIENT_COLUMNS} FROM patients WHERE relay_chat_id = ?`).get(chatId) as CheckinPatient | undefined;
+}

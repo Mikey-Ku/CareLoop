@@ -1,0 +1,22 @@
+{
+  "kind": "discharge",
+  "organization": "Northstar Health System (Synthetic)",
+  "date": "2026-08-20",
+  "synthetic": true,
+  "medications": [
+    { "name": "aspirin", "strength": "81 mg", "instructions": "Stop taking this medicine.", "change": "stopped" },
+    { "name": "apixaban", "strength": "5 mg", "instructions": "1 tablet by mouth twice daily", "change": "continue" },
+    { "name": "metoprolol succinate ER", "strength": "50 mg", "instructions": "1 tablet by mouth once daily, do not crush", "change": "continue" },
+    { "name": "furosemide", "strength": "40 mg", "instructions": "1 tablet by mouth every morning", "change": "continue" },
+    { "name": "lisinopril", "strength": "10 mg", "instructions": "1 tablet by mouth once daily", "change": "continue" },
+    { "name": "atorvastatin", "strength": "40 mg", "instructions": "1 tablet by mouth at bedtime", "change": "continue" },
+    { "name": "metformin", "strength": "500 mg", "instructions": "1 tablet by mouth with the evening meal", "change": "continue" },
+    { "name": "levothyroxine", "strength": "75 mcg", "instructions": "1 tablet every morning on an empty stomach", "change": "continue" },
+    { "name": "omeprazole", "strength": "20 mg", "instructions": "1 capsule by mouth before breakfast", "change": "continue" },
+    { "name": "acetaminophen", "strength": "500 mg", "instructions": "1 tablet every 8 hours as needed for knee pain", "change": "continue" },
+    { "name": "sertraline", "strength": "50 mg", "instructions": "1 tablet by mouth once daily", "change": "continue" },
+    { "name": "trazodone", "strength": "50 mg", "instructions": "1 tablet at bedtime as needed for sleep", "change": "continue" },
+    { "name": "potassium chloride ER", "strength": "20 mEq", "instructions": "1 tablet by mouth once daily with food", "change": "continue" },
+    { "name": "cholecalciferol (vitamin D3)", "strength": "25 mcg", "instructions": "1 tablet by mouth once daily", "change": "continue" }
+  ]
+}

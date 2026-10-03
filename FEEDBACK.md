@@ -17,6 +17,10 @@ Team notes between Claude Code runs. Claude Code reads this at the start of ever
 - [ ] Records dated after the check-in date: rules don't ignore labs or fills dated later than the pinned demo date. Harriet has none. Should they be excluded?
 - [ ] Flags when record consent ends: snapshots are deleted on a 410, but stored flags are kept. Delete them too?
 - [ ] Family messages: run 1 picked `direction` to_senior/to_family and `kind` voice/text/photo in the schema. Check against how the Relay agent stores messages in run 2.
+- [ ] Red-flag advice adds "If it gets worse or feels like an emergency, call 911." Beyond the spec; keep or drop?
+- [ ] Stale button taps: a tap on an old message counts as the answer to whatever is pending now. Fine for the demo; tighten with `replyTo` in run 2?
+- [ ] Sharing changes: the copy and buttons exist (`SHARING_BUTTONS`), but there is no chat flow yet; `/sharing` in the simulator just sets the level. Build it in run 2 or 7?
+- [ ] R6 results aren't stored as flags yet (the simulator only shows them). Run 6 should sync R6 into the flag lifecycle after Harriet confirms the read-back.
 - [ ] Branches: run 1 was built on branch `claude/workflow-review-deep-dive-3eaa2f`, not `main`. Also, local `main` has commit d7a795a (docs) that was never pushed to origin. Merge or fast-forward when ready.
 
 ## Team tasks (humans only, not for Claude Code)

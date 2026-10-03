@@ -1,0 +1,16 @@
+# Harriet answers Yes to a red-flag question.
+# Run with --day 2026-09-02: on that check-in date the rotation picks
+# hf-ankle-swelling, hf-breathing-lying-flat (red flag on "Yes") and
+# anticoagulant-bleeding (red flag on "Yes"). On 2026-09-01 it picks none of them.
+# npm run simulate -- --reset --day 2026-09-02 --script ../../scripts/demo/harriet-red-flag.txt
+#
+# Let's start
+1
+# Have your ankles or feet been more swollen than usual? -> No
+1
+# Did you have trouble breathing when lying flat last night? -> Yes (red flag)
+2
+# Any unusual bruising or bleeding? -> No
+1
+# One thing worth asking your doctor about -> Later
+2

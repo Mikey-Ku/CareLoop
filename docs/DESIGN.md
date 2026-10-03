@@ -116,7 +116,7 @@ Deterministic functions, each returning `{ ruleId, status: "flag" | "checked" | 
 | R3 bleeding combination | Anticoagulant plus aspirin and/or an SSRI: flag "ask your doctor" | Team confirms wording against a drug interaction reference before the demo |
 | R4 potassium | Latest potassium in the top quarter of its reference range, on an ACE inhibitor plus a potassium supplement, with eGFR falling: flag | Demo heuristic; team confirms |
 | R5 refill timing | Needs two or more fills of the same drug; gap longer than days supply plus a grace period: flag. One fill only: skipped | Uses the check-in date |
-| R6 paper diff | Paper says stopped but record says active; new drug on paper not in record; dose differs: flag each | Hospital paper check |
+| R6 paper diff | Paper says stopped but record says active; new drug on paper not in record; dose differs: flag each. A record drug missing from the paper is not a discrepancy (discharge papers often list only changes) | Hospital paper check |
 
 Answer key for Harriet: R1 flag (reassess, eGFR 31 and falling), R2 checked (1 of 3 criteria, 5 mg is right), R3 flag (apixaban, aspirin, sertraline), R4 flag (potassium 4.9, lisinopril plus potassium chloride, eGFR falling), R5 skipped (one fill per drug). Write this as `fixtures/answer-key.json` and test against it.
 
@@ -220,7 +220,8 @@ For calls, the packet goes to ElevenLabs as dynamic variables through the bridge
 
 1. Scaffold the repo (TypeScript server, lint, vitest, SQLite schema). FinchNode client for the demo API with typed models, scenario handling, normalization, source merge. Record fixtures. Tests.
 2. Context packet builder, question picker, rules R1 to R5, answer key test.
-3. Relay agent: webhook server with signature check, morning check-in with buttons, answers saved, family group creation, missed check-in job.
+2a. Terminal simulator (done): check-in engine behind a `Messenger` interface (`src/relay/messenger.ts`), `FakeMessenger`, fixed message copy (`src/checkin/copy.ts`), red flags, missed check-in job, R6 paper diff, `npm run simulate` and `scripts/demo/*.txt`.
+3. Relay agent: implement `Messenger` with the Relay SDK, webhook server with signature check that turns `message.received` into `engine.handleInbound`, family group creation, schedule `startDay` and `runMissedCheckin`.
 4. Chat call: ElevenLabs bridge on `call.created`, context packet as initiation data, memories saved after the call, voice memo to family.
 5. Vitals call: Relay video frames into Presage (spike decides C++ sidecar vs fallback scan screen), heart rate compared with her usual range, breathing rate recorded, both spoken back.
 6. Hospital paper check: photo to Claude vision, read-back and confirm buttons, rule R6 against the record.

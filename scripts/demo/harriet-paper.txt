@@ -1,0 +1,10 @@
+# Hospital paper check (check-in date 2026-09-01). The photo step comes in run 6;
+# here /paper loads fixtures/papers/harriet-discharge.extracted.json, reads it back
+# to her, and on "Yes, that's right" compares it with her record (R6).
+# npm run simulate -- --reset --script ../../scripts/demo/harriet-paper.txt
+#
+# Not today for the check-in itself
+2
+/paper
+# Yes, that's right
+1

@@ -1,0 +1,23 @@
+{
+  "description": "Expected R6 (paper diff) result for Harriet with the synthetic Northstar discharge sheet. One planted change: aspirin 81 mg stopped on paper but still active in her FinchNode record. Every other line is continue and matches. See docs/DESIGN.md \"Rules engine\".",
+  "patient": "patient-demo-polypharmacy",
+  "paper": "papers/harriet-discharge.extracted.json",
+  "result": {
+    "ruleId": "R6",
+    "status": "flag",
+    "severity": "medium",
+    "why": "Discharge papers say stop aspirin 81 mg; the record still lists aspirin 81 MG Oral Tablet as active.",
+    "details": {
+      "discrepancies": [
+        {
+          "kind": "stopped_but_active",
+          "paperName": "aspirin",
+          "recordName": "aspirin 81 MG Oral Tablet",
+          "paperStrength": "81 mg",
+          "recordStrength": "81 MG"
+        }
+      ]
+    },
+    "evidenceResourceIds": ["rec_856422382f29407aedf22257", "paper:0"]
+  }
+}

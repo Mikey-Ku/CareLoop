@@ -99,6 +99,24 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX family_messages_patient ON family_messages (patient_id, played_at);
   `,
+  // 2: check-in conversation state (what is pending) and inbound message dedupe
+  `
+  ALTER TABLE checkins ADD COLUMN question_ids_json TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE checkins ADD COLUMN step TEXT NOT NULL DEFAULT 'greeting'
+    CHECK (step IN ('greeting', 'question', 'flag_offer', 'flag_detail', 'done'));
+  ALTER TABLE checkins ADD COLUMN question_index INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE checkins ADD COLUMN pending_flag_id INTEGER REFERENCES flags(id) ON DELETE SET NULL;
+  ALTER TABLE checkins ADD COLUMN sent_at TEXT;
+  ALTER TABLE checkins ADD COLUMN finished_at TEXT;
+  CREATE INDEX checkins_patient_date ON checkins (patient_id, date);
+
+  -- Relay retries webhooks; a message id is handled once.
+  CREATE TABLE inbound_messages (
+    message_id TEXT PRIMARY KEY,
+    chat_id TEXT NOT NULL,
+    received_at TEXT NOT NULL
+  );
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

@@ -39,7 +39,7 @@ export const QUESTION_BANK: BankEntry[] = [
   },
   {
     id: "anticoagulant-bleeding",
-    text: "Any unusual bruising or bleeding?",
+    text: "Have you had any unusual bruising or bleeding?",
     buttons: ["No", "Yes"],
     redFlagAnswers: ["Yes"],
     appliesTo: { drugClasses: ["anticoagulant"] },

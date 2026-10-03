@@ -16,7 +16,7 @@ import { ingredientOf, medsInClass } from "./drug-classes.ts";
 // Deterministic medication rules. The LLM never decides what is risky; it only
 // rewords `message`. See docs/DESIGN.md "Rules engine".
 
-export type RuleId = "R1" | "R2" | "R3" | "R4" | "R5";
+export type RuleId = "R1" | "R2" | "R3" | "R4" | "R5" | "R6";
 export type Severity = "high" | "medium" | "low";
 
 export type Evidence = {
@@ -77,17 +77,17 @@ export function ruleMetforminKidneys({ record, config = DEFAULT_RULES_CONFIG }: 
   const previous = egfrs.at(-2);
   const falling = previous?.value !== undefined && egfr.value < previous.value;
   const evidence = [...metformin.flatMap(medEvidence), ...(previous ? measurementEvidence(previous) : []), ...measurementEvidence(egfr)];
-  const trend = falling ? ` and falling (was ${previous!.value})` : "";
+  const trend = falling ? `, down from ${previous!.value}` : "";
   const details = { egfr: egfr.value, previousEgfr: previous?.value, falling };
 
   if (egfr.value < config.metforminContraindicatedEgfr)
-    return result("R1", "flag", `Metformin with eGFR ${egfr.value}${trend}: below ${config.metforminContraindicatedEgfr}, where metformin is not recommended.`, {
+    return result("R1", "flag", `Your latest kidney test (eGFR) is ${egfr.value}${trend}, and you take metformin. Below ${config.metforminContraindicatedEgfr}, metformin is usually not recommended.`, {
       severity: "high",
       evidence,
       details: { ...details, level: "contraindicated" },
     });
   if (egfr.value < config.metforminReassessEgfr)
-    return result("R1", "flag", `Metformin with eGFR ${egfr.value}${trend}: below ${config.metforminReassessEgfr}, where the doctor should reassess metformin.`, {
+    return result("R1", "flag", `Your latest kidney test (eGFR) is ${egfr.value}${trend}, and you take metformin. Below ${config.metforminReassessEgfr}, doctors usually review metformin.`, {
       severity: "medium",
       evidence,
       details: { ...details, level: "reassess" },
@@ -135,11 +135,12 @@ export function ruleApixabanDose({ record, checkinDate, config = DEFAULT_RULES_C
   const expectedMg = met >= config.apixabanCriteriaForReduction ? 2.5 : 5;
   const summary = `${met} of 3 dose-reduction criteria met (age ${age}, weight ${weight?.value ?? "?"} kg, creatinine ${creatinine?.value ?? "?"} mg/dL)`;
   if (doseMg !== expectedMg)
-    return result("R2", "flag", `Apixaban ${doseMg} mg, but ${summary} points to ${expectedMg} mg twice daily.`, {
-      severity: "medium",
-      evidence,
-      details: { ...details, expectedMg },
-    });
+    return result(
+      "R2",
+      "flag",
+      `You take apixaban (a blood thinner) ${doseMg} mg. Your age (${age ?? "?"}), weight (${weight?.value ?? "?"} kg) and kidney test (creatinine ${creatinine?.value ?? "?"} mg/dL) meet ${met} of the 3 dose checks on its label, which suggests a different dose. Your doctor can check whether your dose is right for you.`,
+      { severity: "medium", evidence, details: { ...details, expectedMg } },
+    );
   return result("R2", "checked", `Apixaban ${doseMg} mg matches the label: ${summary}.`, { evidence, details: { ...details, expectedMg } });
 }
 
@@ -156,7 +157,7 @@ export function ruleBleedingCombination({ record }: RuleContext): RuleResult {
     ...medsInClass(meds, "aspirin").map((m) => ingredientOf(m, "aspirin")),
     ...medsInClass(meds, "ssri").map((m) => ingredientOf(m, "ssri")),
   ];
-  return result("R3", "flag", `Taking ${drugs.join(", ")} together can raise bleeding risk: ask your doctor.`, {
+  return result("R3", "flag", `You take ${drugs.length > 1 ? `${drugs.slice(0, -1).join(", ")} and ${drugs.at(-1)}` : drugs.join("")}. Taken together, they can raise the chance of bleeding.`, {
     severity: "medium",
     evidence: [...anticoagulants, ...partners].flatMap(medEvidence),
     details: { drugs },
@@ -200,7 +201,7 @@ export function rulePotassium({ record, config = DEFAULT_RULES_CONFIG }: RuleCon
     return result(
       "R4",
       "flag",
-      `Potassium ${potassium.value} ${potassium.unit ?? ""} is near the top of its range (${range.text}) while on ${ingredientOf(ace[0]!, "aceInhibitor")} and ${ingredientOf(supplement[0]!, "potassiumSupplement")}, and eGFR is falling (${previous.value} to ${current.value}).`.replace(/\s+/g, " "),
+      `Your latest potassium test is ${potassium.value} ${potassium.unit ?? ""}, near the top of its range (${range.text}). You take ${ingredientOf(ace[0]!, "aceInhibitor")} and ${ingredientOf(supplement[0]!, "potassiumSupplement")}, and your kidney test (eGFR) has gone down, from ${previous.value} to ${current.value}.`.replace(/\s+/g, " "),
       { severity: "medium", evidence, details },
     );
   return result("R4", "checked", `Potassium ${potassium.value} with eGFR ${current.value}: no flag.`, { evidence, details });
@@ -237,7 +238,13 @@ export function ruleRefillTiming({ record, checkinDate, config = DEFAULT_RULES_C
   }
   const evidence = repeated.flat().map((d) => ({ resourceId: d.recordId, source: d.source, date: d.date, value: `${d.name}, ${d.daysSupply} days` }));
   if (late.length === 0) return result("R5", "checked", "Refills are on time.", { evidence });
-  return result("R5", "flag", `Late refill: ${late.map((l) => `${l.name} (${l.gapDays} days after a ${l.allowedDays - config.refillGraceDays}-day fill)`).join("; ")}.`, {
+  const lateText = late.map((l) => {
+    const supply = `a ${l.allowedDays - config.refillGraceDays}-day supply`;
+    return l.to === checkinDate && !record.dispenses.some((d) => d.date === l.to && d.name === l.name)
+      ? `${l.name}, not refilled yet, ${l.gapDays} days after ${supply}`
+      : `${l.name}, refilled ${l.gapDays} days after ${supply}`;
+  });
+  return result("R5", "flag", `Your pharmacy record shows a gap between refills: ${lateText.join("; ")}.`, {
     severity: "low",
     evidence,
     details: { late },

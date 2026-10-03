@@ -44,3 +44,36 @@
 Run 2 (build order step 3): Relay agent. Webhook signature check on the raw body, morning check-in with buttons and "Not today", answers saved to `checkins`, red-flag rules on answers, one new flag offered per day via `nextFlagToOffer`/`markOffered`, family group creation, missed check-in job. Needs `RELAY_AGENT_TOKEN` and `RELAY_WEBHOOK_SECRET` in `.env`.
 
 **Open questions:** see `FEEDBACK.md` "Questions for the team" (R5 grace days, AFib, red-flag question rotation, R4 above range, records after the check-in date, flags on consent end, family message values, branches).
+
+## Run 2a: 2026-10-03 16:30
+
+**Goal of this run:** Run the whole daily check-in end to end in a terminal, without Relay keys or phones, so run 2 only swaps the transport.
+
+**What was built:**
+- `Messenger` interface (`src/relay/messenger.ts`) and `FakeMessenger` (dedupes by idempotency key, validates Relay button limits).
+- Check-in engine (`src/checkin/engine.ts`): `startDay` (snapshot, rules, flag sync, greeting), `handleInbound` (start, answers, "Not today", red flags, one flag offer per day with Tell me more / Later / I'll ask my doctor, family daily status), `runMissedCheckin`. Inbound message ids are recorded so webhook retries can't double-answer.
+- Red-flag evaluator: answers in a question's red-flag list tell her to call her doctor and alert the family at every sharing level.
+- Message copy (`src/checkin/copy.ts`) for an older reader: plain flag messages, family messages by sharing level, record-link-ended and sharing wording. Tests ban em dashes, guilt words, diagnosis language.
+- R6 paper diff and read-back, a printable synthetic discharge sheet (`fixtures/papers/harriet-discharge.html`, aspirin stopped) and its extracted JSON and answer key.
+- `npm run simulate`: Harriet's phone and the family group in one terminal; `/next`, `/noon`, `/day`, `/paper`, `/flags`, `/sharing`, `/db`; scripted runs in `scripts/demo/`.
+- 313 tests passing (was 203); all five demo scripts exit 0.
+
+**What was skipped or changed from spec:**
+- R1 to R5 flag messages rewritten in plain words; R2 no longer names a dose to the senior (no dosing advice), the expected dose stays in `details`.
+- Migration 2: checkins state columns and an `inbound_messages` table.
+- Not yet: sharing-change chat flow, storing R6 as a flag, memories from free text.
+- Work split across four parallel agents (engine, copy, paper check, simulator) against contracts written first.
+
+**Files touched:**
+- `apps/server/src/relay/{messenger,fake-messenger}.ts`, `src/checkin/{engine,engine-types,copy,red-flags,paper-check}.ts`, `src/rules/paper-diff.ts`, `src/db/{checkins,schema}.ts`, `src/cli/{simulate,simulator,sim-render}.ts`.
+- `src/rules/index.ts` (plain messages, R6 id), `src/context/questions.ts` (one question reworded).
+- Tests: engine, red-flags, db-checkins, copy, paper-diff, simulator; `db.test.ts` table list.
+- `fixtures/papers/*`, `scripts/demo/*.txt`, `README.md` (Simulator), `docs/DESIGN.md`, `FEEDBACK.md`.
+
+**Commits:**
+- `feat: run 2a: check-in engine and terminal simulator`
+
+**Recommended next step:**
+Run 2 (Relay): a `RelayMessenger` implementing `Messenger` with `@relaymessenger/sdk`, the webhook route verifying the Standard Webhooks signature on the raw body and calling `engine.handleInbound`, family group creation, and a scheduler for `startDay` (CHECKIN_TIME) and `runMissedCheckin` (MISSED_CHECKIN_TIME). Needs Relay keys in `.env`.
+
+**Open questions:** see `FEEDBACK.md` (911 line, stale taps, sharing flow, R6 as a flag, plus run 1 items).

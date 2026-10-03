@@ -12,6 +12,7 @@
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
     "packet": "node --env-file-if-exists=../../.env src/cli/packet.ts",
+    "simulate": "node --env-file-if-exists=../../.env src/cli/simulate.ts",
     "record-fixtures": "node --env-file-if-exists=../../.env ../../scripts/record-fixtures.ts"
   },
   "dependencies": {

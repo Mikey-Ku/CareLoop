@@ -1,0 +1,16 @@
+# Harriet, day 1 happy path (check-in date 2026-09-01, her data as-of date).
+# npm run simulate -- --reset --script ../../scripts/demo/harriet-day1.txt
+#
+# Let's start
+1
+# Have you felt dizzy when standing up? -> No
+1
+# Did you take your morning medicines? -> Yes
+1
+# How are you feeling today? -> Good
+1
+# One thing worth asking your doctor about -> Tell me more
+1
+# The flag in plain words -> I'll ask my doctor
+1
+/flags
