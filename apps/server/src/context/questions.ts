@@ -10,7 +10,10 @@ import { medsInClass, type DrugClass } from "../rules/drug-classes.ts";
 // Symptom questions have graded answers (docs/DESIGN.md "Severity ladder"): each
 // button's level is in src/checkin/severity.ts BUTTON_LEVELS, and only the level-3
 // answers ("Yes, it was hard", "Yes, bleeding") are red-flag answers. At most
-// MAX_BUTTONS buttons each, leaving room for one more ("Let me explain").
+// MAX_BUTTONS buttons each, leaving room for one more: symptom questions (ankles,
+// breathing, bleeding, dizziness) also offer "Let me explain" (LET_ME_EXPLAIN), added
+// when the question is sent (promptButtons). `buttons` stays the answers only, which
+// is what the LLM maps her words onto and what the severity table levels.
 
 export type Question = {
   id: string;
@@ -22,6 +25,8 @@ export type Question = {
 };
 
 type BankEntry = Question & {
+  /** A symptom question: its message also offers "Let me explain". */
+  symptom: boolean;
   appliesTo: { condition: RegExp } | { drugClasses: DrugClass[] } | "everyone";
   needs: Category[];
   /** Answers that need no follow-up. Any other answer (red-flag answers included) is a worrying answer. */
@@ -36,6 +41,7 @@ type BankEntry = Question & {
 export const QUESTION_BANK: BankEntry[] = [
   {
     id: "hf-ankle-swelling",
+    symptom: true,
     text: "Have your ankles or feet been more swollen than usual?",
     buttons: ["No", "A little", "More than usual"],
     redFlagAnswers: [],
@@ -46,6 +52,7 @@ export const QUESTION_BANK: BankEntry[] = [
   },
   {
     id: "hf-breathing-lying-flat",
+    symptom: true,
     text: "How was your breathing last night when you lay down?",
     buttons: ["Fine", "A little hard", "Yes, it was hard"],
     redFlagAnswers: ["Yes, it was hard"],
@@ -56,6 +63,7 @@ export const QUESTION_BANK: BankEntry[] = [
   },
   {
     id: "anticoagulant-bleeding",
+    symptom: true,
     text: "Any unusual bruising or bleeding?",
     buttons: ["No", "A little bruising", "Yes, bleeding"],
     redFlagAnswers: ["Yes, bleeding"],
@@ -66,6 +74,7 @@ export const QUESTION_BANK: BankEntry[] = [
   },
   {
     id: "dizzy-on-standing",
+    symptom: true,
     text: "Have you felt dizzy when standing up?",
     buttons: ["No", "Sometimes", "Often"],
     redFlagAnswers: [],
@@ -76,6 +85,7 @@ export const QUESTION_BANK: BankEntry[] = [
   },
   {
     id: "morning-medicines",
+    symptom: false,
     text: "Did you take your morning medicines?",
     buttons: ["Yes", "Not yet", "Some of them"],
     redFlagAnswers: [],
@@ -86,6 +96,7 @@ export const QUESTION_BANK: BankEntry[] = [
   },
   {
     id: "mood",
+    symptom: false,
     text: "How are you feeling today?",
     buttons: ["Good", "Okay", "Not great"],
     redFlagAnswers: [],
@@ -100,6 +111,22 @@ export const MAX_QUESTIONS_PER_DAY = 3;
 
 /** Buttons per bank question at most, so one more can be added to any of them within Relay's 5. */
 export const MAX_BUTTONS = 4;
+
+/**
+ * The extra button on every symptom question. Tapping it, she is invited to say it in her own
+ * words; it is never an answer (src/checkin/engine.ts "Let me explain").
+ */
+export const LET_ME_EXPLAIN = "Let me explain";
+
+/** Whether this question's message offers "Let me explain" (the symptom questions). */
+export function offersExplain(questionId: string): boolean {
+  return QUESTION_BANK.some((e) => e.id === questionId && e.symptom);
+}
+
+/** The buttons a question's message carries: its answers, then "Let me explain" on a symptom question. */
+export function promptButtons(q: Pick<Question, "id" | "buttons">): string[] {
+  return offersExplain(q.id) ? [...q.buttons, LET_ME_EXPLAIN] : [...q.buttons];
+}
 
 /**
  * How often red-flag questions come up. These are product cadence values the team can

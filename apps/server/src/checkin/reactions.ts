@@ -9,7 +9,7 @@ import type { FollowUpTopic } from "./copy.ts";
 /** What was waiting for her when she typed. */
 export type TypedAt =
   | "question" // a check-in question
-  | "step" // another check-in step with buttons: the greeting, the flag offer or detail
+  | "step" // another check-in step with buttons: the flag offer or detail (the greeting takes her open reply instead)
   | "follow_up" // a follow-up check-in ("How is your breathing now?")
   | "none"; // nothing: plain chat
 

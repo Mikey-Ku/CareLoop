@@ -15,6 +15,7 @@ import {
   complaintReply,
   crisisReply,
   didntUnderstand,
+  explainPrompt,
   familyCrisisAlert,
   familyDailyStatus,
   familyFollowUpUpdate,
@@ -40,6 +41,8 @@ import {
   noteSaved,
   notedForDoctor,
   notTodayReply,
+  openReplyThanks,
+  openReplyUnavailable,
   photoNotYet,
   recordLinkEndedFamily,
   recordLinkEndedSenior,
@@ -49,17 +52,21 @@ import {
   sharingLevelFromButton,
   sharingMenu,
   smallTalkFallback,
+  sorryNotGreat,
+  START_ALIASES,
   symptomNotedReply,
+  TYPING_HINT,
   topicWords,
   typedReplyUnavailable,
   urgentReply,
   withLead,
+  withTypingHint,
   type AnsweredQuestion,
   type DayOutcome,
   type FollowUpTopic,
 } from "../src/checkin/copy.ts";
 import type { SharingLevel } from "../src/db/index.ts";
-import { QUESTION_BANK } from "../src/context/questions.ts";
+import { LET_ME_EXPLAIN, QUESTION_BANK, promptButtons } from "../src/context/questions.ts";
 import { MAX_ACTIVITY_LABEL, assertValidActivityLabel } from "../src/relay/messenger.ts";
 import { loadRxNavCache, loadSnapshot } from "../src/finchnode/fixtures.ts";
 import { normalizeHealthRecord } from "../src/finchnode/normalize.ts";
@@ -118,6 +125,7 @@ function allOutputs(): string[] {
   out.push(familyWelcome(NAME));
   out.push(flagDetail(FLAG_MESSAGE), ...ruleFlagMessages.map(flagDetail));
   out.push(didntUnderstand([BUTTON.start, BUTTON.notToday]), didntUnderstand(["Yes"]));
+  out.push(explainPrompt(NAME), openReplyUnavailable(NAME));
   out.push(recordLinkEndedSenior(NAME), recordLinkEndedFamily(NAME), familyMissedAlert(NAME, "12:00 PM"));
   out.push(sharingMenu());
   out.push(complaintReply(NAME), smallTalkFallback(NAME));
@@ -151,8 +159,14 @@ function allOutputs(): string[] {
  */
 function levelZeroToTwoOutputs(): string[] {
   const out: string[] = [];
-  const next = [...QUESTION_BANK.map((q) => q.text), flagOffer(), checkinDone(NAME), checkinDoneAfterConcern(NAME)];
-  for (const lead of [undefined, notedForDoctor(), keepAnEye(NAME), feelingLowReply(NAME)]) for (const text of next) out.push(withLead(lead, text));
+  const questions = QUESTION_BANK.flatMap((q) => [q.text, withTypingHint(q.text)]);
+  const next = [...questions, flagOffer(), checkinDone(NAME), checkinDoneAfterConcern(NAME)];
+  // The leads a check-in folds before its next message, the open reply's included.
+  const leads = [undefined, notedForDoctor(), keepAnEye(NAME), feelingLowReply(NAME), sorryNotGreat(NAME), openReplyThanks(NAME), openReplyUnavailable(NAME)];
+  for (const lead of leads) for (const text of next) out.push(withLead(lead, text));
+  for (const n of [1, 3]) out.push(checkinGreeting(NAME, n));
+  out.push(explainPrompt(NAME), noteSaved(NAME), TYPING_HINT, LET_ME_EXPLAIN, ...START_ALIASES);
+  for (const q of QUESTION_BANK) out.push(didntUnderstand(q.buttons), ...promptButtons(q));
   out.push(keepAnEyeReply(NAME), complaintReply(NAME), clarifyAmount(NAME), ...Object.values(CLARIFY_BUTTONS));
   for (const topic of SYMPTOM_TOPICS) out.push(symptomNotedReply(NAME, [topic]), symptomNotedReply(NAME, [topic, "knee pain"]));
   out.push(symptomNotedReply(NAME, []));
@@ -174,12 +188,13 @@ describe("copy: style rules across every output", () => {
     const fns = Object.entries(copy).filter(([, v]) => typeof v === "function").map(([k]) => k).sort();
     const sampled = [
       "checkinDone", "checkinDoneAfterConcern", "checkinGreeting", "clarifyAmount", "complaintReply", "crisisReply", "didntUnderstand",
-      "familyCrisisAlert", "familyDailyStatus", "familyFollowUpUpdate", "familyFollowUpWorse", "familyMissedAlert", "familyRedFlagAlert",
+      "explainPrompt", "familyCrisisAlert", "familyDailyStatus", "familyFollowUpUpdate", "familyFollowUpWorse", "familyMissedAlert", "familyRedFlagAlert",
       "familyRelay", "familyRelayDone", "familyRelayWaiting", "familyUrgentAlert", "familyWelcome", "feelingLowReply", "flagDetail",
       "flagNotedReply", "flagOffer", "followUpAsk", "followUpQuestion", "followUpReply", "freeTextConfirm", "keepAnEye", "keepAnEyeReply",
-      "medicineQuestionReply", "noteSaved", "notedForDoctor", "notTodayReply", "photoNotYet", "recordLinkEndedFamily", "recordLinkEndedSenior",
-      "redFlagAdvice", "sharingChangedFamily", "sharingChangedSenior", "sharingLevelFromButton", "sharingMenu", "smallTalkFallback",
-      "symptomNotedReply", "topicWords", "typedReplyUnavailable", "urgentReply", "withLead",
+      "medicineQuestionReply", "noteSaved", "notedForDoctor", "notTodayReply", "openReplyThanks", "openReplyUnavailable", "photoNotYet",
+      "recordLinkEndedFamily", "recordLinkEndedSenior", "redFlagAdvice", "sharingChangedFamily", "sharingChangedSenior", "sharingLevelFromButton",
+      "sharingMenu", "smallTalkFallback", "sorryNotGreat", "symptomNotedReply", "topicWords", "typedReplyUnavailable", "urgentReply", "withLead",
+      "withTypingHint",
     ].sort();
     expect(fns).toEqual(sampled);
   });
@@ -190,7 +205,8 @@ describe("copy: style rules across every output", () => {
 
   it("has no em or en dashes", () => {
     for (const text of outputs) expect(text, text).not.toMatch(EM_DASH);
-    for (const label of [...Object.values(BUTTON), ...Object.values(SHARING_BUTTONS), SHARING_MENU_BUTTON]) expect(label).not.toMatch(EM_DASH);
+    for (const label of [...Object.values(BUTTON), ...START_ALIASES, LET_ME_EXPLAIN, ...Object.values(SHARING_BUTTONS), SHARING_MENU_BUTTON])
+      expect(label).not.toMatch(EM_DASH);
   });
 
   it("never claims a diagnosis", () => {
@@ -219,6 +235,7 @@ describe("copy: buttons", () => {
     Object.values(SHARING_BUTTONS),
     Object.values(FOLLOW_UP_BUTTONS),
     ...QUESTION_BANK.map((q) => q.buttons),
+    ...QUESTION_BANK.map((q) => promptButtons(q)),
   ];
 
   it("every label is 1 to 80 characters and every set has at most 5", () => {
@@ -302,15 +319,34 @@ describe("copy: senior messages", () => {
     for (const text of [redFlagAdvice(NAME, ["Sarah"]), redFlagAdvice(NAME, ["Tom"])]) expect(text).not.toMatch(/\b(she|he|her|his)\b/i);
   });
 
-  it("the greeting says it is an assistant and offers 'Not today'", () => {
-    const text = checkinGreeting(NAME, 3);
-    expect(text).toContain("assistant");
-    expect(text).toContain(BUTTON.notToday);
-    expect(checkinGreeting(NAME, 1)).toContain("1 short question ");
+  it("the greeting is the open question: her own words first, Quick questions if she'd rather tap", () => {
+    const text =
+      "Good morning, Harriet. How are you feeling today? Just tell me in your own words, like a text to a friend. Or tap Quick questions if you'd rather tap.";
+    expect(checkinGreeting(NAME, 3)).toBe(text);
+    expect(checkinGreeting(NAME, 1)).toBe(text);
+    expect(BUTTON.start).toBe("Quick questions");
+    expect(START_ALIASES).toEqual(["Let's start"]);
+    expect(checkinGreeting(NAME, 0)).toContain("assistant");
   });
 
-  it("didn't-understand lists the buttons", () => {
-    expect(didntUnderstand(["Yes", "No"])).toContain('"Yes" and "No"');
+  it("didn't-understand lists the answers and says she can tell it in a few words", () => {
+    expect(didntUnderstand(["Yes", "No"])).toBe(`Sorry, I didn't quite catch that. You can tap one of these, or tell me in a few words: "Yes" or "No".`);
+    expect(didntUnderstand(["No", "A little", "More than usual"])).toContain('"No", "A little" or "More than usual"');
+  });
+
+  it("the open reply's own lines: thanks, the honest LLM-down line, and the short mood line", () => {
+    expect(openReplyThanks(NAME)).toBe("Thanks, Harriet.");
+    expect(openReplyUnavailable(NAME)).toBe("Thanks, Harriet. I'm having trouble reading typed replies right now, so let's do a few quick questions.");
+    expect(openReplyUnavailable(NAME)).not.toMatch(/didn't|sorry/i);
+    expect(sorryNotGreat(NAME)).toBe("I'm sorry you're not feeling great, Harriet. Thank you for telling me.");
+    // At most two short sentences.
+    for (const line of [notedForDoctor(), keepAnEye(NAME), sorryNotGreat(NAME)]) expect(line.split(/[.?]\s/).length).toBeLessThanOrEqual(2);
+  });
+
+  it("Let me explain: an invitation to type; the hint makes typing obvious under a question", () => {
+    expect(explainPrompt(NAME)).toBe("Go ahead, Harriet. Tell me in your own words.");
+    expect(TYPING_HINT).toBe("(Tap an answer, or just tell me.)");
+    expect(withTypingHint("Any unusual bruising or bleeding?")).toBe("Any unusual bruising or bleeding?\n(Tap an answer, or just tell me.)");
   });
 });
 

@@ -5,7 +5,7 @@ import type { Db, SharingLevel } from "./index.ts";
 // question, and the flag on offer. See src/checkin/engine.ts.
 
 export type CheckinStatus = "sent" | "answered" | "skipped" | "missed";
-/** greeting: waiting for "Let's start" / "Not today"; question: waiting for an answer to question_index; flag_offer / flag_detail: a flag is on offer; done: nothing pending. */
+/** greeting: waiting for her open reply, "Quick questions" or "Not today"; question: waiting for an answer to question_index; flag_offer / flag_detail: a flag is on offer; done: nothing pending. */
 export type CheckinStep = "greeting" | "question" | "flag_offer" | "flag_detail" | "done";
 
 /** One answer in checkins.answers_json. `level`: its severity level (src/checkin/severity.ts); answers stored before the ladder have none. */
@@ -29,13 +29,15 @@ export type CheckinRow = {
    * Set: no flag offer that day, and the closing says she'll hear from us again later.
    */
   concernAt: string | null;
+  /** When she tapped "Let me explain" on the pending question (migration 8); her next typed message is about it. */
+  explainAt: string | null;
 };
 
 type RawRow = Omit<CheckinRow, "answers" | "questionIds"> & { answersJson: string | null; questionIdsJson: string };
 
 const COLUMNS = `id, patient_id AS patientId, date, status, mood, answers_json AS answersJson,
   question_ids_json AS questionIdsJson, step, question_index AS questionIndex, pending_flag_id AS pendingFlagId,
-  sent_at AS sentAt, finished_at AS finishedAt, concern_at AS concernAt`;
+  sent_at AS sentAt, finished_at AS finishedAt, concern_at AS concernAt, explain_at AS explainAt`;
 
 function fromRaw(raw: RawRow | undefined): CheckinRow | undefined {
   if (!raw) return undefined;
@@ -74,6 +76,14 @@ export function latestCheckin(db: Db, patientId: string): CheckinRow | undefined
   );
 }
 
+/** Her check-ins before `date` that she finished: answered, or said "not today" to. Missed ones don't count. */
+export function finishedCheckinsBefore(db: Db, patientId: string, date: string): number {
+  const row = db
+    .prepare(`SELECT COUNT(*) AS n FROM checkins WHERE patient_id = ? AND date < ? AND status IN ('answered', 'skipped')`)
+    .get(patientId, date) as { n: number };
+  return row.n;
+}
+
 export type CheckinPatch = Partial<{
   status: CheckinStatus;
   mood: string | null;
@@ -83,6 +93,7 @@ export type CheckinPatch = Partial<{
   pendingFlagId: number | null;
   finishedAt: string | null;
   concernAt: string | null;
+  explainAt: string | null;
 }>;
 
 const PATCH_COLUMNS: Record<keyof CheckinPatch, string> = {
@@ -94,6 +105,7 @@ const PATCH_COLUMNS: Record<keyof CheckinPatch, string> = {
   pendingFlagId: "pending_flag_id",
   finishedAt: "finished_at",
   concernAt: "concern_at",
+  explainAt: "explain_at",
 };
 
 export function updateCheckin(db: Db, id: number, patch: CheckinPatch): void {

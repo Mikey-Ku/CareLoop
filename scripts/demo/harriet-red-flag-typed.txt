@@ -13,7 +13,7 @@
 # --llm, delete the /as lines to let Gemini read them.
 # npm run simulate -- --reset --sharing all --script ../../scripts/demo/harriet-red-flag-typed.txt
 #
-# Let's start
+# Quick questions: the greeting's buttons instead of her own words
 1
 # How was your breathing last night when you lay down?
 /as more_detail

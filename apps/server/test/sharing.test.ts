@@ -12,10 +12,11 @@ import {
   sharingChangedSenior,
   sharingMenu,
   withLead,
+  withTypingHint,
 } from "../src/checkin/copy.ts";
 import { createCheckinEngine } from "../src/checkin/engine.ts";
 import type { CheckinEngine } from "../src/checkin/engine-types.ts";
-import { QUESTION_BANK } from "../src/context/questions.ts";
+import { QUESTION_BANK, promptButtons, type Question } from "../src/context/questions.ts";
 import { getCheckin } from "../src/db/checkins.ts";
 import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import { getSharing, openDatabase, openFlags, upsertPatient, type Db } from "../src/db/index.ts";
@@ -57,6 +58,8 @@ async function say(text: string, chatId = ME, messageId = `in_${++inbound}`): Pr
 
 const brief = (messages: SentMessage[]) => messages.map(({ chatId, text, buttons }) => ({ chatId, text, buttons }));
 const msg = (chatId: string, text: string, buttons?: string[]) => ({ chatId, text, buttons });
+/** A question as she gets it on her first check-ins: `lead` before it, the typing hint under it, "Let me explain" on a symptom question. */
+const asked = (q: Pick<Question, "id" | "text" | "buttons">, lead?: string) => msg(ME, withLead(lead, withTypingHint(q.text)), promptButtons(q));
 
 describe("the sharing menu", () => {
   it('"Sharing" with nothing pending shows the menu with the current level and three buttons', async () => {
@@ -139,9 +142,9 @@ describe("sharing in the middle of a check-in", () => {
     expect(brief(await say(SHARING_BUTTONS.all))).toEqual([
       msg(ME, sharingChangedSenior("all")),
       msg(FAMILY, sharingChangedFamily("Harriet", "all")),
-      msg(ME, bleeding.text, bleeding.buttons),
+      asked(bleeding),
     ]);
-    expect(brief(await say("No"))).toEqual([msg(ME, dizzy.text, dizzy.buttons)]);
+    expect(brief(await say("No"))).toEqual([asked(dizzy)]);
     // "Sometimes" is level 1: noted for her doctor, said once, before the flag offer.
     expect(brief(await say("Sometimes"))).toEqual([msg(ME, withLead(notedForDoctor(), flagOffer()), [BUTTON.tellMeMore, BUTTON.later])]);
     const last = await say("Later");
@@ -187,7 +190,7 @@ describe("sharing in the middle of a check-in", () => {
       return messenger.sent.slice(before);
     };
     const bleeding = question("anticoagulant-bleeding");
-    expect(brief(await tapOn(SHARING_BUTTONS.all, oldMenu.messageId)).at(-1)).toEqual(msg(ME, bleeding.text, bleeding.buttons));
+    expect(brief(await tapOn(SHARING_BUTTONS.all, oldMenu.messageId)).at(-1)).toEqual(asked(bleeding));
     expect(getSharing(db, P)).toBe("all");
     expect((await tapOn(SHARING_MENU_BUTTON, "msg_unknown"))[0]?.text).toBe(sharingMenu("all"));
     expect(getCheckin(db, P, DAY1)).toMatchObject({ step: "question", questionIndex: 1 });
@@ -198,7 +201,7 @@ describe("sharing in the middle of a check-in", () => {
     await engine.startDay(P, DAY1);
     await say("Let's start");
     await say("Sharing");
-    expect(brief(await say("Fine"))).toEqual([msg(ME, question("anticoagulant-bleeding").text, question("anticoagulant-bleeding").buttons)]);
+    expect(brief(await say("Fine"))).toEqual([asked(question("anticoagulant-bleeding"))]);
     expect(getSharing(db, P)).toBe("status");
   });
 });

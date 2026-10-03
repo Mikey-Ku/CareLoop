@@ -61,6 +61,7 @@ export function renderTable(headers: string[], rows: string[][], maxWidth = 60):
 
 export const HELP_LINES = [
   "Type a number to tap that button on Harriet's latest message, or any other text to send it as Harriet.",
+  "The greeting asks how she is: type her answer in her own words, or tap Quick questions for the buttons.",
   "With --llm, what she types is read by the LLM (an answer, detail for her doctor, a medicine question, a message for family, chat);",
   "without it, buttons only, plus the safety screen and an explicit yes on a red-flag question (no LLM needed). /as stands in for it.",
   "Each family member (--family, default sarah) has their own chat with the agent, shown as its own pane.",
@@ -77,6 +78,9 @@ export const HELP_LINES = [
   "                        urgent_symptom, crisis, family_message, chat) without an LLM; for answer, which button",
   "      [| topic, amount, change]  ...and the symptoms she mentions, e.g. /as chat | knee pain, a_little, same",
   "                        (amount none|a_little|a_lot|unknown, change new|worse|same|better|unknown; the ladder levels them)",
+  "  /as extract [id=answer; ...] [| topic, amount, change]...",
+  "                        read her next open reply (typed at the greeting) as answering those questions, e.g.",
+  "                        /as extract hf-ankle-swelling=A little | hf-ankle-swelling, a_little, same",
   "  /db                   row counts per table",
   "  /quit                 leave",
 ];

@@ -8,10 +8,12 @@ import {
   followUpQuestion,
   followUpReply,
   redFlagAdvice,
+  withLead,
+  withTypingHint,
 } from "../src/checkin/copy.ts";
 import { createCheckinEngine } from "../src/checkin/engine.ts";
 import type { CheckinEngine } from "../src/checkin/engine-types.ts";
-import { QUESTION_BANK } from "../src/context/questions.ts";
+import { QUESTION_BANK, promptButtons, type Question } from "../src/context/questions.ts";
 import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import {
   answerFollowUp,
@@ -66,6 +68,8 @@ async function say(text: string, replyTo?: SentMessage): Promise<SentMessage[]> 
 
 const brief = (messages: SentMessage[]) => messages.map(({ chatId, text, buttons }) => ({ chatId, text, buttons }));
 const msg = (chatId: string, text: string, buttons?: string[]) => ({ chatId, text, buttons });
+/** A question as she gets it on her first check-ins: `lead` before it, the typing hint under it, "Let me explain" on a symptom question. */
+const asked = (q: Pick<Question, "id" | "text" | "buttons">, lead?: string) => msg(ME, withLead(lead, withTypingHint(q.text)), promptButtons(q));
 
 /** A red flag on the breathing question (day 1, Harriet taps "Yes, it was hard", then No twice), then the follow-up sent. */
 async function redFlagThenDue(): Promise<SentMessage> {
@@ -193,7 +197,7 @@ describe("her answer", () => {
     now = DUE;
     await engine.runDueFollowUps(now);
     const f = messenger.lastIn(ME)!;
-    expect(brief(await say("Better", f))).toEqual([msg(ME, followUpReply("Harriet", "better", "general")), msg(ME, breathing.text, breathing.buttons)]);
+    expect(brief(await say("Better", f))).toEqual([msg(ME, followUpReply("Harriet", "better", "general")), asked(breathing)]);
     // The re-sent question takes her tap.
     expect((await say("Fine", messenger.lastIn(ME)))[0]?.text).toMatch(/bruising or bleeding/);
   });

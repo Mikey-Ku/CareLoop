@@ -18,6 +18,7 @@ import {
   MESSAGE_KINDS,
   type Amount,
   type Change,
+  type CheckinExtraction,
   type LlmClient,
   type MessageClassification,
   type MessageKind,
@@ -45,7 +46,8 @@ import { HELP_LINES, clockTime, painter, renderMessage, renderTable, type Painte
 // screen and an explicit yes on a red-flag question still work, as they need no LLM).
 // `/as <kind> [answer] [| topic, amount, change]...` stands in for the LLM on the next typed
 // message, so demo scripts show each kind of reaction (and each severity level) offline and the
-// same way every run.
+// same way every run. `/as extract [questionId=answer; ...] [| topic, amount, change]...` does the
+// same for her open reply to the greeting (the check-in's opening question).
 //
 // Follow-ups: after a red flag or a safety hit the engine schedules a follow-up check-in
 // some hours later; /later jumps the clock to it and runs the follow-up job.
@@ -217,7 +219,11 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
   });
   // `/as <kind>` readings wait here; while one does, it stands in for the LLM (small talk still
   // goes to the real LLM if there is one).
+  // `/as extract` readings of her open reply wait in `extractions` the same way. While only an
+  // extraction waits, the model's kind (read alongside it for a crisis) has no stand-in and counts as
+  // unavailable, which changes nothing.
   const scripted: MessageClassification[] = [];
+  const extractions: CheckinExtraction[] = [];
   const scriptLlm: LlmClient = {
     provider: "script",
     classifyMessage: async () => {
@@ -225,9 +231,13 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
       if (!next) throw new LlmUnavailableError("sim: no /as reading left");
       return next;
     },
+    extractCheckin: async () => {
+      const next = extractions.shift();
+      if (!next) throw new LlmUnavailableError("sim: no /as extract reading left");
+      return next;
+    },
     smallTalk: (input, o) => (options.llm ? options.llm.smallTalk(input, o) : Promise.reject(new LlmUnavailableError("sim: no LLM"))),
     mapAnswer: (input, o) => (options.llm ? options.llm.mapAnswer(input, o) : Promise.reject(new LlmUnavailableError("sim: no LLM"))),
-    extractCheckin: (input, o) => (options.llm ? options.llm.extractCheckin(input, o) : Promise.reject(new LlmUnavailableError("sim: no LLM"))),
   };
   const deps: EngineDeps = {
     db,
@@ -236,7 +246,7 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     loadSnapshot,
     // Read by the engine on each message.
     get llm() {
-      return scripted.length > 0 ? scriptLlm : options.llm;
+      return scripted.length > 0 || extractions.length > 0 ? scriptLlm : options.llm;
     },
   };
   const engine: CheckinEngine = createCheckinEngine(deps, { missedCheckinTime: config.missedCheckinTime, rxnav });
@@ -293,18 +303,33 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     const [kind, ...rest] = head.split(/\s+/).filter(Boolean);
     const usage = () => {
       note(`usage: /as <${MESSAGE_KINDS.join("|")}> [answer] [| topic, ${Object.keys(TYPED_LEVELS).join("|")}, new|worse|same|better|unknown]`, "red");
+      note("   or: /as extract [questionId=answer; ...] [| topic, amount, change]... (her open reply to the greeting)", "red");
       return "error" as const;
     };
-    if (!kind || !(MESSAGE_KINDS as readonly string[]).includes(kind)) return usage();
+    if (!kind || !(kind === "extract" || (MESSAGE_KINDS as readonly string[]).includes(kind))) return usage();
     const symptoms: SymptomMention[] = [];
     for (const part of parts) {
       const [topic = "", amount = "unknown", change = "unknown"] = part.split(",").map((x) => x.trim());
       if (!topic || !(amount in TYPED_LEVELS) || !["new", "worse", "same", "better", "unknown"].includes(change)) return usage();
       symptoms.push({ topic, ...(topic in BUTTON_LEVELS ? { questionId: topic } : {}), amount: amount as Amount, change: change as Change, words: topic });
     }
+    const said = symptoms.map((m) => `${m.topic} (${m.amount.replace("_", " ")}, ${m.change})`).join(", ");
+    if (kind === "extract") {
+      // questionId=answer pairs, split on ";" since some answers have commas ("Yes, it was hard").
+      const answers: CheckinExtraction["answers"] = [];
+      for (const pair of rest.join(" ").split(";").map((p) => p.trim()).filter(Boolean)) {
+        const [questionId = "", ...label] = pair.split("=").map((x) => x.trim());
+        const answer = Object.keys(BUTTON_LEVELS[questionId] ?? {}).find((b) => b.toLowerCase() === label.join("=").toLowerCase());
+        if (!answer) return usage();
+        answers.push({ questionId, answer, confidence: "high" });
+      }
+      extractions.push({ answers, symptoms, memories: [] });
+      const read = answers.map((a) => `${a.questionId} "${a.answer}"`).join(", ");
+      note(`Her next open reply is read as ${read ? `answering ${read}` : "answering nothing"}${said ? `, mentioning ${said}` : ""} (a stand-in for the LLM).`);
+      return "ok";
+    }
     const answer = rest.join(" ");
     scripted.push({ kind: kind as MessageKind, confidence: "high", complaints: [], memories: [], ...(answer ? { answer } : {}), symptoms });
-    const said = symptoms.map((m) => `${m.topic} (${m.amount.replace("_", " ")}, ${m.change})`).join(", ");
     note(`Her next typed message is read as ${kind}${answer ? ` "${answer}"` : ""}${said ? `, mentioning ${said}` : ""} (a stand-in for the LLM).`);
     return "ok";
   }

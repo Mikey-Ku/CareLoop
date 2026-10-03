@@ -23,10 +23,11 @@ import {
   symptomNotedReply,
   urgentReply,
   withLead,
+  withTypingHint,
 } from "../src/checkin/copy.ts";
 import { createCheckinEngine } from "../src/checkin/engine.ts";
 import type { CheckinEngine } from "../src/checkin/engine-types.ts";
-import { QUESTION_BANK } from "../src/context/questions.ts";
+import { QUESTION_BANK, promptButtons, type Question } from "../src/context/questions.ts";
 import { getCheckin } from "../src/db/checkins.ts";
 import { addClarification, clarificationAsked, closeClarification, openClarification } from "../src/db/clarifications.ts";
 import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
@@ -114,6 +115,8 @@ async function tap(label: string, on: SentMessage | undefined): Promise<SentMess
 
 const brief = (messages: SentMessage[]) => messages.map(({ chatId, text, buttons }) => ({ chatId, text, buttons }));
 const msg = (chatId: string, text: string, buttons?: string[]) => ({ chatId, text, buttons });
+/** A question as she gets it on her first check-ins: `lead` before it, the typing hint under it, "Let me explain" on a symptom question. */
+const asked = (q: Pick<Question, "id" | "text" | "buttons">, lead?: string) => msg(ME, withLead(lead, withTypingHint(q.text)), promptButtons(q));
 const observations = () => observationsBetween(db, P, "2026-01-01", "2026-12-31");
 const toFamily = () => messenger.inChat(SARAH).map((m) => m.text);
 const toHer = () => messenger.inChat(ME).map((m) => m.text);
@@ -149,8 +152,8 @@ beforeEach(() => {
 describe("level 0: nothing extra", () => {
   it("Fine, No, No: straight to each next message; saved as level-0 taps; no follow-up", async () => {
     await atBreathing();
-    expect(brief(await say("Fine"))).toEqual([msg(ME, bleeding.text, bleeding.buttons)]);
-    expect(brief(await say("No"))).toEqual([msg(ME, dizzy.text, dizzy.buttons)]);
+    expect(brief(await say("Fine"))).toEqual([asked(bleeding)]);
+    expect(brief(await say("No"))).toEqual([asked(dizzy)]);
     expect(brief(await say("No"))).toEqual([msg(ME, flagOffer(), [BUTTON.tellMeMore, BUTTON.later])]);
     expect(observations().map((o) => [o.topic, o.level, o.source, o.day])).toEqual([
       [breathing.id, 0, "button", DAY1],
@@ -181,8 +184,8 @@ describe("level 1: noted for her doctor, once per check-in", () => {
 
   it("a second level-1 answer in the same check-in gets no line", async () => {
     await atAnkles();
-    expect(brief(await say("A little"))).toEqual([msg(ME, withLead(notedForDoctor(), medicines.text), medicines.buttons)]);
-    expect(brief(await say("Some of them"))).toEqual([msg(ME, mood.text, mood.buttons)]);
+    expect(brief(await say("A little"))).toEqual([asked(medicines, notedForDoctor())]);
+    expect(brief(await say("Some of them"))).toEqual([asked(mood)]);
     expect((await say("Good"))[0]?.text).toBe(flagOffer());
     expect(getCheckin(db, P, DAY2)?.answers.map((a) => a.level)).toEqual([1, 1, 0]);
   });
@@ -204,7 +207,7 @@ describe("level 2: worth watching", () => {
   it("A little bruising: keep an eye on it before the next question, a follow-up, no alert, a flag still offered, closing this afternoon", async () => {
     await atBreathing();
     await say("Fine");
-    expect(brief(await say("A little bruising"))).toEqual([msg(ME, withLead(keepAnEye("Harriet"), dizzy.text), dizzy.buttons)]);
+    expect(brief(await say("A little bruising"))).toEqual([asked(dizzy, keepAnEye("Harriet"))]);
     const c = getCheckin(db, P, DAY1)!;
     expect(c.concernAt).toBeNull();
     expect(nextFollowUp(db, P)).toMatchObject({ reason: bleeding.id, level: 2, checkinId: c.id, dueAt: `${DAY1}T12:00:00.000Z` });
@@ -239,7 +242,7 @@ describe("level 2: worth watching", () => {
 
   it("More than usual on the ankles: keep an eye on it, a follow-up about her ankles", async () => {
     await atAnkles();
-    expect((await say("More than usual"))[0]?.text).toBe(withLead(keepAnEye("Harriet"), medicines.text));
+    expect((await say("More than usual"))[0]?.text).toBe(withLead(keepAnEye("Harriet"), withTypingHint(medicines.text)));
     expect(nextFollowUp(db, P)).toMatchObject({ reason: ankles.id, level: 2 });
     expect((await followUpAt(`${DAY2}T12:00:00.000Z`)).text).toBe(followUpQuestion("Harriet", "ankles"));
   });
@@ -253,7 +256,7 @@ describe("level 3: her doctor today", () => {
     expect(brief(sent)).toEqual([
       msg(ME, redFlagAdvice("Harriet", ["Sarah"], 1)),
       msg(SARAH, familyRedFlagAlert({ seniorName: "Harriet", sharing: "status", questionText: bleeding.text, answer: "Yes, bleeding" })),
-      msg(ME, dizzy.text, dizzy.buttons),
+      asked(dizzy),
     ]);
     expect(sent[0]!.text).toContain("If it gets much worse, call 911.");
     expect(nextFollowUp(db, P)).toMatchObject({ reason: bleeding.id, level: 3 });
@@ -287,7 +290,7 @@ describe("typed answers: the model may raise a level, never lower it", () => {
   it('"A little" with ankles she calls worse than usual is level 2', async () => {
     await atAnkles();
     const sent = await say("a bit puffy, worse than yesterday", as("answer", { answer: "A little", symptoms: [symptom("ankles", "a_little", "worse", ankles.id)] }));
-    expect(brief(sent)).toEqual([msg(ME, withLead(keepAnEye("Harriet"), medicines.text), medicines.buttons)]);
+    expect(brief(sent)).toEqual([asked(medicines, keepAnEye("Harriet"))]);
     expect(getCheckin(db, P, DAY2)?.answers[0]).toMatchObject({ answer: "A little", level: 2, via: "free_text", freeText: "a bit puffy, worse than yesterday" });
     expect(observations().at(-1)).toMatchObject({ topic: ankles.id, level: 2, amount: "a_little", change: "worse", source: "typed" });
     expect(nextFollowUp(db, P)).toMatchObject({ reason: ankles.id, level: 2 });
@@ -303,7 +306,7 @@ describe("typed answers: the model may raise a level, never lower it", () => {
     await atBreathing();
     const words = "fine mostly, a bit tight";
     const sent = await say(words, as("answer", { answer: "Fine", symptoms: [symptom("breathing", "a_lot", "same", breathing.id)] }));
-    expect(brief(sent)).toEqual([msg(ME, freeTextConfirm(words, breathing.text), breathing.buttons)]);
+    expect(brief(sent)).toEqual([msg(ME, freeTextConfirm(words, breathing.text), promptButtons(breathing))]);
     expect(getCheckin(db, P, DAY1)?.answers).toEqual([]);
     expect(toFamily()).toEqual([]);
   });
@@ -316,7 +319,7 @@ describe("typed answers: the model may raise a level, never lower it", () => {
     expect(brief(sent)).toEqual([
       msg(ME, redFlagAdvice("Harriet", ["Sarah"], 2)),
       msg(SARAH, familyRedFlagAlert({ seniorName: "Harriet", sharing: "status", words })),
-      msg(ME, medicines.text, medicines.buttons),
+      asked(medicines),
     ]);
     expect(getCheckin(db, P, DAY2)).toMatchObject({ concernAt: now });
     expect(nextFollowUp(db, P)).toMatchObject({ reason: bleeding.id, level: 3 });
@@ -329,7 +332,7 @@ describe("typed answers: the model may raise a level, never lower it", () => {
   it("a small extra symptom gets the level-1 line", async () => {
     await atAnkles();
     const sent = await say("no swelling, knee aches", as("answer", { answer: "No", symptoms: [symptom("knee pain", "a_little")] }));
-    expect(sent[0]?.text).toBe(withLead(notedForDoctor(), medicines.text));
+    expect(sent[0]?.text).toBe(withLead(notedForDoctor(), withTypingHint(medicines.text)));
     expect(getCheckin(db, P, DAY2)?.answers[0]).toMatchObject({ answer: "No", level: 1 });
   });
 });
@@ -344,7 +347,7 @@ describe("one clarifying question at most", () => {
     const [ask] = await say("my ankles are swollen", unclear());
     expect(brief([ask!])).toEqual([msg(ME, clarifyAmount("Harriet"), CLARIFY)]);
     expect(getCheckin(db, P, DAY2)?.answers).toEqual([]);
-    expect(brief(await tap(CLARIFY_BUTTONS.a_lot, ask))).toEqual([msg(ME, withLead(keepAnEye("Harriet"), medicines.text), medicines.buttons)]);
+    expect(brief(await tap(CLARIFY_BUTTONS.a_lot, ask))).toEqual([asked(medicines, keepAnEye("Harriet"))]);
     expect(getCheckin(db, P, DAY2)?.answers[0]).toMatchObject({ answer: "More than usual", level: 2, via: "free_text", freeText: "my ankles are swollen" });
     expect(openClarification(db, getCheckin(db, P, DAY2)!.id, ankles.id)).toBeUndefined();
     expect(nextFollowUp(db, P)?.level).toBe(2);
@@ -353,19 +356,19 @@ describe("one clarifying question at most", () => {
   it("A little is level 1, or 2 when she said it was worse than usual", async () => {
     await atAnkles();
     const [ask] = await say("my ankles are swollen", unclear());
-    expect((await tap(CLARIFY_BUTTONS.a_little, ask))[0]?.text).toBe(withLead(notedForDoctor(), medicines.text));
+    expect((await tap(CLARIFY_BUTTONS.a_little, ask))[0]?.text).toBe(withLead(notedForDoctor(), withTypingHint(medicines.text)));
     expect(getCheckin(db, P, DAY2)?.answers[0]).toMatchObject({ answer: "A little", level: 1 });
 
     setup();
     await atAnkles();
     // Worse than usual, how much unclear: 2 either way, so nothing to ask.
-    expect(brief(await say("my ankles are worse", unclear("worse")))).toEqual([msg(ME, didntUnderstand(ankles.buttons), ankles.buttons)]);
+    expect(brief(await say("my ankles are worse", unclear("worse")))).toEqual([msg(ME, didntUnderstand(ankles.buttons), promptButtons(ankles))]);
   });
 
   it("never twice: typed again, she gets the buttons", async () => {
     await atAnkles();
     await say("my ankles are swollen", unclear());
-    expect(brief(await say("they're just swollen", unclear()))).toEqual([msg(ME, didntUnderstand(ankles.buttons), ankles.buttons)]);
+    expect(brief(await say("they're just swollen", unclear()))).toEqual([msg(ME, didntUnderstand(ankles.buttons), promptButtons(ankles))]);
     expect(messenger.sent.filter((m) => m.text === clarifyAmount("Harriet"))).toHaveLength(1);
   });
 
@@ -380,7 +383,7 @@ describe("one clarifying question at most", () => {
     expect(clarificationAsked(db, c.id, ankles.id)).toBe(true);
     // A late "A lot" on the clarifying question is now just a tap on an old message: it answers nothing.
     const ask = messenger.sent.find((m) => m.text === clarifyAmount("Harriet"));
-    expect(brief(await tap(CLARIFY_BUTTONS.a_lot, ask))).toEqual([msg(ME, medicines.text, medicines.buttons)]);
+    expect(brief(await tap(CLARIFY_BUTTONS.a_lot, ask))).toEqual([asked(medicines)]);
     expect(getCheckin(db, P, DAY2)?.answers).toHaveLength(1);
   });
 
@@ -398,7 +401,7 @@ describe("one clarifying question at most", () => {
     await atBreathing();
     const words = "my breathing was off";
     const sent = await say(words, as("answer", { answer: "unclear", confidence: "low", symptoms: [symptom("breathing", "unknown", "same", breathing.id)] }));
-    expect(brief(sent)).toEqual([msg(ME, freeTextConfirm(words, breathing.text), breathing.buttons)]);
+    expect(brief(sent)).toEqual([msg(ME, freeTextConfirm(words, breathing.text), promptButtons(breathing))]);
   });
 });
 
@@ -438,7 +441,7 @@ describe("symptoms in chat: a fixed reply by level", () => {
     expect(brief(sent)).toEqual([
       msg(ME, redFlagAdvice("Harriet", ["Sarah"])),
       msg(SARAH, familyRedFlagAlert({ seniorName: "Harriet", sharing: "all", words })),
-      msg(ME, breathing.text, breathing.buttons),
+      asked(breathing),
     ]);
     expect(nextFollowUp(db, P)).toMatchObject({ reason: bleeding.id, level: 3 });
     for (const t of ["Fine", "No"]) await say(t);
@@ -461,7 +464,7 @@ describe("symptoms in chat: a fixed reply by level", () => {
   it("while a question waits: the reply, then the question again", async () => {
     await atAnkles();
     const sent = await say("my knee aches a bit", as("chat", { symptoms: [symptom("knee pain", "a_little")] }));
-    expect(brief(sent)).toEqual([msg(ME, symptomNotedReply("Harriet", ["knee pain"])), msg(ME, ankles.text, ankles.buttons)]);
+    expect(brief(sent)).toEqual([msg(ME, symptomNotedReply("Harriet", ["knee pain"])), asked(ankles)]);
     expect(observations().at(-1)).toMatchObject({ topic: "knee pain", day: DAY2, checkinId: getCheckin(db, P, DAY2)!.id });
   });
 });
@@ -483,6 +486,7 @@ describe("the repetition rule in the engine", () => {
     for (const [i, day] of ["2026-09-01", "2026-09-03", "2026-09-05"].entries()) {
       now = `${day}T09:00:00.000Z`;
       await engine.startDay(P, day);
+      await say(BUTTON.notToday); // nothing pending: chat, not her open reply
       const [reply] = await say("my knee aches", knee());
       expect(reply?.text, day).toBe(i < 2 ? symptomNotedReply("Harriet", ["knee pain"]) : keepAnEyeReply("Harriet"));
     }

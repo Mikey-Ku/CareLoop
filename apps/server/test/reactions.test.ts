@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   BUTTON,
+  openReplyUnavailable,
   FOLLOW_UP_BUTTONS,
   SHARING_MENU_BUTTON,
   checkinDone,
@@ -21,12 +22,14 @@ import {
   smallTalkFallback,
   typedReplyUnavailable,
   urgentReply,
+  withLead,
+  withTypingHint,
 } from "../src/checkin/copy.ts";
 import { DEFAULT_FOLLOW_UP_DELAY_MINUTES, createCheckinEngine } from "../src/checkin/engine.ts";
 import type { CheckinEngine } from "../src/checkin/engine-types.ts";
 import { PAPER_CONFIRM_BUTTONS } from "../src/checkin/paper-check.ts";
 import { explicitYesAnswer, followUpTopic, isExplicitYes, reactionFor } from "../src/checkin/reactions.ts";
-import { QUESTION_BANK } from "../src/context/questions.ts";
+import { QUESTION_BANK, promptButtons, type Question } from "../src/context/questions.ts";
 import { getCheckin } from "../src/db/checkins.ts";
 import { linkFamilyMember, syncFamilyMembers, waitingFamilyRelays } from "../src/db/family.ts";
 import { nextFollowUp } from "../src/db/follow-ups.ts";
@@ -106,6 +109,8 @@ async function tap(label: string, on: SentMessage | undefined): Promise<SentMess
 
 const brief = (messages: SentMessage[]) => messages.map(({ chatId, text, buttons }) => ({ chatId, text, buttons }));
 const msg = (chatId: string, text: string, buttons?: string[]) => ({ chatId, text, buttons });
+/** A question as she gets it on her first check-ins: `lead` before it, the typing hint under it, "Let me explain" on a symptom question. */
+const asked = (q: Pick<Question, "id" | "text" | "buttons">, lead?: string) => msg(ME, withLead(lead, withTypingHint(q.text)), promptButtons(q));
 const checkin = () => getCheckin(db, P, DAY1)!;
 
 async function atBreathing(): Promise<SentMessage> {
@@ -222,7 +227,7 @@ describe("1. the safety screen comes first", () => {
     const sent = await say(URGENT);
     expect(brief(sent)).toEqual([msg(ME, urgentReply("Harriet", ["Sarah"])), msg(SARAH, familyUrgentAlert({ seniorName: "Harriet", sharing: "status" }))]);
     // The breathing question's own buttons still answer it.
-    expect(brief(await tap("Fine", q))).toEqual([msg(ME, bleeding.text, bleeding.buttons)]);
+    expect(brief(await tap("Fine", q))).toEqual([asked(bleeding)]);
     await say("No");
     const end = await say("No");
     expect(end.map((m) => m.text)).not.toContain(flagOffer());
@@ -250,9 +255,17 @@ describe("1. the safety screen comes first", () => {
 describe("2. the LLM reads it; when it can't", () => {
   it("during a check-in step it says the trouble is ours and offers the buttons", async () => {
     setup({ classifyMessage: () => new LlmUnavailableError("down") });
-    await engine.startDay(P, DAY1);
-    const buttons = [BUTTON.start, BUTTON.notToday];
+    await atBreathing();
+    for (const t of ["Fine", "No", "No"]) await say(t); // the flag offer waits
+    const buttons = [BUTTON.tellMeMore, BUTTON.later];
     expect(brief(await say("ok go ahead"))).toEqual([msg(ME, typedReplyUnavailable(buttons), buttons)]);
+  });
+
+  it("her open reply at the greeting when the model is down: the honest line, then the questions", async () => {
+    const down = () => new LlmUnavailableError("down");
+    setup({ classifyMessage: down, extractCheckin: down });
+    await engine.startDay(P, DAY1);
+    expect(brief(await say("ok go ahead"))).toEqual([asked(breathing, openReplyUnavailable("Harriet"))]);
   });
 
   it("with nothing pending, the fixed small-talk fallback", async () => {
@@ -260,11 +273,25 @@ describe("2. the LLM reads it; when it can't", () => {
     expect(brief(await say("hello dear"))).toEqual([msg(ME, smallTalkFallback("Harriet"))]);
   });
 
-  it("the classifier gets her name, her words and what she was asked", async () => {
-    setup({ classifyMessage: () => as("answer", { answer: BUTTON.start }) });
+  it("the classifier gets her name, her words and what she was asked (the answers, not Let me explain)", async () => {
+    setup({ classifyMessage: () => as("more_detail") });
+    await atBreathing();
+    await say("it was odd");
+    expect(llm?.classifyCalls[0]).toEqual({ seniorName: "Harriet", message: "it was odd", pending: { question: breathing.text, options: breathing.buttons } });
+  });
+
+  it("her open reply goes to the extraction with today's questions, and to the classifier with nothing pending", async () => {
+    setup({});
     await engine.startDay(P, DAY1);
-    await say("ok go ahead");
-    expect(llm?.classifyCalls[0]).toMatchObject({ seniorName: "Harriet", message: "ok go ahead", pending: { options: [BUTTON.start, BUTTON.notToday] } });
+    await say("slept fine");
+    expect(llm?.extractCalls).toEqual([
+      {
+        seniorName: "Harriet",
+        message: "slept fine",
+        questions: [breathing, bleeding, dizzy].map((q) => ({ id: q.id, question: q.text, options: q.buttons })),
+      },
+    ]);
+    expect(llm?.classifyCalls).toEqual([{ seniorName: "Harriet", message: "slept fine", pending: undefined }]);
   });
 });
 
@@ -287,10 +314,12 @@ describe("3. reactions by kind", () => {
     expect(checkin().answers).toEqual([]);
   });
 
-  it("an answer at the greeting counts as that button", async () => {
-    setup({ classifyMessage: () => as("answer", { answer: BUTTON.start }) });
-    await engine.startDay(P, DAY1);
-    expect(brief(await say("ok, go ahead"))).toEqual([msg(ME, breathing.text, breathing.buttons)]);
+  it("an answer at the flag offer counts as that button", async () => {
+    setup({ classifyMessage: () => as("answer", { answer: BUTTON.later }) });
+    await atBreathing();
+    for (const t of ["Fine", "No", "No"]) await say(t);
+    expect(brief(await say("not now, thanks"))).toEqual([msg(ME, checkinDone("Harriet"), [SHARING_MENU_BUTTON]), expect.anything()]);
+    expect(checkin()).toMatchObject({ step: "done" });
   });
 
   it("a medicine question: fixed reply, saved for her visit, the question again", async () => {
@@ -298,7 +327,7 @@ describe("3. reactions by kind", () => {
     await atBreathing();
     await say("Fine");
     const words = "can I skip the water pill on Sunday?";
-    expect(brief(await say(words))).toEqual([msg(ME, medicineQuestionReply("Harriet")), msg(ME, bleeding.text, bleeding.buttons)]);
+    expect(brief(await say(words))).toEqual([msg(ME, medicineQuestionReply("Harriet")), asked(bleeding)]);
     expect(visitQuestions(db, P).map((v) => v.text)).toEqual([words]);
     expect(messenger.inChat(SARAH)).toEqual([]);
   });
@@ -347,17 +376,17 @@ describe("3. reactions by kind", () => {
     await atBreathing();
     expect(brief(await say("the sun is lovely on the porch"))).toEqual([
       msg(ME, "That sounds like a lovely morning, Harriet."),
-      msg(ME, breathing.text, breathing.buttons),
+      asked(breathing),
     ]);
     expect(recentMemories(db, P, 5)).toEqual(["sun on the porch"]);
     // A tap on the re-sent question answers it.
-    expect(brief(await tap("Fine", messenger.lastIn(ME)))).toEqual([msg(ME, bleeding.text, bleeding.buttons)]);
+    expect(brief(await tap("Fine", messenger.lastIn(ME)))).toEqual([asked(bleeding)]);
   });
 
   it("chat during a question when small talk fails: the trouble is ours, with the buttons", async () => {
     setup({ classifyMessage: () => as("chat"), smallTalk: () => new LlmUnavailableError("busy") });
     await atBreathing();
-    expect(brief(await say("the sun is lovely"))).toEqual([msg(ME, typedReplyUnavailable(breathing.buttons), breathing.buttons)]);
+    expect(brief(await say("the sun is lovely"))).toEqual([msg(ME, typedReplyUnavailable(breathing.buttons), promptButtons(breathing))]);
   });
 });
 
@@ -368,7 +397,7 @@ describe("4. a red flag: warmer, calmer, no flag offer, a follow-up", () => {
     expect(brief(await say("Yes, it was hard"))).toEqual([
       msg(ME, redFlagAdvice("Harriet", ["Sarah"], 2)),
       msg(SARAH, familyRedFlagAlert({ seniorName: "Harriet", sharing: "status", questionText: breathing.text, answer: "Yes, it was hard" })),
-      msg(ME, bleeding.text, bleeding.buttons),
+      asked(bleeding),
     ]);
     expect(redFlagAdvice("Harriet", ["Sarah"], 2)).toMatch(/^Thank you for telling me, Harriet\. I've let Sarah know\. Please call your doctor today about this\. If it gets much worse, call 911\./);
     expect(DEFAULT_FOLLOW_UP_DELAY_MINUTES).toBe(180);
@@ -421,7 +450,7 @@ describe("today's live conversation, with the new behaviour", () => {
     await atBreathing();
 
     // She offers more: written down for her doctor, and the buttons come back (not the same confirm again).
-    expect(brief(await say("Not really but I have more info"))).toEqual([msg(ME, noteSaved("Harriet"), breathing.buttons)]);
+    expect(brief(await say("Not really but I have more info"))).toEqual([msg(ME, noteSaved("Harriet"), promptButtons(breathing))]);
     expect(checkin().answers).toEqual([]);
 
     // Her typed "Yes" counts, with her words kept.
@@ -429,7 +458,7 @@ describe("today's live conversation, with the new behaviour", () => {
     expect(brief(await say(words))).toEqual([
       msg(ME, redFlagAdvice("Harriet", ["Sarah"], 2)),
       msg(SARAH, familyRedFlagAlert({ seniorName: "Harriet", sharing: "all", questionText: breathing.text, answer: "Yes, it was hard", words })),
-      msg(ME, bleeding.text, bleeding.buttons),
+      asked(bleeding),
     ]);
     expect(checkin().answers[0]).toMatchObject({ questionId: breathing.id, answer: "Yes, it was hard", via: "free_text", freeText: words });
     expect(checkinNotes(db, checkin().id).map((n) => [n.questionId, n.text])).toEqual([
@@ -439,7 +468,7 @@ describe("today's live conversation, with the new behaviour", () => {
     expect(nextFollowUp(db, P)).toMatchObject({ reason: breathing.id });
 
     // The rest of the questions, then no flag offer and "this afternoon"; Sarah sees her notes at "all".
-    expect(brief(await say("No"))).toEqual([msg(ME, dizzy.text, dizzy.buttons)]);
+    expect(brief(await say("No"))).toEqual([asked(dizzy)]);
     const end = brief(await say("No"));
     expect(end[0]).toEqual(msg(ME, checkinDoneAfterConcern("Harriet"), [SHARING_MENU_BUTTON]));
     expect(end.map((m) => m.text)).not.toContain(flagOffer());

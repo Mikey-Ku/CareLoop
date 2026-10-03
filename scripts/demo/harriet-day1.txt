@@ -1,10 +1,15 @@
 # Harriet, day 1 happy path (check-in date 2026-09-01, her data as-of date).
 # Nothing answered yet, so both red-flag questions are due (breathing lying flat,
 # bleeding), plus one more by rotation.
+# The greeting asks how she is, in her own words. She answers "Feeling good today, no
+# problems": a general remark answers none of the questions (silence is never "No"),
+# so she is thanked and all three come with buttons, each with the typing hint under it.
+# Offline, the /as extract line stands in for the LLM's reading of her open reply (here:
+# nothing answered). With --llm, delete it to let Gemini read her words.
 # npm run simulate -- --reset --script ../../scripts/demo/harriet-day1.txt
 #
-# Let's start
-1
+/as extract
+Feeling good today, no problems
 # How was your breathing last night when you lay down? -> Fine (level 0)
 1
 # Any unusual bruising or bleeding? -> No (level 0)

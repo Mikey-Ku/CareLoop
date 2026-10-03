@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
+  checkinDone,
   checkinDoneAfterConcern,
+  checkinGreeting,
   crisisReply,
   familyCrisisAlert,
   familyDailyStatus,
@@ -15,9 +17,13 @@ import {
   keepAnEyeReply,
   noteSaved,
   notedForDoctor,
+  openReplyThanks,
+  openReplyUnavailable,
   redFlagAdvice,
   symptomNotedReply,
+  TYPING_HINT,
   withLead,
+  withTypingHint,
 } from "../src/checkin/copy.ts";
 import { painter, renderMessage, renderTable, useColor } from "../src/cli/sim-render.ts";
 import { SimClock, nextDay, parseScript, runSimulation } from "../src/cli/simulator.ts";
@@ -101,7 +107,10 @@ describe("demo scripts", () => {
       { chat: PHONE, text: /eGFR/ },
       { chat: FAMILY, text: /Harriet checked in/ },
     ]);
-    expect(bubbles.find((b) => /Good morning/.test(b.text))?.buttons).toEqual(["Let's start", "Not today"]);
+    expect(bubbles.find((b) => /Good morning/.test(b.text))?.buttons).toEqual(["Quick questions", "Not today"]);
+    // Her open reply answered nothing: thanks, then every question with buttons (silence is never "No").
+    expect(lines).toContain("[sim] Her next open reply is read as answering nothing (a stand-in for the LLM).");
+    expect(bubbles[1]).toEqual({ chat: PHONE, text: withLead(openReplyThanks("Harriet"), withTypingHint(BREATHING_TEXT)), buttons: ["Fine", "A little hard", "Yes, it was hard", "Let me explain"] });
     // /flags at the end: R1 noted, the others still new.
     expect(lines.find((l) => /^\d+\s+R1\s/.test(l))).toMatch(/noted/);
     expect(lines.find((l) => /^\d+\s+R3\s/.test(l))).toMatch(/new/);
@@ -159,7 +168,7 @@ describe("demo scripts", () => {
     ]);
     // Detail never re-sends the same confirm; the buttons come back with the note.
     expect(bubbles.some((b) => /^You wrote:/.test(b.text))).toBe(false);
-    expect(bubbles.find((b) => b.text === noteSaved("Harriet"))?.buttons).toEqual(["Fine", "A little hard", "Yes, it was hard"]);
+    expect(bubbles.find((b) => b.text === noteSaved("Harriet"))?.buttons).toEqual(["Fine", "A little hard", "Yes, it was hard", "Let me explain"]);
     expect(bubbles.find((b) => b.chat === PHONE && /I've let Sarah know/.test(b.text))?.text).toBe(redFlagAdvice("Harriet", ["Sarah"], 2));
     const alert = bubbles.find((b) => b.chat === FAMILY && /^Harriet reported/.test(b.text));
     expect(alert?.text).toBe(familyRedFlagAlert({ seniorName: "Harriet", sharing: "all", questionText: BREATHING_TEXT, answer: "Yes, it was hard", words }));
@@ -240,7 +249,7 @@ describe("demo scripts", () => {
     expect(lines.some((l) => /\[sim\] Noon: nothing to do/.test(l))).toBe(true);
   });
 
-  it("harriet-two-days: day 2 rests the red-flag questions and offers the next flag, not the one she already noted", async () => {
+  it("harriet-two-days: day 2 rests the red-flag questions; her one message answers the rest, and the next flag is offered", async () => {
     const { exitCode, lines, bubbles } = await simulate("harriet-two-days.txt");
     expect(exitCode).toBe(0);
     expectInOrder(bubbles, [
@@ -248,13 +257,14 @@ describe("demo scripts", () => {
       { chat: PHONE, text: /eGFR/ },
       { chat: FAMILY, text: /Harriet checked in/ },
       { chat: PHONE, text: /Good morning, Harriet/ },
-      { chat: PHONE, text: /swollen/ },
-      { chat: PHONE, text: /morning medicines/ },
-      { chat: PHONE, text: /feeling/ },
-      { chat: PHONE, text: /worth asking your doctor/ },
+      { chat: PHONE, text: /^There's one thing in your health record/ }, // straight after her one message
       { chat: PHONE, text: /aspirin/ },
       { chat: FAMILY, text: /Harriet checked in/ },
     ]);
+    // Day 2 asks no question: her open reply covered all three. Only day 1's three questions were sent.
+    expect(bubbles.filter((b) => b.chat === PHONE && b.text.includes(TYPING_HINT))).toHaveLength(3);
+    expect(bubbles.some((b) => /swollen|morning medicines/.test(b.text))).toBe(false);
+    expect(lines).toContain('[sim] Her next open reply is read as answering hf-ankle-swelling "No", morning-medicines "Yes", mood "Good" (a stand-in for the LLM).');
     expect(lines).toContain("===== 2026-09-02 =====");
     expect(lines).toContain("[sim] Check-in for 2026-09-02 sent with 3 questions: hf-ankle-swelling, morning-medicines, mood.");
     expect(bubbles.filter((b) => /breathing last night|bruising or bleeding/.test(b.text))).toHaveLength(2); // day 1 only
@@ -283,6 +293,23 @@ describe("demo scripts", () => {
     expect(bubbles.filter((b) => b.chat === FAMILY)).toHaveLength(1);
   });
 
+  it("harriet-open: one message answers ankles and dizziness, one noted line, only breathing is asked, then a calm finish", async () => {
+    const { exitCode, lines, bubbles } = await simulate("harriet-open.txt");
+    expect(exitCode).toBe(0);
+    expect(lines).toContain("[sim] Check-in for 2026-09-02 sent with 3 questions: hf-ankle-swelling, hf-breathing-lying-flat, dizzy-on-standing.");
+    const day2 = bubbles.slice(bubbles.findLastIndex((b) => b.chat === PHONE && /^Good morning, Harriet/.test(b.text)));
+    expect(day2).toEqual([
+      { chat: PHONE, text: checkinGreeting("Harriet", 3), buttons: ["Quick questions", "Not today"] },
+      { chat: PHONE, text: withLead(notedForDoctor(), withTypingHint(BREATHING_TEXT)), buttons: ["Fine", "A little hard", "Yes, it was hard", "Let me explain"] },
+      { chat: PHONE, text: flagOffer(), buttons: ["Tell me more", "Later"] },
+      { chat: PHONE, text: checkinDone("Harriet"), buttons: ["Sharing"] },
+      { chat: FAMILY, text: checkedIn, buttons: [] },
+    ]);
+    expect(lines).toContain(
+      '[sim] Her next open reply is read as answering hf-ankle-swelling "A little", dizzy-on-standing "Sometimes", mentioning hf-ankle-swelling (a little, same), dizzy-on-standing (a little, same) (a stand-in for the LLM).',
+    );
+  });
+
   it("harriet-ladder: levels 0, 1, 2 and 3 in one day, each with its own reaction; 911 only at 3", async () => {
     const { exitCode, lines, bubbles } = await simulate("harriet-ladder.txt", { sharing: "all" });
     expect(exitCode).toBe(0);
@@ -290,9 +317,9 @@ describe("demo scripts", () => {
     const dizzy = QUESTION_BANK.find((q) => q.id === "dizzy-on-standing")!.text;
     const phone = bubbles.filter((b) => b.chat === PHONE).map((b) => b.text);
     // 0: Fine on breathing, straight to the next question.
-    expect(phone).toContain(bleeding);
+    expect(phone).toContain(withTypingHint(bleeding));
     // 2: A little bruising, folded into the next question; a follow-up; no alert.
-    expect(phone).toContain(withLead(keepAnEye("Harriet"), dizzy));
+    expect(phone).toContain(withLead(keepAnEye("Harriet"), withTypingHint(dizzy)));
     expect(lines.some((l) => /Follow-up check-in scheduled for 12:03 \(anticoagulant-bleeding\)/.test(l))).toBe(true);
     // 1: Sometimes on dizziness, folded into the flag offer (still offered on a level-2 day).
     expect(phone).toContain(withLead(notedForDoctor(), flagOffer()));
@@ -341,10 +368,14 @@ describe("simulator inputs", () => {
     return { exitCode, lines, bubbles: bubbles(lines) };
   };
 
-  it("free text goes to the engine as her message", async () => {
+  it("free text goes to the engine as her message (at the greeting with no LLM: the honest line, then the questions)", async () => {
     const { exitCode, bubbles } = await run(["hello there"]);
     expect(exitCode).toBe(0);
-    expect(bubbles.at(-1)?.buttons).toEqual(["Let's start", "Not today"]);
+    expect(bubbles.at(-1)).toEqual({
+      chat: PHONE,
+      text: withLead(openReplyUnavailable("Harriet"), withTypingHint(BREATHING_TEXT)),
+      buttons: ["Fine", "A little hard", "Yes, it was hard", "Let me explain"],
+    });
   });
 
   it("without --llm the banner says free text is off", async () => {
@@ -375,7 +406,7 @@ describe("simulator inputs", () => {
       { chat: PHONE, text: /dizzy when standing/ },
       { chat: PHONE, text: /worth asking your doctor/ },
     ]);
-    expect(list.find((b) => /^You wrote/.test(b.text))?.buttons).toEqual(["Fine", "A little hard", "Yes, it was hard"]);
+    expect(list.find((b) => /^You wrote/.test(b.text))?.buttons).toEqual(["Fine", "A little hard", "Yes, it was hard", "Let me explain"]);
     expect(lines).toContain(`[sim] Harriet's phone shows "Reading your message".`);
     expect(llm.classifyCalls.map((c) => c.message)).toEqual(["nah fine, had to prop myself up on pillows", "only when I get up too fast"]);
   });
@@ -394,16 +425,24 @@ describe("simulator inputs", () => {
   });
 
   it("/as takes symptoms after |: topic, amount, change; a bad amount or change is an error", async () => {
-    const { exitCode, lines, bubbles } = await run(["/as chat | knee pain, a_lot, same", "my knee really hurts", "/as chat | knee, lots", "/as chat | knee, a_little, sideways"]);
+    const inputs = ["2", "/as chat | knee pain, a_lot, same", "my knee really hurts", "/as chat | knee, lots", "/as chat | knee, a_little, sideways"];
+    const { exitCode, lines, bubbles } = await run(inputs);
     expect(exitCode).toBe(1);
     expect(lines).toContain("[sim] Her next typed message is read as chat, mentioning knee pain (a lot, same) (a stand-in for the LLM).");
-    // "My knee really hurts" (a lot): level 2, keep an eye on it, a follow-up; no 911. Then the greeting again.
-    expectInOrder(bubbles, [
-      { chat: PHONE, text: new RegExp(`^${keepAnEyeReply("Harriet").replace(/[.?']/g, "\\$&")}$`) },
-      { chat: PHONE, text: /^Good morning, Harriet/ },
-    ]);
+    // After "Not today", "My knee really hurts" (a lot) in chat: level 2, keep an eye on it, a follow-up; no 911.
+    expect(bubbles.at(-1)).toEqual({ chat: PHONE, text: keepAnEyeReply("Harriet"), buttons: [] });
     expect(lines.some((l) => /Follow-up check-in scheduled for \d\d:\d\d \(knee pain\)/.test(l))).toBe(true);
     expect(lines.filter((l) => /usage: \/as </.test(l))).toHaveLength(2);
+  });
+
+  it("/as extract reads her open reply; an answer that isn't one of the question's buttons is an error", async () => {
+    const inputs = ["/as extract mood=Not great; morning-medicines=yes", "feeling low, took my pills", "/as extract mood=Maybe", "/as extract nope=No"];
+    const { exitCode, lines, bubbles } = await run(inputs);
+    expect(exitCode).toBe(1);
+    expect(lines).toContain('[sim] Her next open reply is read as answering mood "Not great", morning-medicines "Yes" (a stand-in for the LLM).');
+    // Day 1 asks breathing, bleeding and dizziness, so neither answer is one of today's: thanks, then the questions.
+    expect(bubbles.at(-1)?.text).toBe(withLead(openReplyThanks("Harriet"), withTypingHint(BREATHING_TEXT)));
+    expect(lines.filter((l) => /usage: \/as extract|or: \/as extract/.test(l))).toHaveLength(2);
   });
 
   it("/later with no follow-up waiting just says so", async () => {

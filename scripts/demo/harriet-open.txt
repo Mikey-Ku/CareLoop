@@ -1,0 +1,30 @@
+# The open question (day 2 of her check-ins, 2026-09-02). The greeting asks how she is,
+# in her own words; the questions she covers are recorded and only the rest are asked.
+# Day 1 (2026-09-01) sets the day up: she taps Quick questions and answers with buttons.
+# "A little hard" on breathing keeps the breathing question coming the next day, and
+# "Sometimes" on dizziness keeps that one too, so day 2 asks about ankles, breathing and
+# dizziness.
+# Day 2: one message, "ankles a bit puffy, slept ok, little dizzy getting up this morning".
+#   ankles -> "A little" (level 1), dizziness -> "Sometimes" (level 1), both recorded with
+#   her words; one folded line, "Thanks, I've made a note of that for your doctor.", and
+#   only the breathing question is asked (a red-flag question is never answered calm from
+#   her words). "Fine", then a calm finish.
+# Offline, the /as extract line stands in for the LLM's reading of her open reply. With
+# --llm, delete it to let Gemini read her words.
+# npm run simulate -- --reset --script ../../scripts/demo/harriet-open.txt
+#
+# Day 1: Quick questions, then breathing "A little hard", bleeding "No", dizziness "Sometimes"
+1
+2
+1
+2
+# One thing worth asking your doctor about -> Later
+2
+/next
+# Day 2: she answers the greeting in her own words
+/as extract hf-ankle-swelling=A little; dizzy-on-standing=Sometimes | hf-ankle-swelling, a_little, same | dizzy-on-standing, a_little, same
+ankles a bit puffy, slept ok, little dizzy getting up this morning
+# How was your breathing last night when you lay down? -> Fine
+1
+# One thing worth asking your doctor about -> Later, and the check-in closes
+2

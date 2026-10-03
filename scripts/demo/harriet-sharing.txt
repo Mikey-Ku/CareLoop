@@ -7,7 +7,7 @@
 # "Just check-ins".
 # npm run simulate -- --reset --script ../../scripts/demo/harriet-sharing.txt
 #
-# Let's start
+# Quick questions: the greeting's buttons instead of her own words
 1
 # How was your breathing last night when you lay down? -> Fine
 1

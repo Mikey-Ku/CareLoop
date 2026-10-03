@@ -9,7 +9,7 @@
 # delete it to let Gemini read her words.
 # npm run simulate -- --reset --sharing all --script ../../scripts/demo/harriet-ladder.txt
 #
-# Let's start
+# Quick questions: the greeting's buttons instead of her own words
 1
 # How was your breathing last night when you lay down? -> Fine (level 0)
 1

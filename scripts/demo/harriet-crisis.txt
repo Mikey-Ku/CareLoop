@@ -7,7 +7,7 @@
 # the paused question comes back and she can carry on.
 # npm run simulate -- --reset --script ../../scripts/demo/harriet-crisis.txt
 #
-# Let's start
+# Quick questions: the greeting's buttons instead of her own words
 1
 # How was your breathing last night when you lay down? She types instead:
 I want to end my life

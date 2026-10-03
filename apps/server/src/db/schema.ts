@@ -269,6 +269,13 @@ export const MIGRATIONS: readonly string[] = [
     UNIQUE (checkin_id, question_id)
   );
   `,
+  // 8: "Let me explain" (src/checkin/engine.ts). checkins.explain_at: when she tapped it on the
+  // pending question; her next typed message is her own words about that question, and is kept
+  // for her doctor even when it can't be matched to an answer. Cleared once that message is
+  // handled or the check-in moves to another question.
+  `
+  ALTER TABLE checkins ADD COLUMN explain_at TEXT;
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

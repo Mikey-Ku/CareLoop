@@ -18,12 +18,16 @@ import type { SharingLevel } from "../db/index.ts";
 // them); "if it gets much worse, call 911" starts at level 3, 911 now at level 4.
 
 export const BUTTON = {
-  start: "Let's start",
+  /** On the greeting: today's questions with buttons, for when she'd rather tap than type. */
+  start: "Quick questions",
   notToday: "Not today",
   tellMeMore: "Tell me more",
   later: "Later",
   willAskDoctor: "I'll ask my doctor",
 } as const;
+
+/** Older labels of BUTTON.start, still taken (typed or tapped) at the greeting so old messages and scripts work. */
+export const START_ALIASES: readonly string[] = ["Let's start"];
 
 export type DayOutcome = "checked_in" | "not_today" | "missed";
 
@@ -43,10 +47,42 @@ function whoWasTold(familyNames: string[] | undefined): string | undefined {
 
 // Senior-facing
 
+/**
+ * The greeting is the open question (docs/DESIGN.md "Open question first"): she answers in her own
+ * words, and the questions she didn't cover come after with buttons. BUTTON.start is the way to tap
+ * instead; "Not today" is the other button.
+ */
 export function checkinGreeting(name: string, questionCount: number): string {
   if (questionCount <= 0) return `Good morning, ${name}. This is your check-in assistant. There are no questions today. I just wanted to say hello.`;
-  const questions = questionCount === 1 ? "1 short question" : `${questionCount} short questions`;
-  return `Good morning, ${name}. This is your check-in assistant. I have ${questions} for you today. If today isn't a good day, just tap "${BUTTON.notToday}".`;
+  return `Good morning, ${name}. How are you feeling today? Just tell me in your own words, like a text to a friend. Or tap ${BUTTON.start} if you'd rather tap.`;
+}
+
+/** The hint under each question on her first check-ins (HINT_CHECKINS in the engine), so typing is obvious. */
+export const TYPING_HINT = "(Tap an answer, or just tell me.)";
+
+/** A question's text with the typing hint on its own line under it. */
+export function withTypingHint(text: string): string {
+  return `${text}\n${TYPING_HINT}`;
+}
+
+/** Her open reply was read and nothing in it needs a reaction; a question she didn't cover comes next. */
+export function openReplyThanks(name: string): string {
+  return `Thanks, ${name}.`;
+}
+
+/** She answered the open question, but typed replies can't be read right now (no LLM, or it is down). */
+export function openReplyUnavailable(name: string): string {
+  return `Thanks, ${name}. I'm having trouble reading typed replies right now, so let's do a few quick questions.`;
+}
+
+/** Level 1 from her open reply when it is about her mood ("Not great"): short and warm, at most two sentences. */
+export function sorryNotGreat(name: string): string {
+  return `I'm sorry you're not feeling great, ${name}. Thank you for telling me.`;
+}
+
+/** She tapped "Let me explain" on a question: her next message is her own words about it. No buttons. */
+export function explainPrompt(name: string): string {
+  return `Go ahead, ${name}. Tell me in your own words.`;
 }
 
 /** Reply to "Not today". Never implies she should have answered. */
@@ -94,9 +130,10 @@ export function checkinDoneAfterConcern(name: string): string {
   return `Thank you, ${name}. I'll check on you again this afternoon.`;
 }
 
+/** The model read her words but couldn't match them to an answer. `buttons`: the answers (not "Let me explain"). */
 export function didntUnderstand(buttons: string[]): string {
   const quoted = buttons.map((b) => `"${b}"`);
-  return `Sorry, I didn't understand that. You can tap one of these: ${listJoin(quoted)}.`;
+  return `Sorry, I didn't quite catch that. You can tap one of these, or tell me in a few words: ${listJoin(quoted, "or")}.`;
 }
 
 /**

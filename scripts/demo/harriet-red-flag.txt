@@ -9,7 +9,7 @@
 # npm run simulate -- --reset --script ../../scripts/demo/harriet-red-flag.txt
 # Add --family sarah,tom to see the alert reach each family member in their own chat.
 #
-# Let's start
+# Quick questions: the greeting's buttons instead of her own words
 1
 # How was your breathing last night when you lay down? -> Yes, it was hard (level 3, red flag)
 3

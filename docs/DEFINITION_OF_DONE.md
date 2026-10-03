@@ -55,7 +55,8 @@ Order: M1 unblocks real-phone testing for M2 and M5. M3 and M4 can run in parall
 | [ ] Button replies answer in under 2 seconds; typed replies in under 5 seconds for 9 of 10 | Agent log timings (`[llm]` lines) over 10 typed replies |
 | [x] Content handling: every crisis and urgent case in the catalogue is caught by the phrase screen or the model; none by neither | `npm run content:eval`, 2026-10-03: 37 of 37 (screen 29, model 37). Re-run on a held-out set before the demo |
 | [x] No idiom or negation trips the safety screen ("dying to see the grandkids", "no chest pain") | `test/content-catalogue.test.ts`: 0 of 11 |
-| [x] Message kind accuracy at least 85%, answer mapping at least 90% | `docs/content-eval.md`: 97% and 94% (optimistic, see DESIGN) |
+| [x] Message kind accuracy at least 85% | `docs/content-eval.md`: 98% (2026-10-03, second run; optimistic, see DESIGN) |
+| [ ] Answer mapping at least 90% (model alone) | Second run after the graded labels: 84% (27 of 32). All 5 misses end safely in the app (3 red-flag readings go back to her for a one-tap confirm, 2 hedges get the buttons again), but the model itself is below target: tune the hedge and "slept in my recliner" cases |
 | [x] Gemini down: typed replies fall back to buttons with honest wording | `test/free-text.test.ts` (`typedReplyUnavailable`) |
 | [ ] Today's breathing conversation replays correctly (her "more info" saved, typed "Yes" counted, no flag offer after, follow-up later) | `scripts/demo/harriet-red-flag-typed.txt` and live |
 

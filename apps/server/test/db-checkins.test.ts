@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { answerHistory } from "../src/db/answer-history.ts";
 import {
+  finishedCheckinsBefore,
   getCheckin,
   getCheckinById,
   getCheckinPatient,
@@ -49,6 +50,7 @@ describe("checkins rows", () => {
       sentAt: T1,
       finishedAt: null,
       concernAt: null,
+      explainAt: null,
     });
   });
 
@@ -70,6 +72,29 @@ describe("checkins rows", () => {
     expect(getCheckinById(db, id)?.concernAt).toBeNull();
     updateCheckin(db, id, { concernAt: T1 });
     expect(getCheckinById(db, id)?.concernAt).toBe(T1);
+  });
+
+  it("explainAt (migration 8) is stored, patched and cleared", () => {
+    const id = insertCheckin(db, { patientId: P, date: "2026-09-01", questionIds: [], sentAt: T1 });
+    expect(getCheckinById(db, id)?.explainAt).toBeNull();
+    updateCheckin(db, id, { explainAt: T1 });
+    expect(getCheckinById(db, id)?.explainAt).toBe(T1);
+    updateCheckin(db, id, { explainAt: null });
+    expect(getCheckinById(db, id)?.explainAt).toBeNull();
+  });
+
+  it("finishedCheckinsBefore counts answered and not-today days before the date, never missed or unfinished ones", () => {
+    const days = ["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-05"];
+    const ids = days.map((date) => insertCheckin(db, { patientId: P, date, questionIds: [], sentAt: T1 }));
+    updateCheckin(db, ids[0]!, { status: "answered" });
+    updateCheckin(db, ids[1]!, { status: "skipped" });
+    updateCheckin(db, ids[2]!, { status: "missed" });
+    updateCheckin(db, ids[4]!, { status: "answered" });
+    expect(finishedCheckinsBefore(db, P, "2026-09-01")).toBe(0);
+    expect(finishedCheckinsBefore(db, P, "2026-09-03")).toBe(2);
+    expect(finishedCheckinsBefore(db, P, "2026-09-05")).toBe(2); // the 3rd was missed, the 4th is still open
+    expect(finishedCheckinsBefore(db, P, "2026-09-06")).toBe(3);
+    expect(finishedCheckinsBefore(db, "someone-else", "2026-09-06")).toBe(0);
   });
 
   it("keeps the status and step checks", () => {

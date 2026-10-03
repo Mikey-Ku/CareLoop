@@ -53,8 +53,10 @@ export interface CheckinEngine {
    * current prompt instead of recording an answer; typed text without replyTo is matched as before.
    * Typed messages (engine.ts "Typed messages"): the safety screen first (a crisis or urgent symptom wins
    * over everything), then the LLM sorts the message and fixed rules react: an answer, detail kept for
-   * her doctor, a medicine question, feeling low, a message for her family, or small talk. A message
-   * already handled never reaches the LLM. Also answers a follow-up's "Better" / "About the same" / "Worse".
+   * her doctor, a medicine question, feeling low, a message for her family, or small talk. What she types
+   * while the greeting waits is her open reply (engine.ts "Open question first"): the LLM extracts answers
+   * to today's questions and symptoms, fixed rules level them, and only what she didn't cover is asked.
+   * A message already handled never reaches the LLM. Also answers a follow-up's "Better" / "About the same" / "Worse".
    */
   handleInbound(message: InboundMessage): Promise<void>;
   /** Noon job: a check-in still unanswered becomes missed and every linked family chat is told. */
