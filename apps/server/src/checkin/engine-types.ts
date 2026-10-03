@@ -35,6 +35,8 @@ export interface CheckinEngine {
    * family chats included: a family member can never answer a check-in or change her sharing level.
    * Besides the check-in it handles, at any time: "Sharing" (the sharing menu and a tap on a level), and the
    * paper check's "Yes, that's right" / "No, something's off" and the R6 follow-up buttons.
+   * A button tap whose replyTo is not the message waiting for an answer (a stale tap) re-sends the
+   * current prompt instead of recording an answer; typed text without replyTo is matched as before.
    */
   handleInbound(message: InboundMessage): Promise<void>;
   /** Noon job: a check-in still unanswered becomes missed and every linked family chat is told. */

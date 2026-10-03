@@ -1,5 +1,5 @@
 import { latestCheckin } from "../db/checkins.ts";
-import { deletePatientSnapshots, markNoted, markOffered, saveSnapshot, syncFlags, type Db } from "../db/index.ts";
+import { deletePatientSnapshots, markNoted, markTold, saveSnapshot, syncFlags, type Db } from "../db/index.ts";
 import {
   confirmPaperScan,
   latestPaperScan,
@@ -30,7 +30,9 @@ import { PAPER_CONFIRM_BUTTONS } from "./paper-check.ts";
 // Hospital paper check inside the engine (docs/DESIGN.md "Rules engine", R6):
 //   read-back with "Yes, that's right" / "No, something's off"
 //   -> Yes: compare with a fresh snapshot, store the result; an R6 flag enters the
-//      flag lifecycle and she hears it in plain words with "I'll ask my doctor" / "Later"
+//      flag lifecycle and she hears it in plain words with "I'll ask my doctor" / "Later".
+//      Hearing it makes it told, as "Tell me more" does in a check-in: "Later" (or no
+//      tap) leaves it told, never offered again on its own; "I'll ask my doctor" notes it.
 //   -> No: nothing is confirmed or compared; she is pointed to her doctor or pharmacist.
 // A paper check is not a check-in and never touches the checkins row. Planning is
 // synchronous (inside the engine's inbound transaction); the snapshot is loaded
@@ -70,6 +72,8 @@ const key = (patientId: string, scanId: number, step: string) => `${patientId}:p
 
 export function createPaperFlow(deps: { db: Db; clock: Clock; rxnav: () => RxNavCache }) {
   const { db, clock } = deps;
+  /** The check-in date a paper check belongs to: her latest check-in's, else today's date. */
+  const checkinDay = (patientId: string, now: string) => latestCheckin(db, patientId)?.date ?? now.slice(0, 10);
 
   return {
     /** "Yes, that's right": confirm, compare (R6), store, and plan what she hears. */
@@ -89,7 +93,8 @@ export function createPaperFlow(deps: { db: Db; clock: Clock; rxnav: () => RxNav
 
       saveSnapshot(db, { patientId, fetchedAt: now, syncStatus: fresh.raw.meta.syncStatus, raw: fresh.raw });
       const record = normalizeHealthRecord(fresh.raw, { rxnav: deps.rxnav() });
-      const r6 = diffPaper(record, scan.paper);
+      const day = checkinDay(patientId, now);
+      const r6 = diffPaper(record, scan.paper, day);
       const discrepancies = (r6.details?.discrepancies as unknown[] | undefined) ?? [];
 
       if (r6.status !== "flag") {
@@ -101,9 +106,9 @@ export function createPaperFlow(deps: { db: Db; clock: Clock; rxnav: () => RxNav
       // Only R6 is synced, so R1 to R5 flags are left alone (see syncFlags).
       syncFlags(db, patientId, [r6], now);
       const flagId = openFlagIdByFingerprint(db, patientId, "R6", fingerprint(r6)) ?? null;
-      // She hears it now, so no other flag is offered on this check-in date. It stays new
-      // until she taps "I'll ask my doctor"; "Later" lets a later check-in offer it again.
-      if (flagId !== null) markOffered(db, flagId, latestCheckin(db, patientId)?.date ?? now.slice(0, 10));
+      // She hears it now, so it is told (and told_on keeps any other flag from being
+      // offered on this check-in date). "I'll ask my doctor" moves it on to noted.
+      if (flagId !== null) markTold(db, flagId, now, day);
       const outcome: PaperOutcome = { outcome: "flag", discrepancies, flagId, followUp: "pending" };
       confirmPaperScan(db, scan.id, now, outcome);
       return {
@@ -132,6 +137,8 @@ export function createPaperFlow(deps: { db: Db; clock: Clock; rxnav: () => RxNav
         updatePaperOutcome(db, scan.id, { ...outcome, followUp: "noted" });
         return [{ message: { text: flagNotedReply() }, key: key(patientId, scan.id, "noted") }];
       }
+      // "Later": it stays told. Marking it here too covers a flag stored before it was told on hearing.
+      if (outcome.flagId !== null) markTold(db, outcome.flagId, clock.now(), checkinDay(patientId, clock.now()));
       updatePaperOutcome(db, scan.id, { ...outcome, followUp: "later" });
       return [{ message: { text: PAPER_LATER_REPLY }, key: key(patientId, scan.id, "later") }];
     },

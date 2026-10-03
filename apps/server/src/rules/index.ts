@@ -3,6 +3,7 @@ import {
   LOINC,
   activeMedications,
   ageOn,
+  asOf,
   latest,
   series,
   type Measurement,
@@ -253,8 +254,10 @@ export function ruleRefillTiming({ record, checkinDate, config = DEFAULT_RULES_C
 
 export const RULES = [ruleMetforminKidneys, ruleApixabanDose, ruleBleedingCombination, rulePotassium, ruleRefillTiming];
 
+/** Runs R1 to R5 on the record as it stood on the check-in date (see `asOf`). */
 export function runRules(context: RuleContext): RuleResult[] {
-  return RULES.map((rule) => rule(context));
+  const scoped: RuleContext = { ...context, record: asOf(context.record, context.checkinDate) };
+  return RULES.map((rule) => rule(scoped));
 }
 
 /** Same rule, same evidence records and values -> same fingerprint. New evidence reopens a flag. */

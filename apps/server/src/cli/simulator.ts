@@ -357,7 +357,8 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
         await sendAsSenior(label, target.messageId);
         return "ok";
       }
-      await sendAsSenior(input, latestInSeniorChat()?.messageId);
+      // Typed text replies to nothing, as in Relay without a swipe-reply; only a tap names its message.
+      await sendAsSenior(input, undefined);
       return "ok";
     } catch (error) {
       note(`error: ${error instanceof Error ? error.message : String(error)}`, "red");

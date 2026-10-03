@@ -157,6 +157,20 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX family_members_chat ON family_members (chat_id) WHERE chat_id IS NOT NULL;
   `,
+  // 5: the check-in messages that carry its buttons (the greeting, each question, the flag offer
+  // and detail, and any re-send of one), with the step each was sent for. A tap names the message
+  // it replies to; a tap on one sent for another step or another day is stale and only re-prompts
+  // (src/checkin/engine.ts).
+  `
+  CREATE TABLE checkin_prompts (
+    message_id TEXT PRIMARY KEY,
+    checkin_id INTEGER NOT NULL REFERENCES checkins(id) ON DELETE CASCADE,
+    step TEXT NOT NULL CHECK (step IN ('greeting', 'question', 'flag_offer', 'flag_detail')),
+    question_index INTEGER NOT NULL DEFAULT 0,
+    sent_at TEXT NOT NULL
+  );
+  CREATE INDEX checkin_prompts_checkin ON checkin_prompts (checkin_id);
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

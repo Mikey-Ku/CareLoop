@@ -359,6 +359,40 @@ export function normalizeHealthRecord(record: HealthRecord, options: { rxnav?: R
   };
 }
 
+/**
+ * The record as it stood on the check-in date (YYYY-MM-DD): labs, vitals and
+ * dispenses dated after it are dropped, and so are medications that started and
+ * conditions whose onset is after it. The app then behaves as if it really is that
+ * day, even when the demo pins an earlier check-in date than the data reaches.
+ *
+ * Undated items stay. A missing date says nothing about when a record was made,
+ * and dropping it would silently hide real medicines and conditions (unusable
+ * measurements without a date are already marked unusable by normalize).
+ *
+ * A medication merged from several sources keeps the source records dated on or
+ * before the check-in date (and undated ones); it is dropped only when every source
+ * record starts after it. Its name and strength still come from the merge.
+ */
+export function asOf(record: PatientRecord, checkinDate: string): PatientRecord {
+  const onOrBefore = (day: string | undefined) => day === undefined || day <= checkinDate;
+  const medications = record.medications.flatMap((med): Medication[] => {
+    const provenance = med.provenance.filter((p) => onOrBefore(p.date));
+    if (provenance.length === 0) return [];
+    if (provenance.length === med.provenance.length) return onOrBefore(med.startDate) ? [med] : [];
+    // Some sources started it later: keep the earlier ones and their latest start date.
+    const dated = provenance.flatMap((p) => (p.date ? [p.date] : [])).sort();
+    return [{ ...med, provenance, startDate: dated.at(-1) }];
+  });
+  return {
+    ...record,
+    medications,
+    dispenses: record.dispenses.filter((d) => onOrBefore(d.date)),
+    labs: record.labs.filter((m) => onOrBefore(m.date)),
+    vitals: record.vitals.filter((m) => onOrBefore(m.date)),
+    conditions: record.conditions.filter((c) => onOrBefore(c.onsetDate)),
+  };
+}
+
 // Queries used by rules and the packet builder.
 
 export function activeMedications(record: PatientRecord): Medication[] {

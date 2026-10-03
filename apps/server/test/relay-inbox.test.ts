@@ -1,7 +1,9 @@
-import type { Chat, RelayWebhookEvent, WebhookSubscription, WebSocketRunOptions } from "@relaymessenger/sdk";
+import type { Chat, MessageSendParams, RelayWebhookEvent, WebhookSubscription, WebSocketRunOptions } from "@relaymessenger/sdk";
 import { describe, expect, it, vi } from "vitest";
+import { familyWelcome } from "../src/checkin/copy.ts";
 import { familyChats, familyMembers, linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import { openDatabase, upsertPatient, type Db } from "../src/db/index.ts";
+import { FakeMessenger } from "../src/relay/fake-messenger.ts";
 import { acceptEvent, assertNoWebhookSubscriptions, createRelayInbox, processEvent, runRelayInbox } from "../src/relay/inbox.ts";
 import type { InboundMessage } from "../src/relay/messenger.ts";
 import type { RelayClient } from "../src/relay/relay-client.ts";
@@ -81,7 +83,12 @@ function fakeRelay(overrides: { chats?: Chat[]; subscriptions?: unknown[] } = {}
         },
       })),
       markAsRead: vi.fn(async () => undefined),
-      messages: { send: vi.fn() },
+      messages: {
+        send: vi.fn(async (chatId: string, _body: MessageSendParams) => ({
+          chat_id: chatId,
+          message: { id: nextId(), parts: [], created_at: T, sent_at: T, delivery_status: "delivered" as const, is_system_message: false as const },
+        })),
+      },
     },
     me: { retrieve: vi.fn() },
     webhookSubscriptions: { list: vi.fn(async () => ({ subscriptions: (overrides.subscriptions ?? []) as WebhookSubscription[] })) },
@@ -337,6 +344,101 @@ describe("contact.added", () => {
     await inbox.drain();
     expect(familyChats(db, "harriet")).toEqual([]);
     expect(log).toHaveBeenCalledWith("relay_contact_added", expect.objectContaining({ handle: "stranger.demo", chat_id: OTHER_CHAT }));
+  });
+});
+
+describe("family welcome", () => {
+  const WELCOME = familyWelcome("Harriet");
+  const welcomesTo = (relay: ReturnType<typeof fakeRelay>, chatId: string) =>
+    relay.chats.messages.send.mock.calls.filter(([c, body]) => c === chatId && body.message.parts[0]?.type === "text" && body.message.parts[0].value === WELCOME);
+
+  it("contact.added for a configured family member sends the welcome once, through Relay, keyed by patient and handle", async () => {
+    const { inbox, relay, log } = setup();
+    await inbox.onEvent(contactAdded("@Sarah.Demo", SARAH_CHAT), { sequence: "1" });
+    await inbox.drain();
+    expect(relay.chats.messages.send).toHaveBeenCalledTimes(1);
+    expect(relay.chats.messages.send).toHaveBeenCalledWith(SARAH_CHAT, {
+      message: { parts: [{ type: "text", value: WELCOME }], idempotency_key: "welcome:harriet:sarah.demo" },
+    });
+    expect(log).toHaveBeenCalledWith("relay_family_welcomed", expect.objectContaining({ handle: "sarah.demo", chat_id: SARAH_CHAT, patient_id: "harriet" }));
+  });
+
+  it("her later first message, a repeat contact.added and a rename send nothing more", async () => {
+    const { db, inbox, relay } = setup();
+    await inbox.onEvent(contactAdded("sarah.demo", SARAH_CHAT), { sequence: "1" });
+    await inbox.onEvent(textMessage({ chatId: SARAH_CHAT, sender: "sarah.demo", text: "Hi" }), { sequence: "2" });
+    await inbox.onEvent(contactAdded("sarah.demo", SARAH_CHAT), { sequence: "3" });
+    await inbox.drain();
+    linkFamilyMember(db, "sarah.demo", SARAH_CHAT, "Sarah New Name", T);
+    await inbox.onEvent(contactAdded("sarah.demo", SARAH_CHAT), { sequence: "4" });
+    await inbox.drain();
+    expect(welcomesTo(relay, SARAH_CHAT)).toHaveLength(1);
+    expect(relay.chats.messages.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("a family member's first message, when contact.added never came, gets the welcome; the engine never sees it", async () => {
+    const { inbox, relay, engine } = setup();
+    await inbox.onEvent(textMessage({ chatId: TOM_CHAT, sender: "Tom.Demo", text: "Hi, this is Tom" }), { sequence: "1" });
+    await inbox.onEvent(textMessage({ chatId: TOM_CHAT, sender: "tom.demo", text: "Anyone there?" }), { sequence: "2" });
+    await inbox.drain();
+    expect(welcomesTo(relay, TOM_CHAT)).toHaveLength(1);
+    expect(relay.chats.messages.send.mock.calls[0]![1].message.idempotency_key).toBe("welcome:harriet:tom.demo");
+    expect(engine.handleInbound).not.toHaveBeenCalled();
+  });
+
+  it("re-linking to another chat sends no second welcome", async () => {
+    const { db, inbox, relay } = setup();
+    linkFamilyMember(db, "sarah.demo", SARAH_CHAT, null, T);
+    await inbox.onEvent(contactAdded("sarah.demo", OTHER_CHAT), { sequence: "1" });
+    await inbox.drain();
+    expect(familyChats(db, "harriet").find((f) => f.handle === "sarah.demo")?.chatId).toBe(OTHER_CHAT);
+    expect(relay.chats.messages.send).not.toHaveBeenCalled();
+  });
+
+  it("the senior, strangers and group chats get no welcome", async () => {
+    const { inbox, relay } = setup({ linked: false });
+    await inbox.onEvent(contactAdded("harriet.demo", HARRIET_CHAT), { sequence: "1" });
+    await inbox.onEvent(contactAdded("stranger.demo", OTHER_CHAT), { sequence: "2" });
+    await inbox.onEvent(textMessage({ chatId: GROUP_CHAT, isGroup: true, sender: "sarah.demo", text: "@agent hi" }), { sequence: "3" });
+    await inbox.drain();
+    expect(relay.chats.messages.send).not.toHaveBeenCalled();
+  });
+
+  it("uses the senior's preferred name from her patient row", async () => {
+    const db = openDatabase(":memory:");
+    upsertPatient(db, { id: "harriet", finchnodePatientId: "patient-demo-polypharmacy", preferredName: "Hattie", relayHandle: "harriet.demo" });
+    syncFamilyMembers(db, "harriet", ["sarah.demo"]);
+    const messenger = new FakeMessenger({ now: () => T });
+    const deps = { db, engine: { handleInbound: vi.fn() }, patientHandle: "harriet.demo", relay: fakeRelay(), messenger, log: () => {}, now: () => T };
+    expect(await processEvent(deps, contactAdded("sarah.demo", SARAH_CHAT))).toBe("family_linked");
+    expect(messenger.inChat(SARAH_CHAT).map((m) => m.text)).toEqual([familyWelcome("Hattie")]);
+    expect(deps.relay.chats.messages.send).not.toHaveBeenCalled();
+  });
+
+  it("a failed send is logged and never fails the event or undoes the link", async () => {
+    const { db, inbox, relay, log } = setup();
+    relay.chats.messages.send.mockRejectedValueOnce(new Error("503"));
+    await inbox.onEvent(contactAdded("sarah.demo", SARAH_CHAT), { sequence: "1" });
+    await inbox.drain();
+    expect(rows(db)[0]).toMatchObject({ processedAt: T, error: null });
+    expect(familyChats(db, "harriet").map((f) => f.chatId)).toEqual([SARAH_CHAT]);
+    expect(log).toHaveBeenCalledWith("relay_family_welcome_failed", expect.objectContaining({ handle: "sarah.demo", error: expect.stringContaining("503") }));
+  });
+
+  it("a family member first linked by a full sync gets the welcome after the sync resolves", async () => {
+    const db = openDatabase(":memory:");
+    upsertPatient(db, { id: "harriet", finchnodePatientId: "patient-demo-polypharmacy", preferredName: "Harriet", relayHandle: "harriet.demo" });
+    syncFamilyMembers(db, "harriet", ["sarah.demo", "tom.demo"]);
+    linkFamilyMember(db, "tom.demo", TOM_CHAT, null, T);
+    const chat = (id: string, handle: string): Chat => ({ id, display_name: null, handles: [person(handle)], is_group: false, created_at: T, updated_at: T });
+    const relay = fakeRelay({ chats: [chat(SARAH_CHAT, "sarah.demo"), chat(TOM_CHAT, "tom.demo"), chat(HARRIET_CHAT, "harriet.demo")] });
+    const inbox = createRelayInbox({ db, engine: { handleInbound: vi.fn() }, patientHandle: "harriet.demo", relay, log: () => {}, now: () => T });
+    await inbox.onFullSync({ throughSequence: "91", reason: "checkpoint_outside_retention" });
+    await inbox.drain();
+    // Sarah is new; Tom was already linked.
+    expect(welcomesTo(relay, SARAH_CHAT)).toHaveLength(1);
+    expect(welcomesTo(relay, TOM_CHAT)).toHaveLength(0);
+    expect(relay.chats.messages.send).toHaveBeenCalledTimes(1);
   });
 });
 

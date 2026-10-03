@@ -100,6 +100,30 @@ export function updateCheckin(db: Db, id: number, patch: CheckinPatch): void {
   db.prepare(`UPDATE checkins SET ${sets.join(", ")} WHERE id = ?`).run(...values, id);
 }
 
+/** A check-in step that sends buttons and waits for a tap. */
+export type PromptStep = Exclude<CheckinStep, "done">;
+
+/** One sent message carrying a check-in step's buttons (checkin_prompts, migration 5). */
+export type CheckinPrompt = { messageId: string; checkinId: number; step: PromptStep; questionIndex: number; sentAt: string };
+
+/** Remember a sent message as carrying `step`'s buttons. Recording the same message again changes nothing. */
+export function recordCheckinPrompt(db: Db, prompt: CheckinPrompt): void {
+  db.prepare(
+    `INSERT INTO checkin_prompts (message_id, checkin_id, step, question_index, sent_at) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT (message_id) DO NOTHING`,
+  ).run(prompt.messageId, prompt.checkinId, prompt.step, prompt.questionIndex, prompt.sentAt);
+}
+
+/** The check-in step a sent message was for, or undefined if it carried no check-in buttons. */
+export function getCheckinPrompt(db: Db, messageId: string): CheckinPrompt | undefined {
+  return db
+    .prepare(
+      `SELECT message_id AS messageId, checkin_id AS checkinId, step, question_index AS questionIndex, sent_at AS sentAt
+       FROM checkin_prompts WHERE message_id = ?`,
+    )
+    .get(messageId) as CheckinPrompt | undefined;
+}
+
 /** Record an inbound Relay message id. Returns false if it was already handled (a webhook retry). */
 export function markInboundHandled(db: Db, messageId: string, chatId: string, receivedAt: string): boolean {
   return (

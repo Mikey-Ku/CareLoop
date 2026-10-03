@@ -1,8 +1,10 @@
-# Two mornings in a row (starts 2026-09-01). Day 1 she hears the first flag and
-# says she'll ask her doctor; day 2 (/next) offers the next flag, not the same one.
+# Two mornings in a row (starts 2026-09-01). Day 1 she answers both red-flag
+# questions and hears the first flag, and says she'll ask her doctor. Day 2 (/next)
+# skips the red-flag questions (answered yesterday, due every other day), asks the
+# other three, and offers the next flag, not the same one.
 # npm run simulate -- --reset --script ../../scripts/demo/harriet-two-days.txt
 #
-# Day 1: Let's start, No, Yes, Good, Tell me more, I'll ask my doctor
+# Day 1: Let's start, No to breathing, bleeding and dizziness, Tell me more, I'll ask my doctor
 1
 1
 1
@@ -10,7 +12,7 @@
 1
 1
 /next
-# Day 2 (2026-09-02): Let's start, then No to ankles, breathing and bleeding
+# Day 2 (2026-09-02): Let's start, No to ankles, Yes to morning medicines, Good
 1
 1
 1

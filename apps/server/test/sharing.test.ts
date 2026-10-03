@@ -25,7 +25,7 @@ const P = "harriet";
 const SUBJECT = "patient-demo-polypharmacy";
 const ME = "chat_harriet";
 const FAMILY = "chat_family";
-const DAY1 = "2026-09-01"; // questions: dizzy-on-standing, morning-medicines, mood
+const DAY1 = "2026-09-01"; // questions: hf-breathing-lying-flat, anticoagulant-bleeding, dizzy-on-standing
 const rxnav = loadRxNavCache();
 const LEVEL_BUTTONS = [SHARING_BUTTONS.status, SHARING_BUTTONS.status_vitals, SHARING_BUTTONS.all];
 
@@ -116,7 +116,7 @@ describe("the sharing menu", () => {
 
   it("the check-in's last message carries a single Sharing button that opens the menu", async () => {
     await engine.startDay(P, DAY1);
-    for (const t of ["Let's start", "No", "Yes", "Good"]) await say(t);
+    for (const t of ["Let's start", "No", "No", "No"]) await say(t);
     const done = (await say("Later"))[0]!;
     expect(done).toMatchObject({ chatId: ME, text: checkinDone("Harriet"), buttons: [SHARING_MENU_BUTTON] });
     expect(brief(await say(done.buttons![0]!))).toEqual([msg(ME, sharingMenu("status"), LEVEL_BUTTONS)]);
@@ -127,9 +127,9 @@ describe("sharing in the middle of a check-in", () => {
   it("the menu doesn't break it: after the change the pending question comes again and she carries on", async () => {
     await engine.startDay(P, DAY1);
     await say("Let's start");
-    await say("No"); // dizzy
-    const meds = question("morning-medicines");
-    const mood = question("mood");
+    await say("No"); // breathing
+    const bleeding = question("anticoagulant-bleeding");
+    const dizzy = question("dizzy-on-standing");
 
     expect(brief(await say("Sharing"))).toEqual([msg(ME, sharingMenu("status"), LEVEL_BUTTONS)]);
     expect(getCheckin(db, P, DAY1)).toMatchObject({ step: "question", questionIndex: 1 });
@@ -137,15 +137,15 @@ describe("sharing in the middle of a check-in", () => {
     expect(brief(await say(SHARING_BUTTONS.all))).toEqual([
       msg(ME, sharingChangedSenior("all")),
       msg(FAMILY, sharingChangedFamily("Harriet", "all")),
-      msg(ME, meds.text, meds.buttons),
+      msg(ME, bleeding.text, bleeding.buttons),
     ]);
-    expect(brief(await say("Yes"))).toEqual([msg(ME, mood.text, mood.buttons)]);
-    expect(brief(await say("Good"))).toEqual([msg(ME, flagOffer(), [BUTTON.tellMeMore, BUTTON.later])]);
+    expect(brief(await say("No"))).toEqual([msg(ME, dizzy.text, dizzy.buttons)]);
+    expect(brief(await say("Sometimes"))).toEqual([msg(ME, flagOffer(), [BUTTON.tellMeMore, BUTTON.later])]);
     const last = await say("Later");
 
     // The day's family status uses the new level.
     const row = getCheckin(db, P, DAY1)!;
-    expect(row.answers.map((a) => a.answer)).toEqual(["No", "Yes", "Good"]);
+    expect(row.answers.map((a) => a.answer)).toEqual(["No", "No", "Sometimes"]);
     expect(last.at(-1)).toMatchObject({
       chatId: FAMILY,
       text: familyDailyStatus({
@@ -162,7 +162,7 @@ describe("sharing in the middle of a check-in", () => {
     await engine.startDay(P, DAY1);
     await say("Sharing");
     expect(brief(await say(SHARING_BUTTONS.status)).at(-1)).toEqual(msg(ME, checkinGreeting("Harriet", 3), [BUTTON.start, BUTTON.notToday]));
-    for (const t of ["Let's start", "No", "Yes", "Good"]) await say(t);
+    for (const t of ["Let's start", "No", "No", "No"]) await say(t);
     await say("Sharing");
     expect(brief(await say(SHARING_BUTTONS.status)).at(-1)).toEqual(msg(ME, flagOffer(), [BUTTON.tellMeMore, BUTTON.later]));
     expect(getCheckin(db, P, DAY1)?.step).toBe("flag_offer");
@@ -171,11 +171,29 @@ describe("sharing in the middle of a check-in", () => {
     expect(openFlags(db, P).filter((f) => f.status === "told")).toHaveLength(1);
   });
 
+  it("Sharing and its level buttons work as taps on any message, even an old menu, without answering the question", async () => {
+    await engine.startDay(P, DAY1);
+    await say("Let's start");
+    const oldMenu = (await say("Sharing"))[0]!;
+    await say("No"); // breathing, answered by typing
+    const tapOn = async (text: string, replyTo: string) => {
+      const before = messenger.sent.length;
+      await engine.handleInbound({ chatId: ME, messageId: `in_${++inbound}`, text, replyTo, at: now });
+      return messenger.sent.slice(before);
+    };
+    const bleeding = question("anticoagulant-bleeding");
+    expect(brief(await tapOn(SHARING_BUTTONS.all, oldMenu.messageId)).at(-1)).toEqual(msg(ME, bleeding.text, bleeding.buttons));
+    expect(getSharing(db, P)).toBe("all");
+    expect((await tapOn(SHARING_MENU_BUTTON, "msg_unknown"))[0]?.text).toBe(sharingMenu("all"));
+    expect(getCheckin(db, P, DAY1)).toMatchObject({ step: "question", questionIndex: 1 });
+    expect(getCheckin(db, P, DAY1)?.answers).toHaveLength(1);
+  });
+
   it("a menu left open: answering the question instead just carries on", async () => {
     await engine.startDay(P, DAY1);
     await say("Let's start");
     await say("Sharing");
-    expect(brief(await say("No"))).toEqual([msg(ME, question("morning-medicines").text, question("morning-medicines").buttons)]);
+    expect(brief(await say("No"))).toEqual([msg(ME, question("anticoagulant-bleeding").text, question("anticoagulant-bleeding").buttons)]);
     expect(getSharing(db, P)).toBe("status");
   });
 });

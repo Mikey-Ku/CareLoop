@@ -1,4 +1,4 @@
-import { activeMedications, type Medication, type PatientRecord } from "../finchnode/normalize.ts";
+import { activeMedications, asOf, type Medication, type PatientRecord } from "../finchnode/normalize.ts";
 import { cleanDrugTerm } from "../finchnode/rxnav.ts";
 import type { Evidence, RuleResult } from "./index.ts";
 
@@ -146,13 +146,16 @@ function papersPhrase(paper: ExtractedPaper): { subject: string; plural: boolean
  * the paper (new, continued or changed) with no active match in the record, (c) a dose
  * that differs between paper and record. A record medication missing from the paper is
  * not a discrepancy: discharge papers often list only what changed.
+ *
+ * With `checkinDate`, the record is compared as it stood on that day (see `asOf`):
+ * a medication that starts after the check-in date isn't on her list yet.
  */
-export function diffPaper(record: PatientRecord, paper: ExtractedPaper): RuleResult {
+export function diffPaper(record: PatientRecord, paper: ExtractedPaper, checkinDate?: string): RuleResult {
   const base = { ruleId: "R6" as const, severity: undefined };
   if (paper.medications.length === 0)
     return { ...base, status: "skipped", message: "No medications were read from the papers.", evidence: [], details: { discrepancies: [] } };
 
-  const active = activeMedications(record);
+  const active = activeMedications(checkinDate ? asOf(record, checkinDate) : record);
   const discrepancies: Discrepancy[] = [];
   const evidence: Evidence[] = [];
 

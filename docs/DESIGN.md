@@ -103,7 +103,7 @@ Mhacks_2026/
 ### Dates
 
 - **Data as-of**: the snapshot's `meta.dataAsOf` (Harriet: 2026-09-01). With several sources it is the oldest source's watermark. Shown to people as "last updated"; never overridden.
-- **Check-in date**: the "today" that rules, refill gaps, age and question rotation use. Production: the real date in the patient's timezone. Demo: `CLOCK_DATE` in `.env`; when it is empty, use the snapshot's data as-of date. Rules and the packet builder take it as a parameter; nothing else reads the system clock.
+- **Check-in date**: the "today" that rules, refill gaps, age and question rotation use. Production: the real date in the patient's timezone. Demo: `CLOCK_DATE` in `.env`; when it is empty, use the snapshot's data as-of date. Rules and the packet builder take it as a parameter; nothing else reads the system clock. Records dated after the check-in date are ignored (`asOf`), so a pinned demo date behaves as if it really is that day.
 
 ## Rules engine
 
@@ -115,7 +115,7 @@ Deterministic functions, each returning `{ ruleId, status: "flag" | "checked" | 
 | R2 apixaban dose | Count: age >= 80, weight <= 60 kg, creatinine >= 1.5. Two or more means 2.5 mg twice daily, else 5 mg. Flag a mismatch, otherwise "checked" | Eliquis label, https://packageinserts.bms.com/pi/pi_eliquis.pdf |
 | R3 bleeding combination | Anticoagulant plus aspirin and/or an SSRI: flag "ask your doctor" | Team confirms wording against a drug interaction reference before the demo |
 | R4 potassium | Latest potassium in the top quarter of its reference range, on an ACE inhibitor plus a potassium supplement, with eGFR falling: flag | Demo heuristic; team confirms |
-| R5 refill timing | Needs two or more fills of the same drug; gap longer than days supply plus a grace period: flag. One fill only: skipped | Uses the check-in date |
+| R5 refill timing | Needs two or more fills of the same drug; gap longer than days supply plus a 7-day grace period (team, 2026-10-03): flag. One fill only: skipped | Uses the check-in date |
 | R6 paper diff | Paper says stopped but record says active; new drug on paper not in record; dose differs: flag each. A record drug missing from the paper is not a discrepancy (discharge papers often list only changes) | Hospital paper check |
 
 Answer key for Harriet: R1 flag (reassess, eGFR 31 and falling), R2 checked (1 of 3 criteria, 5 mg is right), R3 flag (apixaban, aspirin, sertraline), R4 flag (potassium 4.9, lisinopril plus potassium chloride, eGFR falling), R5 skipped (one fill per drug). Write this as `fixtures/answer-key.json` and test against it.
@@ -127,23 +127,25 @@ A rule result is recomputed on every snapshot and shown to no one. A rule result
 | Status | Meaning | Next |
 | --- | --- | --- |
 | new | Rule fired with evidence not stored before | Offered to Harriet in a check-in |
-| told | Harriet was told once in plain words, as "something to ask your doctor" | `noted` when she taps "I'll ask my doctor" |
+| told | Harriet was told once in plain words, as "something to ask your doctor" (tapping "Later" after hearing it also leaves it here) | `noted` when she taps "I'll ask my doctor" |
 | noted | She will raise it; never raised again on its own; goes on the visit-prep list | `cleared` or reopened |
 | cleared | A later snapshot no longer triggers the rule; no message is sent | |
 
 - Changed evidence (for example a new, lower eGFR) is a new fingerprint, so a new flag in status `new`.
 - A rule that returns `skipped` (or isn't run, like R6 on its own) leaves open flags alone; only `checked` or a different fingerprint clears them. A partial sync can't clear and re-raise flags.
-- At most one new flag is offered per day, apart from the 3 questions, with buttons "Tell me more" and "Later". "Later" keeps it `new` for another day.
+- At most one new flag is offered per day, apart from the 3 questions, with buttons "Tell me more" and "Later". "Later" on the offer (before she has heard it) keeps it `new` for another day; once she has heard it, "Later" leaves it `told`, for record flags and paper (R6) flags alike.
 - Family sees flags only at sharing level `all`, inside the daily status. Flags never send an alert.
 - Red flags (below) are a different thing and skip this lifecycle.
 
 ## Daily questions and red flags
 
-- Question bank keyed by condition or drug class: heart failure (ankle swelling; trouble breathing lying flat), anticoagulant (unusual bruising or bleeding), beta blocker or loop diuretic (dizziness on standing), everyone (morning medicines taken). Pick at most 3, rotate across days.
-- Red flags are urgent and come from her answers, not from the health record. They are fixed rules, not LLM judgment: for example heart failure plus "trouble breathing" answer, or anticoagulant plus "bleeding" answer. Action: tell her to call her doctor and alert every family chat at every sharing level (see Sharing levels for how much the alert says). Thresholds are config values the team sets; do not invent clinical cutoffs.
-- Usual range (heart rate only): lowest to highest clinic heart-rate reading in the health record (LOINC 8867-4). Needs at least `USUAL_RANGE_MIN_READINGS` readings (default 3), otherwise no comparison. Harriet: 65 to 91 bpm from 10 readings. A camera reading outside it gets a gentle mention, not an alarm.
+- Question bank keyed by condition or drug class: heart failure (ankle swelling; trouble breathing lying flat), anticoagulant (unusual bruising or bleeding), beta blocker or loop diuretic (dizziness on standing), everyone (morning medicines taken, mood). At most 3 a day.
+- Red-flag questions (breathing lying flat, bleeding) are asked periodically when her conditions or drugs call for them: due when never asked, when last asked `redFlagEveryDays` (2) or more days ago, or daily for `followUpDays` (3) after a worrying answer in the same group. At most 2 of the 3 slots; the other questions rotate. A not-today or missed day doesn't count as asked.
+- Red flags are urgent and come from her answers, not from the health record. They are fixed rules, not LLM judgment: for example heart failure plus "trouble breathing" answer, or anticoagulant plus "bleeding" answer. Action: tell her which family members were told, to call her doctor today, and to call 911 if it gets worse or feels like an emergency; alert every family chat at every sharing level and ask them to call her today (see Sharing levels for how much the alert says). Thresholds are config values the team sets; do not invent clinical cutoffs.
+- Usual range (heart rate only): lowest to highest clinic heart-rate reading in the health record (LOINC 8867-4). Needs at least `USUAL_RANGE_MIN_READINGS` readings (default 3), otherwise no comparison. Harriet: 65 to 91 bpm from 10 readings, kept as data but not compared, because she has AFib (below). For other patients, a camera reading outside it gets a gentle mention, not an alarm.
 - Camera readings are saved in `vitals_readings` for trends and never change the usual range.
 - Breathing rate is said back and saved, never compared: no breathing-rate readings exist in Harriet's record.
+- Atrial fibrillation: camera heart rate is least reliable with an irregular rhythm, so for a patient with active AFib the reading is reported as an estimate and never compared with her usual range (`usualRange.compareHeartRate: false`). Harriet has AFib, so her demo vitals call reports a number without in or out.
 
 ## Sharing levels and record consent
 
@@ -154,13 +156,14 @@ Two separate permissions:
 
 | Sharing level | Family sees |
 | --- | --- |
-| `status` (default) | Daily "checked in" / "said not today" / "missed"; missed check-in alert; red-flag alert with no medical detail: "Harriet reported something she should call her doctor about today. Please check in with her." |
-| `status_vitals` | Above, plus each vitals reading as "in her usual range" or "outside it" |
+| `status` (default) | Daily "checked in" / "said not today" / "missed"; missed check-in alert; red-flag alert with no medical detail: "Harriet reported something she should call her doctor about. Please call Harriet today to check on her." |
+| `status_vitals` | Above, plus each vitals reading as "in her usual range" or "outside it" (for AFib: only that a heart-rate check was done, as an estimate) |
 | `all` | Above, plus flags, her answers and red-flag details |
 
 - Only Harriet changes her sharing level, from a "Sharing" button in her chat, at any time. The family is told it changed, not why.
 - Red flags always reach the family; the sharing level only limits the detail. This deliberately overrides her privacy choice (see `docs/BRIEF.md` constraints).
-- Record consent ends (410): stop reading, delete stored snapshots for her, tell Harriet and the family the record link ended. Chat history and memories stay unless she asks to delete them.
+- Record consent ends (410): stop reading, delete stored snapshots and flags for her, tell Harriet and the family the record link ended. Chat history, check-ins and memories stay unless she asks to delete them.
+- A family member gets a one-time welcome the first time they message the agent: it is an assistant, they'll get Harriet's updates there, she decides how much they see, urgent alerts always come through.
 
 ## Context packet
 
@@ -199,6 +202,7 @@ For calls, the packet goes to ElevenLabs as dynamic variables through the bridge
 | inbound_messages | message_id, chat_id, received_at (an inbound Relay message is handled once) |
 | relay_events | event_id, sequence, event_type, payload_json, received_at, processed_at, error (WebSocket inbox, committed before ACK) |
 | relay_full_syncs | when a Relay full sync re-linked chats |
+| checkin_prompts | message_id, checkin_id, step, question_index, sent_at (which sent message a button tap may answer; older taps re-prompt) |
 
 ## Relay facts (from docs.relayapp.im)
 

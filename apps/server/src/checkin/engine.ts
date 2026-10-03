@@ -1,17 +1,22 @@
 import { QUESTION_BANK, pickQuestions, type Question } from "../context/questions.ts";
+import { answerHistory } from "../db/answer-history.ts";
 import {
   getCheckin,
   getCheckinPatient,
+  getCheckinPrompt,
   insertCheckin,
   latestCheckin,
   markInboundHandled,
   patientForChat,
+  recordCheckinPrompt,
   updateCheckin,
   type CheckinPatient,
   type CheckinRow,
+  type PromptStep,
   type StoredAnswer,
 } from "../db/checkins.ts";
 import {
+  deletePatientFlags,
   deletePatientSnapshots,
   getFlag,
   getSharing,
@@ -28,7 +33,7 @@ import { familyChats } from "../db/family.ts";
 import { inboundSeen, insertPaperScan, paperScanForAttachment } from "../db/paper-scans.ts";
 import { ConsentInactiveError } from "../finchnode/client.ts";
 import { loadRxNavCache } from "../finchnode/fixtures.ts";
-import { normalizeHealthRecord } from "../finchnode/normalize.ts";
+import { asOf, normalizeHealthRecord } from "../finchnode/normalize.ts";
 import type { RxNavCache } from "../finchnode/rxnav.ts";
 import type { SharingLevel } from "../db/index.ts";
 import type { InboundMessage, OutboundMessage } from "../relay/messenger.ts";
@@ -89,6 +94,13 @@ import { evaluateRedFlag } from "./red-flags.ts";
 // sharing menu and a tap on a level changes it (family told it changed, not why);
 // the paper check (src/checkin/paper-flow.ts) answers its own buttons. Either one
 // re-sends whatever the check-in was waiting for, so she can carry on.
+//
+// Stale taps: every message that carries a check-in step's buttons is remembered
+// with that step (checkin_prompts). A tap names the message it replies to
+// (InboundMessage.replyTo); a tap on a message sent for another step, another day
+// or no step at all doesn't answer what is pending now. It re-sends the current
+// prompt instead. "Not today" from the greeting or any question of the pending
+// check-in still ends the day. Typed text (no replyTo) is matched as before.
 
 export type EngineOptions = {
   /** MISSED_CHECKIN_TIME, shown in the family's missed check-in alert. */
@@ -97,7 +109,14 @@ export type EngineOptions = {
   rxnav?: RxNavCache;
 };
 
-type Send = { chatId: string; message: OutboundMessage; key: string };
+/** Which check-in step a message's buttons belong to; recorded with the sent message id once it is out. */
+type PromptRef = { checkinId: number; step: PromptStep; questionIndex: number };
+type Send = { chatId: string; message: OutboundMessage; key: string; prompt?: PromptRef };
+
+/** A message carrying `step`'s buttons for check-in `c` (for a question, the one at c.questionIndex). */
+function promptFor(c: CheckinRow, step: PromptStep): PromptRef {
+  return { checkinId: c.id, step, questionIndex: step === "question" ? c.questionIndex : 0 };
+}
 
 const norm = (s: string) => s.trim().toLowerCase();
 const is = (text: string, label: string) => norm(text) === norm(label);
@@ -128,7 +147,8 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     const failures: unknown[] = [];
     for (const s of sends) {
       try {
-        await messenger.send(s.chatId, s.message, s.key);
+        const sent = await messenger.send(s.chatId, s.message, s.key);
+        if (s.prompt) recordCheckinPrompt(db, { messageId: sent.messageId, ...s.prompt, sentAt: clock.now() });
       } catch (error) {
         failures.push(error);
       }
@@ -175,7 +195,14 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
   function askQuestion(patient: CheckinPatient, c: CheckinRow, index: number, chatId: string): Send[] {
     const q = questionById(c.questionIds[index]!);
     updateCheckin(db, c.id, { step: "question", questionIndex: index });
-    return [{ chatId, message: { text: q.text, buttons: [...q.buttons] }, key: `${patient.id}:${c.date}:question:${index}` }];
+    return [
+      {
+        chatId,
+        message: { text: q.text, buttons: [...q.buttons] },
+        key: `${patient.id}:${c.date}:question:${index}`,
+        prompt: { checkinId: c.id, step: "question", questionIndex: index },
+      },
+    ];
   }
 
   function finishCheckedIn(patient: CheckinPatient, c: CheckinRow, chatId: string): Send[] {
@@ -201,6 +228,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         chatId,
         message: { text: flagOffer(), buttons: [BUTTON.tellMeMore, BUTTON.later] },
         key: `${patient.id}:${c.date}:flag-offer`,
+        prompt: promptFor(c, "flag_offer"),
       },
     ];
   }
@@ -223,7 +251,12 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (red) {
       const sharing = getSharing(db, patient.id) ?? "status";
       sends.push(
-        { chatId, message: { text: redFlagAdvice(patient.preferredName) }, key: `${patient.id}:${c.date}:red-flag:${q.id}` },
+        // Name the family members actually told (display name, else their Relay handle); none linked: no family line.
+        {
+          chatId,
+          message: { text: redFlagAdvice(patient.preferredName, familyChats(db, patient.id).map((f) => f.displayName || f.handle)) },
+          key: `${patient.id}:${c.date}:red-flag:${q.id}`,
+        },
         ...toFamily(
           patient,
           familyRedFlagAlert({ seniorName: patient.preferredName, sharing, questionText: red.questionText, answer: red.answer }),
@@ -249,19 +282,21 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     const c = pendingCheckin(patient.id);
     if (!c) return [];
     const key = `${patient.id}:${c.date}:again:${messageId}`;
-    const one = (text: string, buttons: string[]): Send[] => [{ chatId, message: { text, buttons }, key }];
+    const one = (step: PromptStep, text: string, buttons: string[]): Send[] => [
+      { chatId, message: { text, buttons }, key, prompt: promptFor(c, step) },
+    ];
     switch (c.step) {
       case "greeting":
-        return one(checkinGreeting(patient.preferredName, c.questionIds.length), [BUTTON.start, BUTTON.notToday]);
+        return one(c.step, checkinGreeting(patient.preferredName, c.questionIds.length), [BUTTON.start, BUTTON.notToday]);
       case "question": {
         const q = questionById(c.questionIds[c.questionIndex]!);
-        return one(q.text, [...q.buttons]);
+        return one(c.step, q.text, [...q.buttons]);
       }
       case "flag_offer":
-        return one(flagOffer(), [BUTTON.tellMeMore, BUTTON.later]);
+        return one(c.step, flagOffer(), [BUTTON.tellMeMore, BUTTON.later]);
       case "flag_detail": {
         const flag = c.pendingFlagId !== null ? getFlag(db, c.pendingFlagId) : undefined;
-        return flag ? one(flagDetail(flag.message), [BUTTON.willAskDoctor, BUTTON.later]) : [];
+        return flag ? one(c.step, flagDetail(flag.message), [BUTTON.willAskDoctor, BUTTON.later]) : [];
       }
       case "done":
         return [];
@@ -306,9 +341,23 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
   }
 
   /**
+   * A tap (or reply) on a message other than the one the check-in is waiting on: an earlier
+   * question, another day's check-in, or a message that carried no check-in buttons. It must not
+   * answer what is pending now. "Not today" from the greeting or any question of the pending
+   * check-in is the exception: it still ends the day.
+   */
+  function isStaleTap(c: CheckinRow, replyTo: string, text: string): boolean {
+    const prompt = getCheckinPrompt(db, replyTo);
+    if (!prompt || prompt.checkinId !== c.id) return true;
+    if (prompt.step === c.step && (c.step !== "question" || prompt.questionIndex === c.questionIndex)) return false;
+    return !(is(text, BUTTON.notToday) && (prompt.step === "greeting" || prompt.step === "question"));
+  }
+
+  /**
    * The paper check's own buttons. A pending read-back takes "Yes" / "No" whatever else is pending.
    * The R6 follow-up ("I'll ask my doctor" / "Later") goes to the paper check unless the check-in
-   * itself is offering a flag, since those buttons belong to that step too.
+   * itself is offering a flag, since those buttons belong to that step too; a tap on a message that
+   * isn't the check-in's own (the R6 message, say) still goes to the paper check.
    */
   function planPaper(patient: CheckinPatient, msg: InboundMessage, fresh: FreshRecord | undefined): Send[] | undefined {
     const chatId = msg.chatId;
@@ -323,7 +372,8 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     }
     if (isPaperFollowUp(msg.text)) {
       const c = pendingCheckin(patient.id);
-      if (c && (c.step === "flag_offer" || c.step === "flag_detail")) return undefined;
+      const forCheckin = c && (c.step === "flag_offer" || c.step === "flag_detail") && !(msg.replyTo && isStaleTap(c, msg.replyTo, msg.text));
+      if (forCheckin) return undefined;
       const scan = pendingFollowUp(db, patient.id);
       if (!scan) return undefined;
       return [...to(paperFlow.followUp(patient.id, scan, msg.text)), ...reprompt(patient, chatId, msg.messageId)];
@@ -341,11 +391,15 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (!c) return []; // free text with nothing pending: memories are a later run
     const chatId = msg.chatId;
     const text = msg.text;
-    const didnt = (buttons: string[]): Send[] => [
+    // A tap on an old message re-sends what is pending instead of answering it.
+    if (msg.replyTo !== undefined && isStaleTap(c, msg.replyTo, text)) return reprompt(patient, chatId, msg.messageId);
+    // "Didn't understand" repeats the step's buttons, so a tap on it answers that step.
+    const didnt = (step: PromptStep, buttons: string[]): Send[] => [
       {
         chatId,
         message: { text: didntUnderstand(buttons), buttons },
         key: `${patient.id}:${c.date}:didnt-understand:${msg.messageId}`,
+        prompt: promptFor(c, step),
       },
     ];
 
@@ -354,18 +408,19 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         if (is(text, BUTTON.notToday)) return notToday(patient, c, chatId);
         if (is(text, BUTTON.start))
           return c.questionIds.length > 0 ? askQuestion(patient, c, 0, chatId) : afterLastQuestion(patient, c, chatId);
-        return didnt([BUTTON.start, BUTTON.notToday]);
+        return didnt(c.step, [BUTTON.start, BUTTON.notToday]);
       }
       case "question": {
         if (is(text, BUTTON.notToday)) return notToday(patient, c, chatId);
         const q = questionById(c.questionIds[c.questionIndex]!);
         const answer = q.buttons.find((b) => is(text, b));
-        if (answer === undefined) return didnt(q.buttons);
+        if (answer === undefined) return didnt(c.step, q.buttons);
         return answerQuestion(patient, c, q, answer, chatId);
       }
       case "flag_offer": {
-        if (is(text, BUTTON.tellMeMore) && c.pendingFlagId !== null) {
-          const flag = getFlag(db, c.pendingFlagId);
+        if (is(text, BUTTON.tellMeMore)) {
+          // No flag left to tell (record consent ended since it was offered): the check-in just ends.
+          const flag = c.pendingFlagId !== null ? getFlag(db, c.pendingFlagId) : undefined;
           if (!flag) return finishCheckedIn(patient, c, chatId);
           markTold(db, flag.flagId, clock.now(), c.date);
           updateCheckin(db, c.id, { step: "flag_detail" });
@@ -374,15 +429,17 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
               chatId,
               message: { text: flagDetail(flag.message), buttons: [BUTTON.willAskDoctor, BUTTON.later] },
               key: `${patient.id}:${c.date}:flag-detail`,
+              prompt: promptFor(c, "flag_detail"),
             },
           ];
         }
         // "Later" leaves the flag new; it is offered again another day. "Not today" here means the same.
         if (is(text, BUTTON.later) || is(text, BUTTON.notToday)) return finishCheckedIn(patient, c, chatId);
-        return didnt([BUTTON.tellMeMore, BUTTON.later]);
+        return didnt(c.step, [BUTTON.tellMeMore, BUTTON.later]);
       }
       case "flag_detail": {
-        if (is(text, BUTTON.willAskDoctor) && c.pendingFlagId !== null) {
+        if (is(text, BUTTON.willAskDoctor)) {
+          if (c.pendingFlagId === null) return finishCheckedIn(patient, c, chatId); // the flag was deleted
           markNoted(db, c.pendingFlagId, clock.now());
           return [
             { chatId, message: { text: flagNotedReply() }, key: `${patient.id}:${c.date}:flag-noted` },
@@ -391,7 +448,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         }
         // "Later" after hearing it leaves the flag told.
         if (is(text, BUTTON.later) || is(text, BUTTON.notToday)) return finishCheckedIn(patient, c, chatId);
-        return didnt([BUTTON.willAskDoctor, BUTTON.later]);
+        return didnt(c.step, [BUTTON.willAskDoctor, BUTTON.later]);
       }
       case "done":
         return [];
@@ -410,8 +467,12 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         raw = await deps.loadSnapshot(patient.finchnodePatientId);
       } catch (error) {
         if (!(error instanceof ConsentInactiveError)) throw error;
-        // Record consent ended: stop reading, delete our copy, tell her and the family.
-        deletePatientSnapshots(db, patientId);
+        // Record consent ended: stop reading, delete our copy (snapshots and the flags from them),
+        // tell her and the family. Chats, check-ins and memories stay.
+        db.transaction(() => {
+          deletePatientSnapshots(db, patientId);
+          deletePatientFlags(db, patientId);
+        })();
         await deliver([
           { chatId, message: { text: recordLinkEndedSenior(patient.preferredName) }, key: `${patientId}:${day}:record-consent-ended` },
           ...toFamily(patient, recordLinkEndedFamily(patient.preferredName), `${patientId}:${day}:record-consent-ended`),
@@ -420,24 +481,29 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       }
 
       const record = normalizeHealthRecord(raw, { rxnav: rxnavCache() });
-      const questions = pickQuestions(record, day);
-      const planned = db.transaction((): DayResult => {
+      // On the record as it stood that day, like the rules and the packet. Red-flag questions
+      // come up when due, from what she answered on earlier days.
+      const questions = pickQuestions(asOf(record, day), day, { history: answerHistory(db, patientId, day) });
+      const questionIds = questions.map((q) => q.id);
+      const checkinId = db.transaction((): number | undefined => {
         // A second startDay may have run while the snapshot loaded.
-        if (getCheckin(db, patientId, day)) return { kind: "already_started" };
+        if (getCheckin(db, patientId, day)) return undefined;
         const now = clock.now();
         saveSnapshot(db, { patientId, fetchedAt: now, syncStatus: raw.meta.syncStatus, raw });
         syncFlags(db, patientId, runRules({ record, checkinDate: day }), now);
-        insertCheckin(db, { patientId, date: day, questionIds: questions.map((q) => q.id), sentAt: now });
-        return { kind: "sent", questionIds: questions.map((q) => q.id) };
+        return insertCheckin(db, { patientId, date: day, questionIds, sentAt: now });
       })();
-      if (planned.kind !== "sent") return planned;
+      if (checkinId === undefined) return { kind: "already_started" };
 
-      await messenger.send(
-        chatId,
-        { text: checkinGreeting(patient.preferredName, questions.length), buttons: [BUTTON.start, BUTTON.notToday] },
-        `${patientId}:${day}:greeting`,
-      );
-      return planned;
+      await deliver([
+        {
+          chatId,
+          message: { text: checkinGreeting(patient.preferredName, questions.length), buttons: [BUTTON.start, BUTTON.notToday] },
+          key: `${patientId}:${day}:greeting`,
+          prompt: { checkinId, step: "greeting", questionIndex: 0 },
+        },
+      ]);
+      return { kind: "sent", questionIds };
     },
 
     async handleInbound(msg: InboundMessage): Promise<void> {

@@ -67,6 +67,13 @@ describe("RelayMessenger", () => {
     expect(result).not.toHaveProperty("buttons");
   });
 
+  it("needs only the chats slice of the client (the inbox sends the family welcome with it)", async () => {
+    const relay = fakeRelay();
+    const result = await new RelayMessenger({ chats: relay.chats }).send(CHAT, { text: "Hello." }, "welcome:harriet:sarah.demo");
+    expect(result.messageId).toBe("m-1");
+    expect(relay.chats.messages.send).toHaveBeenCalledWith(CHAT, { message: { parts: [{ type: "text", value: "Hello." }], idempotency_key: "welcome:harriet:sarah.demo" } });
+  });
+
   it("checks Relay's button limits before calling the API", async () => {
     const relay = fakeRelay();
     const messenger = new RelayMessenger(relay);
