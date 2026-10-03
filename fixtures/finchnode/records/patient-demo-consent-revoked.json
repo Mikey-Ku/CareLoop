@@ -1,0 +1,21 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/users/patient-demo-consent-revoked/records"
+  },
+  "status": 410,
+  "headers": {
+    "ratelimit-limit": "120",
+    "ratelimit-remaining": "119",
+    "ratelimit-reset": "60",
+    "x-finchnode-scenario": "consent-revoked"
+  },
+  "body": {
+    "error": {
+      "type": "invalid_request_error",
+      "code": "consent_inactive",
+      "message": "The patient revoked sharing for this application. Stop reading this subject until a new consent is granted.",
+      "requestId": "demo_req_Q9ByuBZ2HI09"
+    }
+  }
+}

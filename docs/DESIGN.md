@@ -29,16 +29,17 @@ Backend parts:
 
 | Layer | Choice | Why |
 | --- | --- | --- |
-| Runtime | Node 20+, TypeScript (strict) | Relay's SDK and its ElevenLabs bridge are TypeScript packages |
+| Runtime | Node 22.18+, TypeScript (strict), `.ts` run directly by Node's type stripping (no build step, no tsx) | Relay's SDK and its ElevenLabs bridge are TypeScript packages; Node 20 reached end of life in April 2026 |
 | Web server | Express | Webhook routes need the raw body for signature checks |
 | Database | SQLite via `better-sqlite3` | One file, no setup |
 | Validation | `zod` | Validate FinchNode and Relay payloads |
 | Tests | `vitest` | Fast unit tests for the client and rules |
+| Lint | `tsc --noEmit` (`npm run lint`) | Typecheck only; no ESLint dependency |
 | Relay | `@relaymessenger/sdk`, `@relaymessenger/elevenlabs`, CLI `npx relaymessenger` | Chat, buttons, calls, media, voice memos |
 | Voice | ElevenLabs Agent (configured in the ElevenLabs dashboard) | Warm voice; context passed at call start |
 | LLM | Anthropic Claude via `@anthropic-ai/sdk` | Chat wording and vision for paper photos |
 | Vitals | Presage SmartSpectra C++ SDK with custom frame input, as a sidecar in `services/presage-bridge/` | Takes raw frames from the Relay video call. Final choice after the spike |
-| Drug names | NLM RxNav REST API (no key) | Map free-text medication names to RxNorm codes |
+| Drug names | NLM RxNav REST API (no key) | Map free-text medication names to RxNorm codes. Exact normalized-name match only (`rxcui.json?search=2`); approximate search guesses wrong drugs |
 | Package manager | npm | Default with Node |
 
 ## Repo layout
@@ -131,6 +132,7 @@ A rule result is recomputed on every snapshot and shown to no one. A rule result
 | cleared | A later snapshot no longer triggers the rule; no message is sent | |
 
 - Changed evidence (for example a new, lower eGFR) is a new fingerprint, so a new flag in status `new`.
+- A rule that returns `skipped` (or isn't run, like R6 on its own) leaves open flags alone; only `checked` or a different fingerprint clears them. A partial sync can't clear and re-raise flags.
 - At most one new flag is offered per day, apart from the 3 questions, with buttons "Tell me more" and "Later". "Later" keeps it `new` for another day.
 - Family sees flags only at sharing level `all`, inside the daily status. Flags never send an alert.
 - Red flags (below) are a different thing and skip this lifecycle.
@@ -190,9 +192,9 @@ For calls, the packet goes to ElevenLabs as dynamic variables through the bridge
 | checkins | id, patient_id, date, status (sent, answered, skipped, missed), mood, answers_json |
 | vitals_readings | id, patient_id, taken_at, heart_rate, breathing_rate, method (relay_call, scan_screen), confidence |
 | memories | id, patient_id, text, created_at, deleted_at |
-| flags | id, patient_id, rule_id, fingerprint, status (new, told, noted, cleared), severity, evidence_json, created_at, told_at, noted_at, cleared_at |
+| flags | id, patient_id, rule_id, fingerprint, status (new, told, noted, cleared), severity, message, evidence_json, created_at, offered_on, told_on, told_at, noted_at, cleared_at |
 | paper_scans | id, patient_id, relay_attachment_id, extracted_json, confirmed_at, discrepancies_json |
-| family_messages | id, patient_id, direction, kind, relay_message_id, played_at |
+| family_messages | id, patient_id, direction (to_senior, to_family), kind (voice, text, photo), from_name, relay_message_id, created_at, played_at |
 
 ## Relay facts (from docs.relayapp.im)
 

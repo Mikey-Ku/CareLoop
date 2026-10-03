@@ -59,7 +59,7 @@ See `docs/DESIGN.md` sections "Architecture", "FinchNode", "Rules engine", "Cont
 
 ## Tech stack
 
-Node 20+ and TypeScript (strict), Express, SQLite via `better-sqlite3`, `zod`, `vitest`, `@relaymessenger/sdk`, `@relaymessenger/elevenlabs`, `@anthropic-ai/sdk`, NLM RxNav REST API, Presage SmartSpectra SDK (later run). Full table in `docs/DESIGN.md`. Use npm.
+Node 22.18+ and TypeScript (strict, `.ts` run directly), Express, SQLite via `better-sqlite3`, `zod`, `vitest`, `@relaymessenger/sdk`, `@relaymessenger/elevenlabs`, `@anthropic-ai/sdk`, NLM RxNav REST API, Presage SmartSpectra SDK (later run). Full table in `docs/DESIGN.md`. Use npm.
 
 ## Build order for THIS run
 

@@ -12,12 +12,33 @@ All data in this project is synthetic.
 
 ## Setup
 
-Coming in run 1. See `CLAUDE_CODE_BRIEF.md`.
+Requires Node 22.18 or newer: the server runs its `.ts` files directly through Node's built-in type stripping, with no build step.
+
+```sh
+cd apps/server
+npm install
+cp ../../.env.example ../../.env   # optional for run 1
+```
+
+The `.env` file lives at the repo root. Run 1 needs no keys: the FinchNode demo API is open and every other value has a default.
+
+## Usage
+
+All commands run in `apps/server`.
+
+| Command | What it does |
+| --- | --- |
+| `npm test` | Runs the test suite (vitest). |
+| `npm run lint` | Typechecks the project (`tsc --noEmit`). |
+| `npm run packet -- patient-demo-polypharmacy` | Prints Harriet's context packet built from the recorded fixtures. Add `--live` to read the FinchNode demo API instead. |
+| `npm run record-fixtures` | Re-records the fixtures in `fixtures/` from the FinchNode demo API. |
+| `npm run dev` | Starts the server on `PORT` (default 3000). For now it serves only `GET /health`; `/webhooks/relay` answers 501 until run 2. |
 
 ## How it works
 
 - What and why: [docs/BRIEF.md](docs/BRIEF.md)
 - How: [docs/DESIGN.md](docs/DESIGN.md)
+- Glossary of domain terms: [CONTEXT.md](CONTEXT.md)
 
 ## Working with Claude Code
 

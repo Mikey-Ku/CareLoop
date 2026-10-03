@@ -1,0 +1,21 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/users/patient-demo-consent-partial/records?categories=labs"
+  },
+  "status": 403,
+  "headers": {
+    "ratelimit-limit": "120",
+    "ratelimit-remaining": "119",
+    "ratelimit-reset": "60",
+    "x-finchnode-scenario": "consent-partial"
+  },
+  "body": {
+    "error": {
+      "type": "invalid_request_error",
+      "code": "consent_scope_exceeded",
+      "message": "The consent receipt does not cover: labs. Request only granted categories.",
+      "requestId": "demo_req_SrOUHNmb-J5d"
+    }
+  }
+}

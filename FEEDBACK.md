@@ -10,6 +10,15 @@ Team notes between Claude Code runs. Claude Code reads this at the start of ever
 
 (Claude Code writes questions here when it hits real ambiguity.)
 
+- [ ] R5 refill grace period: DESIGN.md says "days supply plus a grace period" but gives no number. Run 1 uses `refillGraceDays: 7` in `apps/server/src/rules/config.ts` as a placeholder. R5 is skipped for Harriet anyway (one fill per drug). Pick a value.
+- [ ] Atrial fibrillation and camera heart rate: Harriet has AFib, the rhythm where camera heart-rate estimates are least reliable. Should the vitals call say so, or skip the usual-range comparison for patients with AFib? Default for now: no special handling.
+- [ ] Red-flag questions in rotation: "trouble breathing lying flat" and "unusual bleeding" rotate like every other question, so Harriet is asked each only some days. Should red-flag questions be asked daily (using up 2 of the 3 slots)? Default for now: rotate.
+- [ ] R4 above the range: a potassium above the top of its reference range (say 5.5 with range to 5.1) flags today, since the check is "at or above the start of the top quarter". Safer reading of DESIGN.md, but confirm.
+- [ ] Records dated after the check-in date: rules don't ignore labs or fills dated later than the pinned demo date. Harriet has none. Should they be excluded?
+- [ ] Flags when record consent ends: snapshots are deleted on a 410, but stored flags are kept. Delete them too?
+- [ ] Family messages: run 1 picked `direction` to_senior/to_family and `kind` voice/text/photo in the schema. Check against how the Relay agent stores messages in run 2.
+- [ ] Branches: run 1 was built on branch `claude/workflow-review-deep-dive-3eaa2f`, not `main`. Also, local `main` has commit d7a795a (docs) that was never pushed to origin. Merge or fast-forward when ready.
+
 ## Team tasks (humans only, not for Claude Code)
 
 - [ ] Relay: create an agent in Relay Console and save its Agent Token; create a webhook subscription secret. Put `RELAY_AGENT_TOKEN` and `RELAY_WEBHOOK_SECRET` in `.env`.

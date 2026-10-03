@@ -1,0 +1,22 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/users/patient-demo-rate-limited/records"
+  },
+  "status": 429,
+  "headers": {
+    "retry-after": "1",
+    "ratelimit-limit": "1",
+    "ratelimit-remaining": "0",
+    "ratelimit-reset": "1",
+    "x-finchnode-scenario": "rate-limited"
+  },
+  "body": {
+    "error": {
+      "type": "invalid_request_error",
+      "code": "rate_limited",
+      "message": "Scenario rate-limited: retry after the indicated interval.",
+      "requestId": "demo_req_aONFvzIABuGk"
+    }
+  }
+}
