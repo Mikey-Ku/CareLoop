@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { hasUsableVitals, runPresageVideo } from "../vitals/presage-file.ts";
 
-const USAGE = "usage: npm run vitals:video -- <video.mp4> [--timeout-ms milliseconds]";
+const USAGE = "usage: npm run vitals:video -- <video.mp4> [--timeout-ms milliseconds] [--interframe-delay-ms milliseconds]";
 
 export async function main(argv: string[], env: Record<string, string | undefined> = process.env): Promise<number> {
   let parsed;
@@ -10,7 +10,11 @@ export async function main(argv: string[], env: Record<string, string | undefine
     parsed = parseArgs({
       args: argv,
       allowPositionals: true,
-      options: { "timeout-ms": { type: "string" }, help: { type: "boolean", short: "h", default: false } },
+      options: {
+        "timeout-ms": { type: "string" },
+        "interframe-delay-ms": { type: "string" },
+        help: { type: "boolean", short: "h", default: false },
+      },
     });
   } catch (error) {
     console.error(`error: ${error instanceof Error ? error.message : String(error)}\n${USAGE}`);
@@ -31,6 +35,12 @@ export async function main(argv: string[], env: Record<string, string | undefine
     console.error("error: --timeout-ms must be a positive integer");
     return 2;
   }
+  const delayText = parsed.values["interframe-delay-ms"];
+  const interframeDelayMs = delayText === undefined ? undefined : Number(delayText);
+  if (interframeDelayMs !== undefined && (!Number.isInteger(interframeDelayMs) || interframeDelayMs < 0)) {
+    console.error("error: --interframe-delay-ms must be a nonnegative integer");
+    return 2;
+  }
 
   const result = !existsSync(videoPath)
     ? {
@@ -42,7 +52,12 @@ export async function main(argv: string[], env: Record<string, string | undefine
         validation: [],
         errors: [{ code: "video_not_found", message: `Video file does not exist: ${videoPath}` }],
       }
-    : await runPresageVideo({ videoPath, apiKey: env.PRESAGE_API_KEY, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
+    : await runPresageVideo({
+        videoPath,
+        apiKey: env.PRESAGE_API_KEY,
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        ...(interframeDelayMs === undefined ? {} : { interframeDelayMs }),
+      });
 
   console.log(JSON.stringify(result, null, 2));
   return hasUsableVitals(result) && result.errors.length === 0 ? 0 : 1;

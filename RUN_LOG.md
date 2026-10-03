@@ -181,7 +181,8 @@ Retest on the phone with `FOLLOW_UP_DELAY_MINUTES=2`; add a second phone as fami
 - Documented the spike result and current limitations in `FEEDBACK.md`.
 
 **What was skipped or changed from spec:**
-- No real video was committed or processed because no local clip or Presage API key was available. The integration is ready for the human-provided clip and key.
+- No real video was committed. A human-provided 1280 x 720, 29.98 second clip was later smoke-tested with an authorized key; the SDK session reached model loading but produced no readings before model loading was cancelled.
+- The file runner now defaults to 33 ms interframe pacing and exposes `--interframe-delay-ms`, giving the remote model time to load instead of playing a short clip immediately at maximum speed.
 - The Relay frame adapter is intentionally not wired into the live call handler because the call/vitals handler does not exist yet and the real `VideoStream` payload shape is unverified.
 - `.env.example` already contained the required empty `PRESAGE_API_KEY` entry, so it required no change.
 
@@ -196,6 +197,6 @@ Retest on the phone with `FOLLOW_UP_DELAY_MINUTES=2`; add a second phone as fami
 - Pending: `build: lane3: add Presage video spike`.
 
 **Recommended next step:**
-Put a local 30 to 60 second face clip outside Git, set `PRESAGE_API_KEY` in `.env`, then run `npm run vitals:video -- /absolute/path/to/face.mp4`. After that, connect the verified Relay `VideoStream` frame shape to `createRelayVideoFrameAdapter`.
+Re-record a well-lit face clip longer than 30 seconds, set `PRESAGE_API_KEY` in `.env`, then run `npm run vitals:video -- /absolute/path/to/face.mp4`. If model loading still cancels, verify the Presage account/key has access to the remote model service before connecting the verified Relay `VideoStream` frame shape to `createRelayVideoFrameAdapter`.
 
 **Open questions:** Confirm the live Relay `VideoStream` pixel format and whether it supplies a usable source timestamp; if it supplies I420, add and test a conversion path before sending frames to SmartSpectra.

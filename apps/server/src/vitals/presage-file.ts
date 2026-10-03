@@ -4,7 +4,7 @@ import { mergeMetricSnapshots, normalizePresageMetrics, resultFromSnapshot } fro
 import { emptyVitalsResult, type VitalsError, type VitalsResult, type ValidationEvent } from "./types.ts";
 
 export type PresageSession = {
-  useFile(videoPath: string): PresageSession;
+  useFile(videoPath: string, options?: { interframeDelayMs?: number }): PresageSession;
   start(): void;
   destroy(): Promise<void>;
   on(event: "processingStatus", callback: (status: number) => void): PresageSession;
@@ -21,6 +21,8 @@ export type PresageFileOptions = {
   videoPath: string;
   apiKey: string | undefined;
   timeoutMs?: number;
+  /** Defaults to 33 ms so remote model loading can finish before a short clip ends. */
+  interframeDelayMs?: number;
   sdkFactory?: PresageSdkFactory;
 };
 
@@ -72,7 +74,7 @@ export async function runPresageVideo(options: PresageFileOptions): Promise<Vita
       }
     });
 
-    session.useFile(options.videoPath);
+    session.useFile(options.videoPath, { interframeDelayMs: options.interframeDelayMs ?? 33 });
     session.start();
     const timeoutMs = options.timeoutMs ?? 120_000;
     timer = setTimeout(() => {

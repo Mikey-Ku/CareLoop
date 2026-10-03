@@ -17,7 +17,7 @@ class FakeSession implements PresageSession {
     return this;
   }
 
-  useFile(): PresageSession {
+  useFile(_videoPath?: string, _options?: { interframeDelayMs?: number }): PresageSession {
     return this;
   }
 

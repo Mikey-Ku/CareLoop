@@ -39,9 +39,9 @@ Open:
 
 - Implemented a file-based SmartSpectra runner with `@smartspectra/node-sdk` 3.4.0. It requests pulse and breathing metrics, decodes the SDK protobuf messages, emits normalized JSON, records validation and SDK errors, and exits nonzero when either required reading is missing.
 - Added a Relay `VideoStream` frame adapter design. It maps RGB, BGR, RGBA, BGRA, NV12, NV21 and YUYV, preserves dimensions and stride, supplies strictly increasing monotonic timestamps, and rejects I420 until a tested conversion path exists.
-- Video characteristics: no real clip was available during this run. The spike expects a local 30 to 60 second, well-lit, mostly still MP4/H.264 face clip. Real video must stay local and out of Git.
-- Readings produced: no live Presage reading was attempted without a local clip and API key. Offline unit coverage decodes a representative packet of 73 bpm pulse and 15 breaths/min with confidence 76, but this is a decoder test, not a physiological measurement.
-- Limitations: SmartSpectra authenticates against its service, so the real clip run needs `PRESAGE_API_KEY` and network access. Relay's actual `VideoStream` payload shape still needs confirmation on a live call. Harriet's AFib reading remains an estimate and must not be compared with her usual range.
+- Video characteristics: the supplied local clip is 1280 x 720 MP4 with MPEG-4 video and AAC audio, 29.98 seconds long. The runner now defaults to 33 ms interframe pacing so remote model loading can finish before a short clip ends. Real video must stay local and out of Git.
+- Readings produced: the first run with the key including trailing punctuation returned HTTP 401. The retry without punctuation authenticated far enough to start the SDK, but model loading was cancelled before metrics were emitted. Offline unit coverage decodes a representative packet of 73 bpm pulse and 15 breaths/min with confidence 76, but this is a decoder test, not a physiological measurement.
+- Limitations: SmartSpectra authenticates against its service, so the real clip run needs a valid `PRESAGE_API_KEY` and network access. The clip is just under the recommended 30-second minimum and should be re-recorded longer for the next run. Relay's actual `VideoStream` payload shape still needs confirmation on a live call. Harriet's AFib reading remains an estimate and must not be compared with her usual range.
 
 ## Team tasks (humans only, not for Claude Code)
 
