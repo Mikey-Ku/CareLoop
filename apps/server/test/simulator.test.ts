@@ -9,8 +9,15 @@ import {
   familyCrisisAlert,
   familyDailyStatus,
   familyRedFlagAlert,
+  flagOffer,
+  followUpReply,
+  keepAnEye,
+  keepAnEyeReply,
   noteSaved,
+  notedForDoctor,
   redFlagAdvice,
+  symptomNotedReply,
+  withLead,
 } from "../src/checkin/copy.ts";
 import { painter, renderMessage, renderTable, useColor } from "../src/cli/sim-render.ts";
 import { SimClock, nextDay, parseScript, runSimulation } from "../src/cli/simulator.ts";
@@ -87,7 +94,7 @@ describe("demo scripts", () => {
     expect(lines).toContain("[sim] Check-in for 2026-09-01 sent with 3 questions: hf-breathing-lying-flat, anticoagulant-bleeding, dizzy-on-standing.");
     expectInOrder(bubbles, [
       { chat: PHONE, text: /Good morning, Harriet/ },
-      { chat: PHONE, text: /trouble breathing/ },
+      { chat: PHONE, text: /breathing last night/ },
       { chat: PHONE, text: /bruising or bleeding/ },
       { chat: PHONE, text: /dizzy/ },
       { chat: PHONE, text: /worth asking your doctor/ },
@@ -104,7 +111,7 @@ describe("demo scripts", () => {
 
   // The wording of the alert and the status belongs to src/checkin/copy.ts; these compare with it.
   const alertAt = (sharing: "status" | "all") =>
-    familyRedFlagAlert({ seniorName: "Harriet", sharing, questionText: BREATHING_TEXT, answer: "Yes" });
+    familyRedFlagAlert({ seniorName: "Harriet", sharing, questionText: BREATHING_TEXT, answer: "Yes, it was hard" });
   const checkedIn = familyDailyStatus({ seniorName: "Harriet", sharing: "status", outcome: "checked_in", answers: [], flags: [] });
 
   it("harriet-red-flag (her first check-in, no --day): calm advice, alert to the family, the check-in goes on, no flag offer, a follow-up", async () => {
@@ -113,8 +120,8 @@ describe("demo scripts", () => {
     expect(lines.slice(0, 3).join("\n")).toMatch(/2026-09-01/);
     expectInOrder(bubbles, [
       { chat: PHONE, text: /Good morning, Harriet/ },
-      { chat: PHONE, text: /trouble breathing/ },
-      { chat: PHONE, text: /^Thank you for telling me, Harriet\. That sounds uncomfortable\..*911\. When you're ready, I have 2 more questions/ },
+      { chat: PHONE, text: /breathing last night/ },
+      { chat: PHONE, text: /^Thank you for telling me, Harriet\. I've let Sarah know\..*if it gets much worse, call 911\. When you're ready, I have 2 more questions/i },
       { chat: FAMILY, text: /^Harriet reported/ },
       { chat: PHONE, text: /bruising or bleeding/ },
       { chat: PHONE, text: /dizzy/ },
@@ -139,9 +146,9 @@ describe("demo scripts", () => {
     expect(exitCode).toBe(0);
     const words = "Yes but it was weirder I don't know how to explainit";
     expectInOrder(bubbles, [
-      { chat: PHONE, text: /trouble breathing/ },
+      { chat: PHONE, text: /breathing last night/ },
       { chat: PHONE, text: new RegExp(`^${noteSaved("Harriet").replace(/[.?]/g, "\\$&")}$`) },
-      { chat: PHONE, text: /^Thank you for telling me, Harriet\. That sounds uncomfortable\./ },
+      { chat: PHONE, text: /^Thank you for telling me, Harriet\. I've let Sarah know\./ },
       { chat: FAMILY, text: /^Harriet reported/ },
       { chat: PHONE, text: /bruising or bleeding/ },
       { chat: PHONE, text: /dizzy/ },
@@ -152,10 +159,14 @@ describe("demo scripts", () => {
     ]);
     // Detail never re-sends the same confirm; the buttons come back with the note.
     expect(bubbles.some((b) => /^You wrote:/.test(b.text))).toBe(false);
-    expect(bubbles.find((b) => b.text === noteSaved("Harriet"))?.buttons).toEqual(["No", "Yes"]);
-    expect(bubbles.find((b) => b.chat === PHONE && /That sounds uncomfortable/.test(b.text))?.text).toBe(redFlagAdvice("Harriet", ["Sarah"], 2));
+    expect(bubbles.find((b) => b.text === noteSaved("Harriet"))?.buttons).toEqual(["Fine", "A little hard", "Yes, it was hard"]);
+    expect(bubbles.find((b) => b.chat === PHONE && /I've let Sarah know/.test(b.text))?.text).toBe(redFlagAdvice("Harriet", ["Sarah"], 2));
     const alert = bubbles.find((b) => b.chat === FAMILY && /^Harriet reported/.test(b.text));
-    expect(alert?.text).toBe(familyRedFlagAlert({ seniorName: "Harriet", sharing: "all", questionText: BREATHING_TEXT, answer: "Yes", words }));
+    expect(alert?.text).toBe(familyRedFlagAlert({ seniorName: "Harriet", sharing: "all", questionText: BREATHING_TEXT, answer: "Yes, it was hard", words }));
+    // About the same on the follow-up is level 2: keep an eye on it, no 911.
+    const lastToHer = bubbles.filter((b) => b.chat === PHONE).at(-1)?.text;
+    expect(lastToHer).toBe(followUpReply("Harriet", "same", "breathing"));
+    expect(lastToHer).not.toMatch(/911/);
     const status = bubbles.find((b) => b.chat === FAMILY && /checked in today/.test(b.text))?.text ?? "";
     expect(status).toContain('"Not really but I have more info"');
     expect(status).toContain(`"${words}"`);
@@ -167,12 +178,12 @@ describe("demo scripts", () => {
     const { exitCode, lines, bubbles } = await simulate("harriet-crisis.txt");
     expect(exitCode).toBe(0);
     expectInOrder(bubbles, [
-      { chat: PHONE, text: /trouble breathing/ },
+      { chat: PHONE, text: /breathing last night/ },
       { chat: PHONE, text: /988/ },
       { chat: FAMILY, text: /very hard time/ },
       { chat: PHONE, text: /How are you feeling now\?/ },
       { chat: PHONE, text: /988 any time/ },
-      { chat: PHONE, text: /trouble breathing/ },
+      { chat: PHONE, text: /breathing last night/ },
       { chat: PHONE, text: /bruising or bleeding/ },
       { chat: PHONE, text: /dizzy/ },
       { chat: PHONE, text: /^That's everything for today, Harriet\./ },
@@ -233,7 +244,7 @@ describe("demo scripts", () => {
     const { exitCode, lines, bubbles } = await simulate("harriet-two-days.txt");
     expect(exitCode).toBe(0);
     expectInOrder(bubbles, [
-      { chat: PHONE, text: /trouble breathing/ },
+      { chat: PHONE, text: /breathing last night/ },
       { chat: PHONE, text: /eGFR/ },
       { chat: FAMILY, text: /Harriet checked in/ },
       { chat: PHONE, text: /Good morning, Harriet/ },
@@ -246,7 +257,7 @@ describe("demo scripts", () => {
     ]);
     expect(lines).toContain("===== 2026-09-02 =====");
     expect(lines).toContain("[sim] Check-in for 2026-09-02 sent with 3 questions: hf-ankle-swelling, morning-medicines, mood.");
-    expect(bubbles.filter((b) => /trouble breathing|bruising or bleeding/.test(b.text))).toHaveLength(2); // day 1 only
+    expect(bubbles.filter((b) => /breathing last night|bruising or bleeding/.test(b.text))).toHaveLength(2); // day 1 only
     expect(bubbles.filter((b) => /eGFR/.test(b.text))).toHaveLength(1);
     expect(lines.find((l) => /^\d+\s+R1\s/.test(l))).toMatch(/noted/);
     expect(lines.find((l) => /^\d+\s+R3\s/.test(l))).toMatch(/noted/);
@@ -270,6 +281,34 @@ describe("demo scripts", () => {
     expect(lines.find((l) => /^\d+\s+R1\s/.test(l))).toMatch(/new/);
     // A paper check is not a check-in: the family heard only her "not today".
     expect(bubbles.filter((b) => b.chat === FAMILY)).toHaveLength(1);
+  });
+
+  it("harriet-ladder: levels 0, 1, 2 and 3 in one day, each with its own reaction; 911 only at 3", async () => {
+    const { exitCode, lines, bubbles } = await simulate("harriet-ladder.txt", { sharing: "all" });
+    expect(exitCode).toBe(0);
+    const bleeding = QUESTION_BANK.find((q) => q.id === "anticoagulant-bleeding")!.text;
+    const dizzy = QUESTION_BANK.find((q) => q.id === "dizzy-on-standing")!.text;
+    const phone = bubbles.filter((b) => b.chat === PHONE).map((b) => b.text);
+    // 0: Fine on breathing, straight to the next question.
+    expect(phone).toContain(bleeding);
+    // 2: A little bruising, folded into the next question; a follow-up; no alert.
+    expect(phone).toContain(withLead(keepAnEye("Harriet"), dizzy));
+    expect(lines.some((l) => /Follow-up check-in scheduled for 12:03 \(anticoagulant-bleeding\)/.test(l))).toBe(true);
+    // 1: Sometimes on dizziness, folded into the flag offer (still offered on a level-2 day).
+    expect(phone).toContain(withLead(notedForDoctor(), flagOffer()));
+    expect(phone).toContain(checkinDoneAfterConcern("Harriet"));
+    // Her knee, in chat: level 1.
+    expect(phone).toContain(symptomNotedReply("Harriet", ["knee pain"]));
+    // 3: Worse on the follow-up.
+    expectInOrder(bubbles, [
+      { chat: FAMILY, text: /Harriet mentioned some bruising or bleeding \(we're keeping an eye on it\)\./ },
+      { chat: PHONE, text: /How is the bruising or bleeding now\?/ },
+      { chat: PHONE, text: /^Thank you for telling me, Harriet\. I've let Sarah know\. Please call your doctor today about this\. If it gets much worse, call 911\.$/ },
+      { chat: FAMILY, text: /feels worse than earlier today/ },
+    ]);
+    // 911 appears once in her chat, at level 3; Sarah got no alert before it.
+    expect(phone.filter((t) => /911/.test(t))).toHaveLength(1);
+    expect(bubbles.filter((b) => b.chat === FAMILY).map((b) => b.text)).toHaveLength(2);
   });
 
   it("harriet-sharing: menu mid check-in, the question comes back, family told, status at all, then back to status", async () => {
@@ -330,28 +369,41 @@ describe("simulator inputs", () => {
     expect(lines.some((l) => /^\[sim\] Free text on: what she types is read by fake/.test(l))).toBe(true);
     const list = bubbles(lines);
     expectInOrder(list, [
-      { chat: PHONE, text: /trouble breathing/ },
-      { chat: PHONE, text: /^You wrote: "nah fine, had to prop myself up on pillows"\nJust to check: Did you have trouble breathing/ },
+      { chat: PHONE, text: /breathing last night/ },
+      { chat: PHONE, text: /^You wrote: "nah fine, had to prop myself up on pillows"\nJust to check: How was your breathing last night/ },
       { chat: PHONE, text: /bruising or bleeding/ },
       { chat: PHONE, text: /dizzy when standing/ },
       { chat: PHONE, text: /worth asking your doctor/ },
     ]);
-    expect(list.find((b) => /^You wrote/.test(b.text))?.buttons).toEqual(["No", "Yes"]);
+    expect(list.find((b) => /^You wrote/.test(b.text))?.buttons).toEqual(["Fine", "A little hard", "Yes, it was hard"]);
     expect(lines).toContain(`[sim] Harriet's phone shows "Reading your message".`);
     expect(llm.classifyCalls.map((c) => c.message)).toEqual(["nah fine, had to prop myself up on pillows", "only when I get up too fast"]);
   });
 
   it("/as stands in for the LLM on the next typed message only; a bad kind is an error", async () => {
-    const { exitCode, lines, bubbles } = await run(["1", "/as answer No", "nah I slept fine", "/as medicine_question", "should I stop the aspirin?", "/as nonsense"]);
+    const { exitCode, lines, bubbles } = await run(["1", "/as answer Fine", "nah I slept fine", "/as medicine_question", "should I stop the aspirin?", "/as nonsense"]);
     expect(exitCode).toBe(1);
     expectInOrder(bubbles, [
-      { chat: PHONE, text: /trouble breathing/ },
-      // On a red-flag question even the stand-in's "No" goes back to her for one tap.
+      { chat: PHONE, text: /breathing last night/ },
+      // On a red-flag question even the stand-in's "Fine" goes back to her for one tap.
       { chat: PHONE, text: /^You wrote: "nah I slept fine"/ },
       { chat: PHONE, text: /good question for your doctor or pharmacist/ },
-      { chat: PHONE, text: /trouble breathing/ },
+      { chat: PHONE, text: /breathing last night/ },
     ]);
     expect(lines.some((l) => /usage: \/as </.test(l))).toBe(true);
+  });
+
+  it("/as takes symptoms after |: topic, amount, change; a bad amount or change is an error", async () => {
+    const { exitCode, lines, bubbles } = await run(["/as chat | knee pain, a_lot, same", "my knee really hurts", "/as chat | knee, lots", "/as chat | knee, a_little, sideways"]);
+    expect(exitCode).toBe(1);
+    expect(lines).toContain("[sim] Her next typed message is read as chat, mentioning knee pain (a lot, same) (a stand-in for the LLM).");
+    // "My knee really hurts" (a lot): level 2, keep an eye on it, a follow-up; no 911. Then the greeting again.
+    expectInOrder(bubbles, [
+      { chat: PHONE, text: new RegExp(`^${keepAnEyeReply("Harriet").replace(/[.?']/g, "\\$&")}$`) },
+      { chat: PHONE, text: /^Good morning, Harriet/ },
+    ]);
+    expect(lines.some((l) => /Follow-up check-in scheduled for \d\d:\d\d \(knee pain\)/.test(l))).toBe(true);
+    expect(lines.filter((l) => /usage: \/as </.test(l))).toHaveLength(2);
   });
 
   it("/later with no follow-up waiting just says so", async () => {
@@ -401,12 +453,12 @@ describe("simulator inputs", () => {
     const { exitCode, bubbles } = await run(["1", "/sharing", "/sharing status_vitals", "1"]);
     expect(exitCode).toBe(0);
     expectInOrder(bubbles, [
-      { chat: PHONE, text: /trouble breathing/ },
+      { chat: PHONE, text: /breathing last night/ },
       { chat: PHONE, text: /You decide how much your family sees/ },
       { chat: PHONE, text: /You decide how much your family sees/ },
       { chat: PHONE, text: /^Done\./ },
       { chat: FAMILY, text: /changed what you see here/ },
-      { chat: PHONE, text: /trouble breathing/ },
+      { chat: PHONE, text: /breathing last night/ },
       { chat: PHONE, text: /bruising or bleeding/ },
     ]);
   });
@@ -415,10 +467,10 @@ describe("simulator inputs", () => {
     const { exitCode, lines, bubbles } = await run(["1", "/paper", "2", "1"]);
     expect(exitCode).toBe(0);
     expectInOrder(bubbles, [
-      { chat: PHONE, text: /trouble breathing/ },
+      { chat: PHONE, text: /breathing last night/ },
       { chat: PHONE, text: /Here's what I read/ },
       { chat: PHONE, text: /doctor or pharmacist/ },
-      { chat: PHONE, text: /trouble breathing/ },
+      { chat: PHONE, text: /breathing last night/ },
       { chat: PHONE, text: /bruising or bleeding/ },
     ]);
     expect(lines.some((l) => /nothing was compared/.test(l))).toBe(true);

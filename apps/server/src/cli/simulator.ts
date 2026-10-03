@@ -13,7 +13,17 @@ import { ConsentInactiveError, FinchNodeClient } from "../finchnode/client.ts";
 import { FIXTURES_DIR, REPO_ROOT, hasRecordedSnapshot, loadRecorded, loadRxNavCache, replayFetch } from "../finchnode/fixtures.ts";
 import { normalizeHealthRecord, type PatientRecord } from "../finchnode/normalize.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
-import { LlmUnavailableError, MESSAGE_KINDS, type LlmClient, type MessageClassification, type MessageKind } from "../llm/types.ts";
+import {
+  LlmUnavailableError,
+  MESSAGE_KINDS,
+  type Amount,
+  type Change,
+  type LlmClient,
+  type MessageClassification,
+  type MessageKind,
+  type SymptomMention,
+} from "../llm/types.ts";
+import { BUTTON_LEVELS, TYPED_LEVELS } from "../checkin/severity.ts";
 import { patientIdFor } from "../patient-id.ts";
 import { FakeMessenger } from "../relay/fake-messenger.ts";
 import type { InboundMessage, SentMessage } from "../relay/messenger.ts";
@@ -33,8 +43,9 @@ import { HELP_LINES, clockTime, painter, renderMessage, renderTable, type Painte
 // Free text: with `llm` (npm run simulate -- --llm, real Gemini from .env) what she
 // types is read as in the agent; without it, buttons only and fixed replies (the safety
 // screen and an explicit yes on a red-flag question still work, as they need no LLM).
-// `/as <kind> [answer]` stands in for the LLM on the next typed message, so demo scripts
-// show each kind of reaction offline and the same way every run.
+// `/as <kind> [answer] [| topic, amount, change]...` stands in for the LLM on the next typed
+// message, so demo scripts show each kind of reaction (and each severity level) offline and the
+// same way every run.
 //
 // Follow-ups: after a red flag or a safety hit the engine schedules a follow-up check-in
 // some hours later; /later jumps the clock to it and runs the follow-up job.
@@ -216,6 +227,7 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     },
     smallTalk: (input, o) => (options.llm ? options.llm.smallTalk(input, o) : Promise.reject(new LlmUnavailableError("sim: no LLM"))),
     mapAnswer: (input, o) => (options.llm ? options.llm.mapAnswer(input, o) : Promise.reject(new LlmUnavailableError("sim: no LLM"))),
+    extractCheckin: (input, o) => (options.llm ? options.llm.extractCheckin(input, o) : Promise.reject(new LlmUnavailableError("sim: no LLM"))),
   };
   const deps: EngineDeps = {
     db,
@@ -270,16 +282,30 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
       note(`Follow-up check-in scheduled for ${clockTime(followUp.dueAt)} (${followUp.reason}). Type /later to jump there.`);
   }
 
-  /** /as <kind> [answer]: the next typed message is read as `kind` (and, for "answer", that button). */
+  /**
+   * /as <kind> [answer] [| topic, amount, change]...: the next typed message is read as `kind` (and, for
+   * "answer", that button), with the symptoms after each "|" (amount none, a_little, a_lot or unknown;
+   * change new, worse, same, better or unknown; both default to unknown). A question id as the topic
+   * ties the symptom to that question.
+   */
   function asCommand(args: string[]): InputResult {
-    const [kind, ...rest] = args;
-    if (!kind || !(MESSAGE_KINDS as readonly string[]).includes(kind)) {
-      note(`usage: /as <${MESSAGE_KINDS.join("|")}> [answer]`, "red");
-      return "error";
+    const [head = "", ...parts] = args.join(" ").split("|").map((p) => p.trim());
+    const [kind, ...rest] = head.split(/\s+/).filter(Boolean);
+    const usage = () => {
+      note(`usage: /as <${MESSAGE_KINDS.join("|")}> [answer] [| topic, ${Object.keys(TYPED_LEVELS).join("|")}, new|worse|same|better|unknown]`, "red");
+      return "error" as const;
+    };
+    if (!kind || !(MESSAGE_KINDS as readonly string[]).includes(kind)) return usage();
+    const symptoms: SymptomMention[] = [];
+    for (const part of parts) {
+      const [topic = "", amount = "unknown", change = "unknown"] = part.split(",").map((x) => x.trim());
+      if (!topic || !(amount in TYPED_LEVELS) || !["new", "worse", "same", "better", "unknown"].includes(change)) return usage();
+      symptoms.push({ topic, ...(topic in BUTTON_LEVELS ? { questionId: topic } : {}), amount: amount as Amount, change: change as Change, words: topic });
     }
     const answer = rest.join(" ");
-    scripted.push({ kind: kind as MessageKind, confidence: "high", complaints: [], memories: [], ...(answer ? { answer } : {}) });
-    note(`Her next typed message is read as ${kind}${answer ? ` "${answer}"` : ""} (a stand-in for the LLM).`);
+    scripted.push({ kind: kind as MessageKind, confidence: "high", complaints: [], memories: [], ...(answer ? { answer } : {}), symptoms });
+    const said = symptoms.map((m) => `${m.topic} (${m.amount.replace("_", " ")}, ${m.change})`).join(", ");
+    note(`Her next typed message is read as ${kind}${answer ? ` "${answer}"` : ""}${said ? `, mentioning ${said}` : ""} (a stand-in for the LLM).`);
     return "ok";
   }
 

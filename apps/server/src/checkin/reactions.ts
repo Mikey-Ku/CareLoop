@@ -22,7 +22,7 @@ export type Reaction =
   | "medicine_question" // fixed reply, saved for her next visit
   | "feeling_low" // fixed warm reply, saved as a memory
   | "family_message" // passed on to her family chats
-  | "small_talk" // the model's own short reply (or the fixed complaint reply)
+  | "small_talk" // the model's own short reply, or a fixed reply by level when she mentions a symptom
   | "didnt_understand"; // the pending buttons again
 
 const KINDS = new Set<string>(MESSAGE_KINDS);
@@ -61,16 +61,21 @@ export function isExplicitYes(text: string): boolean {
   return /^\s*(?:(?:oh|well|um+|uh+|hmm+)[\s,.]+)?(?:yes|yeah|yep|yup|yea|i did)\b(?![\s,.!-]*(?:no|nope|not)\b)/i.test(text);
 }
 
-/** The button an explicit yes stands for on a red-flag question ("Yes"), if it has one. */
+/**
+ * The button an explicit yes stands for on a red-flag question: its level-3 answer ("Yes, it was hard",
+ * "Yes, bleeding"), if it has one. Ordinary questions have none, so a typed yes there goes to the LLM.
+ */
 export function explicitYesAnswer(q: Pick<Question, "redFlagAnswers">, text: string): string | undefined {
   if (!isExplicitYes(text)) return undefined;
-  return q.redFlagAnswers.find((a) => a.trim().toLowerCase() === "yes");
+  return q.redFlagAnswers[0];
 }
 
-/** What a follow-up asks about, from its stored reason (a red-flag question id, a safety kind, or "general"). */
+/** What a follow-up asks about, from its stored reason (a question id, a safety kind, her topic words, or "general"). */
 export function followUpTopic(reason: string): FollowUpTopic {
   if (reason === "hf-breathing-lying-flat") return "breathing";
   if (reason === "anticoagulant-bleeding") return "bleeding";
+  if (reason === "hf-ankle-swelling") return "ankles";
+  if (reason === "dizzy-on-standing") return "dizziness";
   if (reason === "crisis") return "crisis";
   return "general";
 }

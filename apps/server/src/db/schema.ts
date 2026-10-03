@@ -228,6 +228,47 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX family_relays_waiting ON family_relays (patient_id) WHERE passed_on_at IS NULL;
   `,
+  // 7: the severity ladder (docs/DESIGN.md "Severity ladder", src/checkin/severity.ts).
+  // symptom_observations: every level the ladder gave something she told us (a button answer,
+  // a typed symptom, a follow-up answer, a safety hit), by check-in date and topic (a question id,
+  // her own short topic words, or a safety kind). Read by the repetition rule (a level-1 topic on
+  // 3 of her last 5 days is level 2), the family's daily status at "all" and the visit-prep
+  // sheet. words: her words for it, when typed. follow_ups.level: the level that asked for the
+  // follow-up (the highest when several joined); "About the same" keeps it, at most 2. Older rows
+  // have none and count as 3 (they were all red flags or safety hits). clarifications: the one
+  // "A little, or a lot?" asked about a typed symptom on a check-in question, never twice.
+  `
+  CREATE TABLE symptom_observations (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    checkin_id INTEGER REFERENCES checkins(id) ON DELETE SET NULL,
+    day TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    question_id TEXT,
+    level INTEGER NOT NULL CHECK (level BETWEEN 0 AND 5),
+    amount TEXT CHECK (amount IS NULL OR amount IN ('none', 'a_little', 'a_lot', 'unknown')),
+    change TEXT CHECK (change IS NULL OR change IN ('new', 'worse', 'same', 'better', 'unknown')),
+    source TEXT NOT NULL CHECK (source IN ('button', 'typed', 'follow_up', 'safety')),
+    words TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX symptom_observations_patient_day ON symptom_observations (patient_id, day);
+
+  ALTER TABLE follow_ups ADD COLUMN level INTEGER CHECK (level IS NULL OR level BETWEEN 0 AND 5);
+
+  CREATE TABLE clarifications (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    checkin_id INTEGER NOT NULL REFERENCES checkins(id) ON DELETE CASCADE,
+    question_id TEXT NOT NULL,
+    change TEXT CHECK (change IS NULL OR change IN ('new', 'worse', 'same', 'better', 'unknown')),
+    words TEXT,
+    asked_at TEXT NOT NULL,
+    answered_at TEXT,
+    answer TEXT,
+    UNIQUE (checkin_id, question_id)
+  );
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

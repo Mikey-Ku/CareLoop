@@ -147,6 +147,25 @@ A rule result is recomputed on every snapshot and shown to no one. A rule result
 - Breathing rate is said back and saved, never compared: no breathing-rate readings exist in Harriet's record.
 - Atrial fibrillation: camera heart rate is least reliable with an irregular rhythm, so for a patient with active AFib the reading is reported as an estimate and never compared with her usual range (`usualRange.compareHeartRate: false`). Harriet has AFib, so her demo vitals call reports a number without in or out.
 
+## Severity ladder (source of truth for every reaction)
+
+Decided 2026-10-03 after live tests showed two volumes, silent or alarm: "a little cough, tight at points" and "my knee hurts" both got the doctor and 911 lines. Not everything is urgent. The reaction matches the symptom, most messages land at 0 to 2, and the bot is a check-in, not an assessment.
+
+| Level | Sounds like | Bot | Family | Follow-up |
+| --- | --- | --- | --- | --- |
+| 0 Fine | "slept ok", "No" | Short acknowledgement or straight to the next question | Daily status | No |
+| 1 Small, everyday | "ankles a bit puffy", "knee aches", "slept badly", "a little cough" | "Thanks for telling me, I've made a note." Saved for her doctor's list. No advice, no 911 | Daily status (detail at "all") | No |
+| 2 Worth watching | New or worse than usual; "a little" on breathing or bleeding; "more than usual" ankles; a level-1 symptom on 3 of her last 5 days | "Let's keep an eye on that." Note, and one same-day follow-up | Daily status (detail at "all"); no alert | Yes |
+| 3 Call your doctor today | "Yes, it was hard" breathing; bleeding; "Worse" on a follow-up | Doctor today; "if it gets much worse, call 911"; no flag offer that day | Alert | Yes |
+| 4 Emergency now | Safety screen or model: chest pain, can't breathe now, a fall, stroke signs | 911 now | Alert | Yes |
+| 5 Crisis | Safety screen or model: self-harm | 988 Suicide & Crisis Lifeline, 911 if in danger | Alert | Yes |
+
+- **Rules decide the level.** The LLM only extracts, from typed text, which symptom, how much ("a little" or "a lot") and whether it is new or worse than usual. Fixed rules turn those into a level. The safety screen (4 and 5) runs first and wins. The LLM may raise a level, never lower one: a calm reading of a red-flag question still goes back to her.
+- **911 wording** appears only from level 3 ("if it gets much worse") and as the main instruction only at 4.
+- **Depth limit:** at most one clarifying question per symptom, and only when the answer changes the level ("A little, or a lot?", "Is that more than usual for you?"). She can always say more; it becomes a note for her doctor. The bot never interviews her. Anything above level 2 is handed off (doctor, family, 911).
+- **Graded answers** on symptom questions replace yes/no: breathing "Fine" / "A little hard" / "Yes, it was hard"; bleeding "No" / "A little bruising" / "Yes, bleeding"; ankles "No" / "A little" / "More than usual"; dizziness "No" / "Sometimes" / "Often". Every symptom question also offers "Let me explain".
+- **Open question first:** the check-in opens with "How are you feeling today? Just tell me in your own words, or tap Quick questions." The LLM extracts answers to all of today's questions from her reply; the bot asks only what she didn't cover, with buttons. On a good day the check-in is one message.
+
 ## Free-text replies
 
 Buttons stay the main way to answer. Typed replies are the second way, read by the LLM, which never decides what is risky:

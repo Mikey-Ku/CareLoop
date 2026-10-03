@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as copy from "../src/checkin/copy.ts";
 import {
   BUTTON,
+  CLARIFY_BUTTONS,
   FOLLOW_UP_BUTTONS,
   SHARING_BUTTONS,
   SHARING_MENU_BUTTON,
@@ -10,6 +11,7 @@ import {
   checkinDone,
   checkinDoneAfterConcern,
   checkinGreeting,
+  clarifyAmount,
   complaintReply,
   crisisReply,
   didntUnderstand,
@@ -32,8 +34,11 @@ import {
   followUpQuestion,
   followUpReply,
   freeTextConfirm,
+  keepAnEye,
+  keepAnEyeReply,
   medicineQuestionReply,
   noteSaved,
+  notedForDoctor,
   notTodayReply,
   photoNotYet,
   recordLinkEndedFamily,
@@ -44,8 +49,11 @@ import {
   sharingLevelFromButton,
   sharingMenu,
   smallTalkFallback,
+  symptomNotedReply,
+  topicWords,
   typedReplyUnavailable,
   urgentReply,
+  withLead,
   type AnsweredQuestion,
   type DayOutcome,
   type FollowUpTopic,
@@ -59,7 +67,9 @@ import { runRules } from "../src/rules/index.ts";
 
 const NAME = "Harriet";
 const LEVELS: SharingLevel[] = ["status", "status_vitals", "all"];
-const TOPICS: FollowUpTopic[] = ["breathing", "bleeding", "crisis", "general"];
+const TOPICS: FollowUpTopic[] = ["breathing", "bleeding", "ankles", "dizziness", "crisis", "general"];
+/** Symptom topics as the engine passes them: question ids and her own words (synthetic). */
+const SYMPTOM_TOPICS = ["hf-ankle-swelling", "dizzy-on-standing", "hf-breathing-lying-flat", "anticoagulant-bleeding", "morning-medicines", "mood", "knee pain", "a little cough", "my sore feet", "other", ""];
 const CRISIS_WORDS = "I want to end my life"; // synthetic
 const OUTCOMES: DayOutcome[] = ["checked_in", "not_today", "missed"];
 const EM_DASH = /[—–]/; // em and en dash
@@ -69,7 +79,7 @@ const ANSWERS: AnsweredQuestion[] = [
   { questionId: "mood", questionText: "How are you feeling today?", answer: "Okay" },
 ];
 const FLAG_MESSAGE = "You take apixaban, aspirin and sertraline. Taken together, they can raise the chance of bleeding.";
-const RED_FLAG = { questionText: "Did you have trouble breathing when lying flat last night?", answer: "Yes" };
+const RED_FLAG = { questionText: "How was your breathing last night when you lay down?", answer: "Yes, it was hard" };
 // What she might type instead of tapping (synthetic).
 const HER_WORDS = [
   "nah fine, had to prop myself up on pillows",
@@ -111,6 +121,7 @@ function allOutputs(): string[] {
   out.push(recordLinkEndedSenior(NAME), recordLinkEndedFamily(NAME), familyMissedAlert(NAME, "12:00 PM"));
   out.push(sharingMenu());
   out.push(complaintReply(NAME), smallTalkFallback(NAME));
+  out.push(...levelZeroToTwoOutputs());
   for (const words of HER_WORDS) for (const q of QUESTION_BANK) out.push(freeTextConfirm(words, q.text));
   out.push(copy.PAPER_REJECTED_REPLY, copy.PAPER_LATER_REPLY, copy.PAPER_NOTHING_TO_COMPARE, copy.PAPER_NO_RECORD_REPLY);
   for (const level of LEVELS) {
@@ -125,7 +136,34 @@ function allOutputs(): string[] {
     for (const outcome of OUTCOMES)
       for (const vitals of [undefined, { heartRate: 72, inUsualRange: true }, { heartRate: 104, inUsualRange: false }, { heartRate: 78 }])
         out.push(familyDailyStatus({ seniorName: NAME, sharing: level, outcome, answers: ANSWERS, flags: [{ message: FLAG_MESSAGE }], vitals }));
+    for (const highest of [0, 1, 2, 3, 4, 5].flatMap((l) => SYMPTOM_TOPICS.map((topic) => ({ level: l, topic }))))
+      out.push(familyDailyStatus({ seniorName: NAME, sharing: level, outcome: "checked_in", answers: ANSWERS, flags: [], highest }));
+    out.push(familyRedFlagAlert({ seniorName: NAME, sharing: level, words: "my gums keep bleeding a lot" }));
   }
+  return out;
+}
+
+/**
+ * Everything she or her family can read at levels 0 to 2 of the severity ladder (src/checkin/severity.ts):
+ * the level-1 and level-2 lines, alone and folded into each next message, the chat replies, the one
+ * clarifying question, Better and About the same on a follow-up (not after a crisis), the question
+ * texts, the closings, and the family status at levels 0 to 2.
+ */
+function levelZeroToTwoOutputs(): string[] {
+  const out: string[] = [];
+  const next = [...QUESTION_BANK.map((q) => q.text), flagOffer(), checkinDone(NAME), checkinDoneAfterConcern(NAME)];
+  for (const lead of [undefined, notedForDoctor(), keepAnEye(NAME), feelingLowReply(NAME)]) for (const text of next) out.push(withLead(lead, text));
+  out.push(keepAnEyeReply(NAME), complaintReply(NAME), clarifyAmount(NAME), ...Object.values(CLARIFY_BUTTONS));
+  for (const topic of SYMPTOM_TOPICS) out.push(symptomNotedReply(NAME, [topic]), symptomNotedReply(NAME, [topic, "knee pain"]));
+  out.push(symptomNotedReply(NAME, []));
+  for (const topic of TOPICS.filter((t) => t !== "crisis")) {
+    out.push(followUpQuestion(NAME, topic), followUpReply(NAME, "better", topic), followUpReply(NAME, "same", topic));
+    out.push(familyFollowUpUpdate({ seniorName: NAME, topic, answer: "better" }), familyFollowUpUpdate({ seniorName: NAME, topic, answer: "same" }));
+  }
+  for (const q of QUESTION_BANK) out.push(...q.buttons);
+  for (const sharing of LEVELS)
+    for (const highest of [0, 1, 2].flatMap((level) => SYMPTOM_TOPICS.map((topic) => ({ level, topic }))))
+      out.push(familyDailyStatus({ seniorName: NAME, sharing, outcome: "checked_in", answers: ANSWERS, flags: [], highest }));
   return out;
 }
 
@@ -135,12 +173,13 @@ describe("copy: style rules across every output", () => {
   it("covers every exported function", () => {
     const fns = Object.entries(copy).filter(([, v]) => typeof v === "function").map(([k]) => k).sort();
     const sampled = [
-      "checkinDone", "checkinDoneAfterConcern", "checkinGreeting", "complaintReply", "crisisReply", "didntUnderstand", "familyCrisisAlert",
-      "familyDailyStatus", "familyFollowUpUpdate", "familyFollowUpWorse", "familyMissedAlert", "familyRedFlagAlert", "familyRelay",
-      "familyRelayDone", "familyRelayWaiting", "familyUrgentAlert", "familyWelcome", "feelingLowReply", "flagDetail", "flagNotedReply",
-      "flagOffer", "followUpAsk", "followUpQuestion", "followUpReply", "freeTextConfirm", "medicineQuestionReply", "noteSaved",
-      "notTodayReply", "photoNotYet", "recordLinkEndedFamily", "recordLinkEndedSenior", "redFlagAdvice", "sharingChangedFamily",
-      "sharingChangedSenior", "sharingLevelFromButton", "sharingMenu", "smallTalkFallback", "typedReplyUnavailable", "urgentReply",
+      "checkinDone", "checkinDoneAfterConcern", "checkinGreeting", "clarifyAmount", "complaintReply", "crisisReply", "didntUnderstand",
+      "familyCrisisAlert", "familyDailyStatus", "familyFollowUpUpdate", "familyFollowUpWorse", "familyMissedAlert", "familyRedFlagAlert",
+      "familyRelay", "familyRelayDone", "familyRelayWaiting", "familyUrgentAlert", "familyWelcome", "feelingLowReply", "flagDetail",
+      "flagNotedReply", "flagOffer", "followUpAsk", "followUpQuestion", "followUpReply", "freeTextConfirm", "keepAnEye", "keepAnEyeReply",
+      "medicineQuestionReply", "noteSaved", "notedForDoctor", "notTodayReply", "photoNotYet", "recordLinkEndedFamily", "recordLinkEndedSenior",
+      "redFlagAdvice", "sharingChangedFamily", "sharingChangedSenior", "sharingLevelFromButton", "sharingMenu", "smallTalkFallback",
+      "symptomNotedReply", "topicWords", "typedReplyUnavailable", "urgentReply", "withLead",
     ].sort();
     expect(fns).toEqual(sampled);
   });
@@ -223,14 +262,15 @@ describe("copy: senior messages", () => {
     for (const text of [flagDetail(FLAG_MESSAGE), ...ruleFlagMessages.map(flagDetail)]) expect(text.toLowerCase()).not.toMatch(/you should (stop|start|take)|stop taking/);
   });
 
-  it("red-flag advice thanks her calmly first, then who was told, then her doctor, then 911", () => {
+  it("red-flag advice (level 3) thanks her calmly first, then who was told, then her doctor today, then 911 only if much worse", () => {
     expect(redFlagAdvice(NAME, ["Sarah"])).toBe(
-      "Thank you for telling me, Harriet. That sounds uncomfortable. I've asked Sarah to check on you. Please call your doctor today about this. If it gets worse or feels like an emergency, call 911.",
+      "Thank you for telling me, Harriet. I've let Sarah know. Please call your doctor today about this. If it gets much worse, call 911.",
     );
-    expect(redFlagAdvice(NAME, ["Sarah", "Tom", "Ann"])).toMatch(/That sounds uncomfortable\. I've asked Sarah, Tom and Ann to check on you\. /);
+    expect(redFlagAdvice(NAME, ["Sarah", "Tom", "Ann"])).toMatch(/^Thank you for telling me, Harriet\. I've let Sarah, Tom and Ann know\. /);
     for (const text of [redFlagAdvice(NAME), redFlagAdvice(NAME, ["Sarah"]), redFlagAdvice(NAME, []), redFlagAdvice(NAME, ["Sarah"], 2)]) {
+      expect(text).not.toMatch(/emergency|ambulance|uncomfortable/i);
       const thanks = text.indexOf("Thank you for telling me");
-      const family = text.indexOf("check on you");
+      const family = text.indexOf(" know.");
       const doctor = text.indexOf("call your doctor today");
       const emergency = text.indexOf("call 911");
       expect(thanks, text).toBe(0);
@@ -242,10 +282,8 @@ describe("copy: senior messages", () => {
   });
 
   it("red-flag advice without names says 'your family'; with no one linked it claims no one was told", () => {
-    expect(redFlagAdvice(NAME)).toMatch(/I've asked your family to check on you\. Please call your doctor/);
-    expect(redFlagAdvice(NAME, [])).toBe(
-      "Thank you for telling me, Harriet. That sounds uncomfortable. Please call your doctor today about this. If it gets worse or feels like an emergency, call 911.",
-    );
+    expect(redFlagAdvice(NAME)).toMatch(/I've let your family know\. Please call your doctor/);
+    expect(redFlagAdvice(NAME, [])).toBe("Thank you for telling me, Harriet. Please call your doctor today about this. If it gets much worse, call 911.");
     expect(redFlagAdvice(NAME, [" ", ""])).toBe(redFlagAdvice(NAME, []));
   });
 
@@ -335,6 +373,57 @@ describe("copy: typed messages", () => {
   });
 });
 
+describe("copy: severity ladder", () => {
+  it("nothing she or her family reads at levels 0 to 2 mentions 911, an emergency or an ambulance", () => {
+    const outputs = levelZeroToTwoOutputs();
+    expect(outputs.length).toBeGreaterThan(100);
+    for (const text of outputs) expect(text, text).not.toMatch(/911|emergenc|ambulance/i);
+  });
+
+  it("911 starts at level 3 (only if it gets much worse) and is the main instruction at 4; 988 at 5", () => {
+    expect(redFlagAdvice(NAME, ["Sarah"])).toContain("If it gets much worse, call 911.");
+    expect(urgentReply(NAME, ["Sarah"])).toMatch(/^Harriet, if this is happening now, please call 911 right away\./);
+    expect(crisisReply(NAME, ["Sarah"])).toContain("Please call or text 988 now.");
+  });
+
+  it("level 1 in a check-in: one short line, noted for her doctor, folded before the next message", () => {
+    expect(notedForDoctor()).toBe("Thanks, I've made a note of that for your doctor.");
+    expect(withLead(notedForDoctor(), "Any unusual bruising or bleeding?")).toBe(
+      "Thanks, I've made a note of that for your doctor.\n\nAny unusual bruising or bleeding?",
+    );
+    expect(withLead(undefined, "Any unusual bruising or bleeding?")).toBe("Any unusual bruising or bleeding?");
+  });
+
+  it("level 2: keep an eye on it; in chat she also hears we'll check on her later", () => {
+    expect(keepAnEye(NAME)).toBe("Thanks for telling me, Harriet. Let's keep an eye on that.");
+    expect(keepAnEyeReply(NAME)).toBe("Thanks for telling me, Harriet. Let's keep an eye on that. I'll check on you again later today.");
+  });
+
+  it("level 1 in chat: sorry, with her topic words when they fit, and noted for her doctor", () => {
+    expect(symptomNotedReply(NAME, ["knee pain"])).toBe("Sorry to hear about your knee pain, Harriet. I've made a note for your doctor.");
+    expect(symptomNotedReply(NAME, ["hf-ankle-swelling"])).toBe("Sorry to hear about your ankle swelling, Harriet. I've made a note for your doctor.");
+    expect(symptomNotedReply(NAME, ["my knee", "a little cough", "my knee"])).toBe(
+      "Sorry to hear about your knee and cough, Harriet. I've made a note for your doctor.",
+    );
+    expect(symptomNotedReply(NAME, ['knee "pain" <b>'])).toBe("Sorry that's bothering you, Harriet. I've made a note for your doctor.");
+    expect(symptomNotedReply(NAME, [])).toBe("Sorry that's bothering you, Harriet. I've made a note for your doctor.");
+  });
+
+  it("topic words: bank topics in plain words, her words tidied, anything odd left out", () => {
+    expect(topicWords("dizzy-on-standing")).toBe("dizziness");
+    expect(topicWords("  My  Sore   Feet ")).toBe("sore feet");
+    expect(topicWords("a bit of a headache")).toBe("headache");
+    expect(topicWords("pain in my left knee when I climb the stairs")).toBeUndefined();
+    expect(topicWords("knee\u2014pain")).toBeUndefined();
+    expect(topicWords("")).toBeUndefined();
+  });
+
+  it("the one clarifying question: a little, or a lot, with two buttons", () => {
+    expect(clarifyAmount(NAME)).toBe("Thanks, Harriet. Is it a little, or a lot?");
+    expect(Object.values(CLARIFY_BUTTONS)).toEqual(["A little", "A lot"]);
+  });
+});
+
 describe("copy: follow-up check-in", () => {
   it("asks about the topic of the concern, or how she feels", () => {
     expect(followUpQuestion(NAME, "breathing")).toBe("Checking in again, Harriet. How is your breathing now?");
@@ -343,14 +432,18 @@ describe("copy: follow-up check-in", () => {
     expect(Object.values(FOLLOW_UP_BUTTONS)).toEqual(["Better", "About the same", "Worse"]);
   });
 
-  it("Better and About the same get a short warm reply that still points to the doctor and 911", () => {
-    for (const answer of ["better", "same"] as const) {
-      const text = followUpReply(NAME, answer);
-      expect(text).toContain("Harriet");
-      expect(text).toContain("doctor");
-      expect(text).toContain("911");
-    }
-    expect(followUpReply(NAME, "better")).toMatch(/^I'm glad to hear that, Harriet\./);
+  it("asks about ankles and dizziness after something worth watching there", () => {
+    expect(followUpQuestion(NAME, "ankles")).toBe("Checking in again, Harriet. How are your ankles now?");
+    expect(followUpQuestion(NAME, "dizziness")).toBe("Checking in again, Harriet. How is the dizziness now?");
+  });
+
+  it("Better is a warm close (level 0); About the same keeps an eye on it (level 2); neither mentions 911", () => {
+    expect(followUpReply(NAME, "better")).toBe("I'm glad to hear that, Harriet. Thank you for letting me know.");
+    expect(followUpReply(NAME, "same", "breathing")).toBe(
+      "Thank you for letting me know, Harriet. Let's keep an eye on that. I've made a note for your doctor.",
+    );
+    for (const topic of TOPICS.filter((t) => t !== "crisis"))
+      for (const answer of ["better", "same"] as const) expect(followUpReply(NAME, answer, topic)).not.toMatch(/911|emergency|ambulance/i);
   });
 
   it("after a crisis the follow-up asks how she feels, and its replies point to 988, not the doctor", () => {
@@ -383,7 +476,7 @@ describe("copy: free text", () => {
 
   it("the confirm quotes her words, then asks the question again", () => {
     expect(freeTextConfirm("nah fine, had to prop myself up on pillows", breathing.text)).toBe(
-      'You wrote: "nah fine, had to prop myself up on pillows"\nJust to check: Did you have trouble breathing when lying flat last night?',
+      'You wrote: "nah fine, had to prop myself up on pillows"\nJust to check: How was your breathing last night when you lay down?',
     );
   });
 
@@ -397,11 +490,9 @@ describe("copy: free text", () => {
     expect(quote.slice(0, -3)).not.toMatch(/\s$/);
   });
 
-  it("the complaint reply points to her doctor and 911, and says nothing about family or alerts", () => {
-    expect(complaintReply(NAME)).toBe(
-      "Thank you for telling me, Harriet. If this is worrying you, please call your doctor. If it feels like an emergency, call 911.",
-    );
-    expect(complaintReply(NAME)).not.toMatch(/family|told|alert/i);
+  it("the complaint reply (no symptom read) is level-1 wording: noted for her doctor, no advice, no 911, nothing about family", () => {
+    expect(complaintReply(NAME)).toBe("Thank you for telling me, Harriet. I've made a note of that for your doctor.");
+    expect(complaintReply(NAME)).not.toMatch(/family|told|alert|911|emergency/i);
   });
 
   it("the small-talk fallback thanks her, says when it's back, and still points to her doctor and 911", () => {
@@ -439,8 +530,32 @@ describe("copy: family messages by sharing level", () => {
 
   it("a red flag she typed carries her words at all only", () => {
     const words = "Yes but it was weirder";
-    expect(familyRedFlagAlert({ seniorName: NAME, sharing: "all", ...RED_FLAG, words })).toMatch(/answered: "Yes"\nHarriet wrote: "Yes but it was weirder"$/);
+    expect(familyRedFlagAlert({ seniorName: NAME, sharing: "all", ...RED_FLAG, words })).toMatch(/answered: "Yes, it was hard"\nHarriet wrote: "Yes but it was weirder"$/);
     expect(familyRedFlagAlert({ seniorName: NAME, sharing: "status", ...RED_FLAG, words })).not.toContain(words);
+  });
+
+  it("a level 3 from her words in chat (no question) carries only her words at all", () => {
+    const words = "my gums keep bleeding a lot";
+    expect(familyRedFlagAlert({ seniorName: NAME, sharing: "all", words })).toBe(
+      `Harriet reported something she should call her doctor about. Please call Harriet today to check on her.\n\nHarriet wrote: "${words}"`,
+    );
+    expect(familyRedFlagAlert({ seniorName: NAME, sharing: "status", words })).not.toContain(words);
+    expect(familyRedFlagAlert({ seniorName: NAME, sharing: "all" })).toBe(familyRedFlagAlert({ seniorName: NAME, sharing: "status" }));
+  });
+
+  it("the daily status says the day's highest level in words at all only, from level 1", () => {
+    const status = (sharing: SharingLevel, level: number, topic: string) =>
+      familyDailyStatus({ seniorName: NAME, sharing, outcome: "checked_in", answers: [], flags: [], highest: { level, topic } });
+    expect(status("all", 2, "hf-ankle-swelling")).toBe("Harriet checked in today.\n\nHarriet mentioned some ankle swelling (we're keeping an eye on it).");
+    expect(status("all", 1, "dizzy-on-standing")).toContain("Harriet mentioned some dizziness (noted for the doctor).");
+    expect(status("all", 1, "knee pain")).toContain("Harriet mentioned knee pain (noted for the doctor).");
+    expect(status("all", 2, "a little cough")).toContain("Harriet mentioned cough (we're keeping an eye on it).");
+    expect(status("all", 3, "hf-breathing-lying-flat")).toContain("Harriet reported some trouble breathing and was asked to call the doctor today.");
+    expect(status("all", 4, "urgent_symptom")).toContain("Harriet told me about something urgent today.");
+    expect(status("all", 1, "!!??")).toContain("Harriet mentioned a symptom (noted for the doctor).");
+    expect(status("all", 0, "hf-ankle-swelling")).toBe("Harriet checked in today.");
+    for (const sharing of ["status", "status_vitals"] as const)
+      for (const level of [0, 1, 2, 3]) expect(status(sharing, level, "hf-ankle-swelling")).toBe("Harriet checked in today.");
   });
 
   it("crisis and urgent alerts reach every level; below all with no detail, at all with her words", () => {

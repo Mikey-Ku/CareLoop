@@ -8,7 +8,8 @@ export type CheckinStatus = "sent" | "answered" | "skipped" | "missed";
 /** greeting: waiting for "Let's start" / "Not today"; question: waiting for an answer to question_index; flag_offer / flag_detail: a flag is on offer; done: nothing pending. */
 export type CheckinStep = "greeting" | "question" | "flag_offer" | "flag_detail" | "done";
 
-export type StoredAnswer = { questionId: string; questionText: string; answer: string; at: string };
+/** One answer in checkins.answers_json. `level`: its severity level (src/checkin/severity.ts); answers stored before the ladder have none. */
+export type StoredAnswer = { questionId: string; questionText: string; answer: string; at: string; level?: number };
 
 export type CheckinRow = {
   id: number;

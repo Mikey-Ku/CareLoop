@@ -75,6 +75,8 @@ export const HELP_LINES = [
   "  /later                jump to the next follow-up check-in (after a red flag or an urgent message) and send it",
   "  /as KIND [answer]     read her next typed message as KIND (answer, more_detail, medicine_question, feeling_low,",
   "                        urgent_symptom, crisis, family_message, chat) without an LLM; for answer, which button",
+  "      [| topic, amount, change]  ...and the symptoms she mentions, e.g. /as chat | knee pain, a_little, same",
+  "                        (amount none|a_little|a_lot|unknown, change new|worse|same|better|unknown; the ladder levels them)",
   "  /db                   row counts per table",
   "  /quit                 leave",
 ];

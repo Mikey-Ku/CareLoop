@@ -5,11 +5,13 @@ import {
   checkinGreeting,
   familyDailyStatus,
   flagOffer,
+  notedForDoctor,
   SHARING_BUTTONS,
   SHARING_MENU_BUTTON,
   sharingChangedFamily,
   sharingChangedSenior,
   sharingMenu,
+  withLead,
 } from "../src/checkin/copy.ts";
 import { createCheckinEngine } from "../src/checkin/engine.ts";
 import type { CheckinEngine } from "../src/checkin/engine-types.ts";
@@ -116,7 +118,7 @@ describe("the sharing menu", () => {
 
   it("the check-in's last message carries a single Sharing button that opens the menu", async () => {
     await engine.startDay(P, DAY1);
-    for (const t of ["Let's start", "No", "No", "No"]) await say(t);
+    for (const t of ["Let's start", "Fine", "No", "No"]) await say(t);
     const done = (await say("Later"))[0]!;
     expect(done).toMatchObject({ chatId: ME, text: checkinDone("Harriet"), buttons: [SHARING_MENU_BUTTON] });
     expect(brief(await say(done.buttons![0]!))).toEqual([msg(ME, sharingMenu("status"), LEVEL_BUTTONS)]);
@@ -127,7 +129,7 @@ describe("sharing in the middle of a check-in", () => {
   it("the menu doesn't break it: after the change the pending question comes again and she carries on", async () => {
     await engine.startDay(P, DAY1);
     await say("Let's start");
-    await say("No"); // breathing
+    await say("Fine"); // breathing
     const bleeding = question("anticoagulant-bleeding");
     const dizzy = question("dizzy-on-standing");
 
@@ -140,12 +142,13 @@ describe("sharing in the middle of a check-in", () => {
       msg(ME, bleeding.text, bleeding.buttons),
     ]);
     expect(brief(await say("No"))).toEqual([msg(ME, dizzy.text, dizzy.buttons)]);
-    expect(brief(await say("Sometimes"))).toEqual([msg(ME, flagOffer(), [BUTTON.tellMeMore, BUTTON.later])]);
+    // "Sometimes" is level 1: noted for her doctor, said once, before the flag offer.
+    expect(brief(await say("Sometimes"))).toEqual([msg(ME, withLead(notedForDoctor(), flagOffer()), [BUTTON.tellMeMore, BUTTON.later])]);
     const last = await say("Later");
 
     // The day's family status uses the new level.
     const row = getCheckin(db, P, DAY1)!;
-    expect(row.answers.map((a) => a.answer)).toEqual(["No", "No", "Sometimes"]);
+    expect(row.answers.map((a) => a.answer)).toEqual(["Fine", "No", "Sometimes"]);
     expect(last.at(-1)).toMatchObject({
       chatId: FAMILY,
       text: familyDailyStatus({
@@ -154,15 +157,17 @@ describe("sharing in the middle of a check-in", () => {
         outcome: "checked_in",
         answers: row.answers.map(({ questionId, questionText, answer }) => ({ questionId, questionText, answer })),
         flags: [],
+        highest: { level: 1, topic: "dizzy-on-standing" },
       }),
     });
+    expect(last.at(-1)?.text).toContain("Harriet mentioned some dizziness (noted for the doctor).");
   });
 
   it("at the greeting the greeting comes again; at a flag offer the offer comes again", async () => {
     await engine.startDay(P, DAY1);
     await say("Sharing");
     expect(brief(await say(SHARING_BUTTONS.status)).at(-1)).toEqual(msg(ME, checkinGreeting("Harriet", 3), [BUTTON.start, BUTTON.notToday]));
-    for (const t of ["Let's start", "No", "No", "No"]) await say(t);
+    for (const t of ["Let's start", "Fine", "No", "No"]) await say(t);
     await say("Sharing");
     expect(brief(await say(SHARING_BUTTONS.status)).at(-1)).toEqual(msg(ME, flagOffer(), [BUTTON.tellMeMore, BUTTON.later]));
     expect(getCheckin(db, P, DAY1)?.step).toBe("flag_offer");
@@ -175,7 +180,7 @@ describe("sharing in the middle of a check-in", () => {
     await engine.startDay(P, DAY1);
     await say("Let's start");
     const oldMenu = (await say("Sharing"))[0]!;
-    await say("No"); // breathing, answered by typing
+    await say("Fine"); // breathing, answered by typing
     const tapOn = async (text: string, replyTo: string) => {
       const before = messenger.sent.length;
       await engine.handleInbound({ chatId: ME, messageId: `in_${++inbound}`, text, replyTo, at: now });
@@ -193,7 +198,7 @@ describe("sharing in the middle of a check-in", () => {
     await engine.startDay(P, DAY1);
     await say("Let's start");
     await say("Sharing");
-    expect(brief(await say("No"))).toEqual([msg(ME, question("anticoagulant-bleeding").text, question("anticoagulant-bleeding").buttons)]);
+    expect(brief(await say("Fine"))).toEqual([msg(ME, question("anticoagulant-bleeding").text, question("anticoagulant-bleeding").buttons)]);
     expect(getSharing(db, P)).toBe("status");
   });
 });

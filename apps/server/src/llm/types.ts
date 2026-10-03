@@ -83,6 +83,40 @@ export type MessageClassification = {
   memories: string[];
   /** kind "family_message" only: what to pass on, her words. */
   forFamily?: string | undefined;
+  /** Symptoms she mentioned with how much and whether new or worse; rules set the level. Empty when none. */
+  symptoms?: SymptomMention[] | undefined;
+};
+
+/** How much of a symptom she describes. */
+export type Amount = "none" | "a_little" | "a_lot" | "unknown";
+/** Compared with her usual. */
+export type Change = "new" | "worse" | "same" | "better" | "unknown";
+
+/** One symptom she mentioned, extracted from her words. Rules turn these into a ladder level (docs/DESIGN.md "Severity ladder"). */
+export type SymptomMention = {
+  /** A question id from the bank when it matches one of today's questions, else a short topic in plain words ("knee pain", "cough"). */
+  topic: string;
+  questionId?: string | undefined;
+  amount: Amount;
+  change: Change;
+  /** Her words for it, trimmed. */
+  words: string;
+};
+
+export type ExtractCheckinInput = {
+  seniorName: string;
+  /** Her reply to the open question ("How are you feeling today?"). */
+  message: string;
+  /** Today's questions, each with its button labels. */
+  questions: { id: string; question: string; options: string[] }[];
+};
+
+export type CheckinExtraction = {
+  /** One entry per question she clearly answered; questions she didn't cover are left out. answer is one of that question's options exactly. */
+  answers: { questionId: string; answer: string; confidence: Confidence }[];
+  /** Every symptom she mentioned, including ones today's questions don't cover. */
+  symptoms: SymptomMention[];
+  memories: string[];
 };
 
 export type LlmCallOptions = {
@@ -97,6 +131,8 @@ export interface LlmClient {
   smallTalk(input: SmallTalkInput, options?: LlmCallOptions): Promise<SmallTalkReply>;
   /** Sort one typed message. Never decides risk on its own: the fixed phrase screen runs first and wins. */
   classifyMessage(input: ClassifyInput, options?: LlmCallOptions): Promise<MessageClassification>;
+  /** Pull answers to all of today's questions, and every symptom, out of her reply to the open question. */
+  extractCheckin(input: ExtractCheckinInput, options?: LlmCallOptions): Promise<CheckinExtraction>;
 }
 
 /** Every model in the chain failed or the time budget ran out. Callers fall back to buttons or a template. */

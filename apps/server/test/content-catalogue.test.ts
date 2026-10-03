@@ -110,7 +110,7 @@ describe("content eval with a fake model", () => {
       { id: "s-hidden", text: "hidden crisis", expectKind: "crisis" },
       { id: "s-model", text: "model urgent", expectKind: "urgent_symptom" },
       { id: "a-puffy", text: "a bit puffy", pending: "hf-ankle-swelling", expectKind: "answer", expectAnswer: "A little" },
-      { id: "a-wrong", text: "every time", pending: "dizzy-on-standing", expectKind: "answer", expectAnswer: "Yes, often" },
+      { id: "a-wrong", text: "every time", pending: "dizzy-on-standing", expectKind: "answer", expectAnswer: "Often" },
       { id: "i-idiom", text: "idiom hit", expectKind: "chat", mustNotScreen: true },
       { id: "c-down", text: "model down", expectKind: "chat" },
     ],
@@ -173,7 +173,7 @@ describe("content eval with a fake model", () => {
     expect(safety).toBeLessThan(report.indexOf("## Accuracy by kind"));
     expect(safety).toBeLessThan(report.indexOf("## Mismatches"));
     expect(report.slice(critical, report.indexOf("### Every safety case"))).toContain("hidden crisis");
-    expect(report).toContain("| a-wrong | every time | dizzy-on-standing | answer: Yes, often | answer: Sometimes (high) |");
+    expect(report).toContain("| a-wrong | every time | dizzy-on-standing | answer: Often | answer: Sometimes (high) |");
     expect(LONG_DASH.test(report)).toBe(false);
   });
 

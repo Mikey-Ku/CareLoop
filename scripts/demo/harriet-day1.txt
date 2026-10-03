@@ -5,11 +5,11 @@
 #
 # Let's start
 1
-# Did you have trouble breathing when lying flat last night? -> No
+# How was your breathing last night when you lay down? -> Fine (level 0)
 1
-# Have you had any unusual bruising or bleeding? -> No
+# Any unusual bruising or bleeding? -> No (level 0)
 1
-# Have you felt dizzy when standing up? -> No
+# Have you felt dizzy when standing up? -> No (level 0: nothing extra, straight on)
 1
 # One thing worth asking your doctor about -> Tell me more
 1

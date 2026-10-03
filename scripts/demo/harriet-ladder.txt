@@ -1,0 +1,32 @@
+# The severity ladder in one day (check-in date 2026-09-01, sharing "all" so Sarah sees
+# the detail). Each answer gets a level from fixed tables (apps/server/src/checkin/severity.ts)
+# and the reaction matches it; 911 comes up only at level 3, "if it gets much worse".
+#   0 Fine            nothing extra, straight to the next question
+#   1 Small, everyday "Thanks, I've made a note of that for your doctor." (once per check-in)
+#   2 Worth watching  "Let's keep an eye on that.", a follow-up this afternoon, no alert
+#   3 Doctor today    her doctor today, 911 only if it gets much worse, Sarah alerted
+# Offline, the /as line stands in for the LLM's reading of the next message. With --llm,
+# delete it to let Gemini read her words.
+# npm run simulate -- --reset --sharing all --script ../../scripts/demo/harriet-ladder.txt
+#
+# Let's start
+1
+# How was your breathing last night when you lay down? -> Fine (level 0)
+1
+# Any unusual bruising or bleeding? -> A little bruising (level 2: keep an eye on it,
+# folded into the next question; a follow-up is scheduled; no alert)
+2
+# Have you felt dizzy when standing up? -> Sometimes (level 1: noted for her doctor,
+# folded into the flag offer; a flag can still be offered on a level-2 day)
+2
+# One thing worth asking your doctor about -> Later. The closing says we'll check on her
+# this afternoon; Sarah's status at "all" says "Harriet mentioned some bruising or bleeding
+# (we're keeping an eye on it)".
+2
+# Later she mentions her knee in chat: level 1, sorry and noted for her doctor, no 911.
+/as chat | knee pain, a_little, same
+my knee aches a bit today
+# This afternoon: "How is the bruising or bleeding now?" -> Worse (level 3: her doctor
+# today, 911 only if it gets much worse, Sarah alerted)
+/later
+3

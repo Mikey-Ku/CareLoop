@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_BUTTONS,
   MAX_QUESTIONS_PER_DAY,
   QUESTION_BANK,
   QUESTION_CADENCE,
@@ -49,10 +50,11 @@ function run(
 }
 
 describe("question bank", () => {
-  it("has Relay-safe buttons and no em dashes", () => {
+  it("has Relay-safe buttons and no em dashes, at most MAX_BUTTONS (4) so one more fits", () => {
+    expect(MAX_BUTTONS).toBe(4);
     for (const q of QUESTION_BANK) {
       expect(q.buttons.length).toBeGreaterThanOrEqual(1);
-      expect(q.buttons.length).toBeLessThanOrEqual(5);
+      expect(q.buttons.length).toBeLessThanOrEqual(MAX_BUTTONS);
       for (const b of q.buttons) expect(b.length).toBeLessThanOrEqual(80);
       for (const answer of q.redFlagAnswers) expect(q.buttons).toContain(answer);
       expect(`${q.text} ${q.buttons.join(" ")}`).not.toMatch(/\u2014/);
@@ -84,11 +86,24 @@ describe("question bank", () => {
   it("worrying answers: anything but a calm one, matched like a button", () => {
     expect(isWorryingAnswer("hf-ankle-swelling", "A little")).toBe(true);
     expect(isWorryingAnswer("hf-ankle-swelling", " no ")).toBe(false);
-    expect(isWorryingAnswer(BREATHING, "Yes")).toBe(true);
+    expect(isWorryingAnswer(BREATHING, "Yes, it was hard")).toBe(true);
+    expect(isWorryingAnswer(BREATHING, "A little hard")).toBe(true);
+    expect(isWorryingAnswer(BREATHING, "Fine")).toBe(false);
     expect(isWorryingAnswer("mood", "Okay")).toBe(false);
     expect(isWorryingAnswer("mood", "Not great")).toBe(true);
     expect(isWorryingAnswer("morning-medicines", "Not yet")).toBe(true);
     expect(isWorryingAnswer("no-such-question", "Yes")).toBe(false);
+  });
+
+  it("symptom questions have graded answers, warm wording, and only the level-3 answer is a red flag", () => {
+    expect(QUESTION_BANK.map((q) => [q.id, q.text, q.buttons, q.redFlagAnswers])).toEqual([
+      ["hf-ankle-swelling", "Have your ankles or feet been more swollen than usual?", ["No", "A little", "More than usual"], []],
+      ["hf-breathing-lying-flat", "How was your breathing last night when you lay down?", ["Fine", "A little hard", "Yes, it was hard"], ["Yes, it was hard"]],
+      ["anticoagulant-bleeding", "Any unusual bruising or bleeding?", ["No", "A little bruising", "Yes, bleeding"], ["Yes, bleeding"]],
+      ["dizzy-on-standing", "Have you felt dizzy when standing up?", ["No", "Sometimes", "Often"], []],
+      ["morning-medicines", "Did you take your morning medicines?", ["Yes", "Not yet", "Some of them"], []],
+      ["mood", "How are you feeling today?", ["Good", "Okay", "Not great"], []],
+    ]);
   });
 
   it("every question in the bank applies to Harriet", () => {
@@ -110,19 +125,19 @@ describe("pickQuestions: red-flag cadence", () => {
   });
 
   it("answered yesterday: not due", () => {
-    const history = [BREATHING, BLEEDING].map((questionId) => ({ day: addDays(D, -1), questionId, answer: "No" }));
+    const history = [BREATHING, BLEEDING].map((questionId) => ({ day: addDays(D, -1), questionId, answer: calm(questionId) }));
     expect(redFlagIds(harriet, D, history)).toEqual([]);
     expect(ids(harriet, D, history)).toHaveLength(3);
   });
 
   it("answered 2 days ago: due again (every other day)", () => {
-    const history = [BREATHING, BLEEDING].map((questionId) => ({ day: addDays(D, -2), questionId, answer: "No" }));
+    const history = [BREATHING, BLEEDING].map((questionId) => ({ day: addDays(D, -2), questionId, answer: calm(questionId) }));
     expect(redFlagIds(harriet, D, history)).toEqual([BREATHING, BLEEDING]);
   });
 
   it("each red-flag question keeps its own cadence", () => {
     const history = [
-      { day: addDays(D, -1), questionId: BREATHING, answer: "No" },
+      { day: addDays(D, -1), questionId: BREATHING, answer: "Fine" },
       { day: addDays(D, -2), questionId: BLEEDING, answer: "No" },
     ];
     expect(redFlagIds(harriet, D, history)).toEqual([BLEEDING]);
@@ -131,18 +146,18 @@ describe("pickQuestions: red-flag cadence", () => {
   it("a worrying answer 2 days ago in the group makes it due every day, even if answered yesterday", () => {
     const history = [
       { day: addDays(D, -2), questionId: "hf-ankle-swelling", answer: "A little" },
-      { day: addDays(D, -1), questionId: BREATHING, answer: "No" },
+      { day: addDays(D, -1), questionId: BREATHING, answer: "Fine" },
       { day: addDays(D, -1), questionId: BLEEDING, answer: "No" },
     ];
     expect(redFlagIds(harriet, D, history)).toEqual([BREATHING]);
     // A red-flag answer is worrying too.
-    expect(redFlagIds(harriet, D, [{ day: addDays(D, -1), questionId: BLEEDING, answer: "Yes" }]).includes(BLEEDING)).toBe(true);
+    expect(redFlagIds(harriet, D, [{ day: addDays(D, -1), questionId: BLEEDING, answer: "Yes, bleeding" }]).includes(BLEEDING)).toBe(true);
   });
 
   it("the follow-up window expires after followUpDays", () => {
     const history = (worryDaysAgo: number) => [
-      { day: addDays(D, -worryDaysAgo), questionId: "hf-ankle-swelling", answer: "Yes, more than usual" },
-      { day: addDays(D, -1), questionId: BREATHING, answer: "No" },
+      { day: addDays(D, -worryDaysAgo), questionId: "hf-ankle-swelling", answer: "More than usual" },
+      { day: addDays(D, -1), questionId: BREATHING, answer: "Fine" },
       { day: addDays(D, -1), questionId: BLEEDING, answer: "No" },
     ];
     expect(redFlagIds(harriet, D, history(3))).toEqual([BREATHING]);
@@ -154,7 +169,7 @@ describe("pickQuestions: red-flag cadence", () => {
   it("a worrying answer only reaches its own group", () => {
     const history = [
       { day: addDays(D, -1), questionId: "mood", answer: "Not great" },
-      { day: addDays(D, -1), questionId: BREATHING, answer: "No" },
+      { day: addDays(D, -1), questionId: BREATHING, answer: "Fine" },
       { day: addDays(D, -1), questionId: BLEEDING, answer: "No" },
     ];
     expect(redFlagIds(harriet, D, history)).toEqual([]);
@@ -162,14 +177,14 @@ describe("pickQuestions: red-flag cadence", () => {
 
   it("a day with no answers (not today, missed) doesn't count as asked", () => {
     // She answered both 3 days ago, then said "not today" twice: no answers, so they are due.
-    const history = [BREATHING, BLEEDING].map((questionId) => ({ day: addDays(D, -3), questionId, answer: "No" }));
+    const history = [BREATHING, BLEEDING].map((questionId) => ({ day: addDays(D, -3), questionId, answer: calm(questionId) }));
     expect(redFlagIds(harriet, addDays(D, -2), history)).toEqual([]);
     expect(redFlagIds(harriet, D, history)).toEqual([BREATHING, BLEEDING]);
   });
 
   it("at most maxRedFlagQuestions; when more are due, never asked or asked longest ago wins", () => {
     const history = [
-      { day: addDays(D, -2), questionId: BREATHING, answer: "No" },
+      { day: addDays(D, -2), questionId: BREATHING, answer: "Fine" },
       { day: addDays(D, -5), questionId: BLEEDING, answer: "No" },
     ];
     expect(pickQuestions(harriet, D, { history, cadence: { maxRedFlagQuestions: 1 } }).filter((q) => RED_FLAG.has(q.id)).map((q) => q.id)).toEqual([BLEEDING]);
@@ -193,9 +208,9 @@ describe("pickQuestions: red-flag cadence", () => {
   });
 
   it("ignores history on or after the check-in date", () => {
-    const history = [BREATHING, BLEEDING].map((questionId) => ({ day: D, questionId, answer: "No" }));
+    const history = [BREATHING, BLEEDING].map((questionId) => ({ day: D, questionId, answer: calm(questionId) }));
     expect(redFlagIds(harriet, D, history)).toEqual([BREATHING, BLEEDING]);
-    expect(redFlagIds(harriet, D, [{ day: addDays(D, 1), questionId: BREATHING, answer: "No" }])).toEqual([BREATHING, BLEEDING]);
+    expect(redFlagIds(harriet, D, [{ day: addDays(D, 1), questionId: BREATHING, answer: "Fine" }])).toEqual([BREATHING, BLEEDING]);
   });
 });
 

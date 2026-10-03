@@ -126,9 +126,9 @@ describe("the fixed rules (src/checkin/reactions.ts)", () => {
       expect(isExplicitYes(t), t).toBe(false);
   });
 
-  it("an explicit yes stands for the red-flag answer of a red-flag question only", () => {
-    expect(explicitYesAnswer(breathing, "yeah")).toBe("Yes");
-    expect(explicitYesAnswer(bleeding, "I did, a big bruise")).toBe("Yes");
+  it("an explicit yes stands for the level-3 answer of a red-flag question only", () => {
+    expect(explicitYesAnswer(breathing, "yeah")).toBe("Yes, it was hard");
+    expect(explicitYesAnswer(bleeding, "I did, a big bruise")).toBe("Yes, bleeding");
     expect(explicitYesAnswer(question("morning-medicines"), "yes")).toBeUndefined();
     expect(explicitYesAnswer(breathing, "no")).toBeUndefined();
   });
@@ -155,6 +155,9 @@ describe("the fixed rules (src/checkin/reactions.ts)", () => {
   it("follow-up topics from the stored reason", () => {
     expect(followUpTopic("hf-breathing-lying-flat")).toBe("breathing");
     expect(followUpTopic("anticoagulant-bleeding")).toBe("bleeding");
+    expect(followUpTopic("hf-ankle-swelling")).toBe("ankles");
+    expect(followUpTopic("dizzy-on-standing")).toBe("dizziness");
+    expect(followUpTopic("knee pain")).toBe("general");
     expect(followUpTopic("crisis")).toBe("crisis");
     expect(followUpTopic("urgent_symptom")).toBe("general");
     expect(followUpTopic("general")).toBe("general");
@@ -170,7 +173,7 @@ describe("the fixed rules (src/checkin/reactions.ts)", () => {
 
 describe("1. the safety screen comes first", () => {
   it("a crisis mid-question: fixed reply, Sarah alerted with no detail, the question not asked again, no LLM, a follow-up", async () => {
-    setup({ classifyMessage: () => as("answer", { answer: "No" }) });
+    setup({ classifyMessage: () => as("answer", { answer: "Fine" }) });
     await atBreathing();
     const sent = await say(CRISIS);
     expect(brief(sent)).toEqual([msg(ME, crisisReply("Harriet", ["Sarah"])), msg(SARAH, familyCrisisAlert({ seniorName: "Harriet", sharing: "status" }))]);
@@ -219,7 +222,7 @@ describe("1. the safety screen comes first", () => {
     const sent = await say(URGENT);
     expect(brief(sent)).toEqual([msg(ME, urgentReply("Harriet", ["Sarah"])), msg(SARAH, familyUrgentAlert({ seniorName: "Harriet", sharing: "status" }))]);
     // The breathing question's own buttons still answer it.
-    expect(brief(await tap("No", q))).toEqual([msg(ME, bleeding.text, bleeding.buttons)]);
+    expect(brief(await tap("Fine", q))).toEqual([msg(ME, bleeding.text, bleeding.buttons)]);
     await say("No");
     const end = await say("No");
     expect(end.map((m) => m.text)).not.toContain(flagOffer());
@@ -293,7 +296,7 @@ describe("3. reactions by kind", () => {
   it("a medicine question: fixed reply, saved for her visit, the question again", async () => {
     setup({ classifyMessage: () => as("medicine_question") });
     await atBreathing();
-    await say("No");
+    await say("Fine");
     const words = "can I skip the water pill on Sunday?";
     expect(brief(await say(words))).toEqual([msg(ME, medicineQuestionReply("Harriet")), msg(ME, bleeding.text, bleeding.buttons)]);
     expect(visitQuestions(db, P).map((v) => v.text)).toEqual([words]);
@@ -348,7 +351,7 @@ describe("3. reactions by kind", () => {
     ]);
     expect(recentMemories(db, P, 5)).toEqual(["sun on the porch"]);
     // A tap on the re-sent question answers it.
-    expect(brief(await tap("No", messenger.lastIn(ME)))).toEqual([msg(ME, bleeding.text, bleeding.buttons)]);
+    expect(brief(await tap("Fine", messenger.lastIn(ME)))).toEqual([msg(ME, bleeding.text, bleeding.buttons)]);
   });
 
   it("chat during a question when small talk fails: the trouble is ours, with the buttons", async () => {
@@ -362,12 +365,12 @@ describe("4. a red flag: warmer, calmer, no flag offer, a follow-up", () => {
   it("advice with what's still to come, the remaining questions, no flag offer, closing 'this afternoon', follow-up in 180 minutes", async () => {
     setup();
     await atBreathing();
-    expect(brief(await say("Yes"))).toEqual([
+    expect(brief(await say("Yes, it was hard"))).toEqual([
       msg(ME, redFlagAdvice("Harriet", ["Sarah"], 2)),
-      msg(SARAH, familyRedFlagAlert({ seniorName: "Harriet", sharing: "status", questionText: breathing.text, answer: "Yes" })),
+      msg(SARAH, familyRedFlagAlert({ seniorName: "Harriet", sharing: "status", questionText: breathing.text, answer: "Yes, it was hard" })),
       msg(ME, bleeding.text, bleeding.buttons),
     ]);
-    expect(redFlagAdvice("Harriet", ["Sarah"], 2)).toMatch(/^Thank you for telling me, Harriet\. That sounds uncomfortable\./);
+    expect(redFlagAdvice("Harriet", ["Sarah"], 2)).toMatch(/^Thank you for telling me, Harriet\. I've let Sarah know\. Please call your doctor today about this\. If it gets much worse, call 911\./);
     expect(DEFAULT_FOLLOW_UP_DELAY_MINUTES).toBe(180);
     expect(nextFollowUp(db, P)).toMatchObject({ reason: breathing.id, dueAt: "2026-09-01T16:00:00.000Z" });
     await say("No");
@@ -381,8 +384,8 @@ describe("4. a red flag: warmer, calmer, no flag offer, a follow-up", () => {
   it("a second red flag in the same check-in joins the waiting follow-up as a general one", async () => {
     setup();
     await atBreathing();
-    await say("Yes");
-    const [advice] = await say("Yes");
+    await say("Yes, it was hard");
+    const [advice] = await say("Yes, bleeding");
     expect(advice?.text).toBe(redFlagAdvice("Harriet", ["Sarah"], 1));
     expect(nextFollowUp(db, P)?.reason).toBe("general");
     expect(db.prepare("SELECT COUNT(*) AS n FROM follow_ups").get()).toEqual({ n: 1 });
@@ -395,14 +398,14 @@ describe("4. a red flag: warmer, calmer, no flag offer, a follow-up", () => {
       { rxnav, followUpDelayMinutes: 2 },
     );
     await atBreathing();
-    await say("Yes");
+    await say("Yes, it was hard");
     expect(nextFollowUp(db, P)?.dueAt).toBe("2026-09-01T13:02:00.000Z");
   });
 
   it("without a concern the day still ends with the flag offer and 'tomorrow'", async () => {
     setup();
     await atBreathing();
-    await say("No");
+    await say("Fine");
     await say("No");
     expect((await say("No"))[0]?.text).toBe(flagOffer());
     expect((await say(BUTTON.later))[0]?.text).toBe(checkinDone("Harriet"));
@@ -425,10 +428,10 @@ describe("today's live conversation, with the new behaviour", () => {
     const words = "Yes but it was weirder I don't know how to explainit";
     expect(brief(await say(words))).toEqual([
       msg(ME, redFlagAdvice("Harriet", ["Sarah"], 2)),
-      msg(SARAH, familyRedFlagAlert({ seniorName: "Harriet", sharing: "all", questionText: breathing.text, answer: "Yes", words })),
+      msg(SARAH, familyRedFlagAlert({ seniorName: "Harriet", sharing: "all", questionText: breathing.text, answer: "Yes, it was hard", words })),
       msg(ME, bleeding.text, bleeding.buttons),
     ]);
-    expect(checkin().answers[0]).toMatchObject({ questionId: breathing.id, answer: "Yes", via: "free_text", freeText: words });
+    expect(checkin().answers[0]).toMatchObject({ questionId: breathing.id, answer: "Yes, it was hard", via: "free_text", freeText: words });
     expect(checkinNotes(db, checkin().id).map((n) => [n.questionId, n.text])).toEqual([
       [breathing.id, "Not really but I have more info"],
       [breathing.id, words],

@@ -4,7 +4,7 @@
 # other three, and offers the next flag, not the same one.
 # npm run simulate -- --reset --script ../../scripts/demo/harriet-two-days.txt
 #
-# Day 1: Let's start, No to breathing, bleeding and dizziness, Tell me more, I'll ask my doctor
+# Day 1: Let's start, Fine (breathing), No to bleeding and dizziness, Tell me more, I'll ask my doctor
 1
 1
 1

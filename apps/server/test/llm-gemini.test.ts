@@ -438,7 +438,7 @@ describe("classifyMessage request shape", () => {
   it("posts one structured call: every kind in the enum, no answer field without a pending question, cost capped", async () => {
     const { llm, calls, log } = client([classified({ kind: "medicine_question", confidence: "high" })]);
     const result = await llm.classifyMessage({ seniorName: "Harriet", message: "Should I stop taking my aspirin?" });
-    expect(result).toEqual({ kind: "medicine_question", confidence: "high", complaints: [], memories: [] });
+    expect(result).toEqual({ kind: "medicine_question", confidence: "high", complaints: [], memories: [], symptoms: [] });
 
     expect(calls).toHaveLength(1);
     const body = calls[0]!.body;
@@ -448,12 +448,12 @@ describe("classifyMessage request shape", () => {
     expect(JSON.parse(body.contents[0].parts[0].text)).toEqual({ herName: "Harriet", message: "Should I stop taking my aspirin?" });
     expect(body.generationConfig).toMatchObject({
       temperature: 0,
-      maxOutputTokens: 250,
+      maxOutputTokens: 350,
       thinkingConfig: { thinkingLevel: "minimal" },
       responseMimeType: "application/json",
     });
     const schema = body.generationConfig.responseSchema;
-    const fields = ["kind", "confidence", "complaints", "memories", "forFamily"];
+    const fields = ["kind", "confidence", "complaints", "symptoms", "memories", "forFamily"];
     expect(Object.keys(schema.properties)).toEqual(fields);
     expect(schema.required).toEqual(fields);
     expect(schema.propertyOrdering).toEqual(fields);
@@ -461,18 +461,33 @@ describe("classifyMessage request shape", () => {
     expect(schema.properties.confidence.enum).toEqual(["high", "medium", "low"]);
     expect(schema.properties.complaints).toEqual({ type: "ARRAY", items: { type: "STRING" } });
     expect(schema.properties.forFamily).toEqual({ type: "STRING" });
+    // Symptoms: her words first, then the enums; no questionId (classify has no question ids).
+    expect(schema.properties.symptoms).toEqual({
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          words: { type: "STRING" },
+          topic: { type: "STRING" },
+          amount: { type: "STRING", enum: ["none", "a_little", "a_lot", "unknown"] },
+          change: { type: "STRING", enum: ["new", "worse", "same", "better", "unknown"] },
+        },
+        required: ["words", "topic", "amount", "change"],
+        propertyOrdering: ["words", "topic", "amount", "change"],
+      },
+    });
     expect(log.map((e) => [e.operation, e.status])).toEqual([["classifyMessage", 200]]);
   });
 
   it("with a pending question, sends it and adds an answer enum of its options plus unclear", async () => {
     const { llm, calls } = client([classified({ kind: "answer", answer: "Yes", complaints: ["it was weirder"] })]);
     const result = await llm.classifyMessage({ seniorName: "Harriet", message: "Yes but it was weirder", pending: BREATHING });
-    expect(result).toEqual({ kind: "answer", answer: "Yes", confidence: "high", complaints: ["it was weirder"], memories: [] });
+    expect(result).toEqual({ kind: "answer", answer: "Yes", confidence: "high", complaints: ["it was weirder"], memories: [], symptoms: [] });
     const body = calls[0]!.body;
     expect(JSON.parse(body.contents[0].parts[0].text)).toEqual({ herName: "Harriet", message: "Yes but it was weirder", pendingQuestion: BREATHING });
     const schema = body.generationConfig.responseSchema;
     expect(schema.properties.answer).toEqual({ type: "STRING", enum: ["No", "Yes", "unclear"] });
-    expect(schema.propertyOrdering).toEqual(["kind", "answer", "confidence", "complaints", "memories", "forFamily"]);
+    expect(schema.propertyOrdering).toEqual(["kind", "answer", "confidence", "complaints", "symptoms", "memories", "forFamily"]);
     expect(schema.required).toEqual(schema.propertyOrdering);
   });
 
@@ -485,8 +500,11 @@ describe("classifyMessage request shape", () => {
     expect(JSON.parse(calls[1]!.body.contents[0].parts[0].text)).toEqual({ herName: "Harriet", message: "hm" });
   });
 
-  it("tells the model to lean toward safety, to spot more_detail, and never to advise", () => {
-    expect(CLASSIFY_SYSTEM_PROMPT).toContain("When in doubt about her safety, choose crisis or urgent_symptom");
+  it("leans toward crisis, keeps urgent_symptom for emergency signs, spots more_detail, never advises", () => {
+    expect(CLASSIFY_SYSTEM_PROMPT).toContain("When in doubt whether she may harm herself, choose crisis");
+    // The severity ladder: a new or worse everyday symptom is not an emergency (a "new cough getting worse" was sorted urgent live).
+    expect(CLASSIFY_SYSTEM_PROMPT).toContain("is NOT urgent_symptom");
+    expect(CLASSIFY_SYSTEM_PROMPT).toContain("Do not use urgent_symptom just because a symptom is new or getting worse");
     expect(CLASSIFY_SYSTEM_PROMPT).toContain("never give advice");
     expect(CLASSIFY_SYSTEM_PROMPT).toContain("more_detail: she says she has more to tell");
     expect(CLASSIFY_SYSTEM_PROMPT).toContain("A plain yes or no in words counts as an answer");
@@ -496,7 +514,7 @@ describe("classifyMessage request shape", () => {
 
   it("sorts an empty message as chat with low confidence, without a request", async () => {
     const { llm, calls } = client([]);
-    expect(await llm.classifyMessage({ seniorName: "Harriet", message: "   " })).toEqual({ kind: "chat", confidence: "low", complaints: [], memories: [] });
+    expect(await llm.classifyMessage({ seniorName: "Harriet", message: "   " })).toEqual({ kind: "chat", confidence: "low", complaints: [], memories: [], symptoms: [] });
     expect(calls).toHaveLength(0);
   });
 
@@ -531,11 +549,12 @@ describe("classification validation", () => {
       confidence: "medium",
       complaints: [],
       memories: [],
+      symptoms: [],
     });
   });
 
   it("an answer outside the options, or unclear, is unclear with low confidence", () => {
-    const low = { kind: "answer", answer: "unclear", confidence: "low", complaints: [], memories: [] };
+    const low = { kind: "answer", answer: "unclear", confidence: "low", complaints: [], memories: [], symptoms: [] };
     expect(parseClassification(json({ kind: "answer", answer: "Sometimes" }), { options })).toEqual(low);
     expect(parseClassification(json({ kind: "answer", answer: "unclear" }), { options })).toEqual(low);
     expect(parseClassification(json({ kind: "answer" }), { options })).toEqual(low);
@@ -547,6 +566,7 @@ describe("classification validation", () => {
       confidence: "low",
       complaints: ["tired"],
       memories: [],
+      symptoms: [],
     });
   });
 
@@ -556,8 +576,9 @@ describe("classification validation", () => {
       confidence: "low",
       complaints: [],
       memories: ["Bob"],
+      symptoms: [],
     });
-    expect(parseClassification(json({ kind: 7 }))).toEqual({ kind: "chat", confidence: "low", complaints: [], memories: [] });
+    expect(parseClassification(json({ kind: 7 }))).toEqual({ kind: "chat", confidence: "low", complaints: [], memories: [], symptoms: [] });
   });
 
   it("forgives case, spaces and hyphens in the kind", () => {
@@ -567,7 +588,7 @@ describe("classification validation", () => {
   });
 
   it("JSON that doesn't parse, or isn't an object, is chat with low confidence", () => {
-    const chat = { kind: "chat", confidence: "low", complaints: [], memories: [] };
+    const chat = { kind: "chat", confidence: "low", complaints: [], memories: [], symptoms: [] };
     expect(parseClassification("{ broken")).toEqual(chat);
     expect(parseClassification("[1,2]")).toEqual(chat);
     expect(parseClassification("null")).toEqual(chat);
@@ -579,6 +600,7 @@ describe("classification validation", () => {
       confidence: "high",
       complaints: [],
       memories: [],
+      symptoms: [],
     });
     expect(parseClassification(json({ kind: "family_message", forFamily: "  I love her  \u2014 always " }), { message: "Tell Sarah I love her" })).toEqual({
       kind: "family_message",
@@ -586,6 +608,7 @@ describe("classification validation", () => {
       complaints: [],
       memories: [],
       forFamily: "I love her, always",
+      symptoms: [],
     });
   });
 
@@ -598,12 +621,12 @@ describe("classification validation", () => {
 
   it("treats an unknown confidence as low and cleans the lists", () => {
     const result = parseClassification(json({ kind: "feeling_low", confidence: "sure", complaints: " sore  hip ", memories: ["Bob died", "bob died", 3] }));
-    expect(result).toEqual({ kind: "feeling_low", confidence: "low", complaints: [], memories: ["Bob died"] });
+    expect(result).toEqual({ kind: "feeling_low", confidence: "low", complaints: [], memories: ["Bob died"], symptoms: [] });
   });
 
   it("an invalid reply over the wire is chat with low confidence, not an error", async () => {
     const { llm } = client([ok("{ nope"), classified({ kind: "emergency", confidence: "high" })]);
-    const chat = { kind: "chat", confidence: "low", complaints: [], memories: [] };
+    const chat = { kind: "chat", confidence: "low", complaints: [], memories: [], symptoms: [] };
     expect(await llm.classifyMessage({ seniorName: "Harriet", message: "hello" })).toEqual(chat);
     expect(await llm.classifyMessage({ seniorName: "Harriet", message: "hello" })).toEqual(chat);
   });

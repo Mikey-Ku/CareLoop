@@ -2,6 +2,7 @@ import { QUESTION_BANK, pickQuestions, type Question } from "../context/question
 import { answerHistory } from "../db/answer-history.ts";
 import {
   getCheckin,
+  getCheckinById,
   getCheckinPatient,
   getCheckinPrompt,
   insertCheckin,
@@ -30,10 +31,12 @@ import {
   syncFlags,
 } from "../db/index.ts";
 import { addFamilyRelay, familyChats, markFamilyRelayPassedOn, waitingFamilyRelays, type FamilyChat } from "../db/family.ts";
+import { addClarification, closeClarification, openClarification, type Clarification } from "../db/clarifications.ts";
 import {
   answerFollowUp,
   dueFollowUps,
   followUpForMessage,
+  LEGACY_FOLLOW_UP_LEVEL,
   markFollowUpSent,
   nextFollowUp,
   openFollowUp,
@@ -42,13 +45,14 @@ import {
 } from "../db/follow-ups.ts";
 import { addMemories, recentMemories } from "../db/memories.ts";
 import { addCheckinNote, addVisitQuestion, checkinNotes } from "../db/notes.ts";
+import { addObservation, highestOfDay, observationsBetween, type ObservationSource } from "../db/observations.ts";
 import { inboundSeen, insertPaperScan, paperScanForAttachment } from "../db/paper-scans.ts";
 import { ConsentInactiveError } from "../finchnode/client.ts";
 import { loadRxNavCache } from "../finchnode/fixtures.ts";
 import { asOf, normalizeHealthRecord } from "../finchnode/normalize.ts";
 import type { RxNavCache } from "../finchnode/rxnav.ts";
 import type { SharingLevel } from "../db/index.ts";
-import type { ClassifyInput, MessageClassification, SmallTalkInput, SmallTalkReply } from "../llm/types.ts";
+import type { Change, ClassifyInput, MessageClassification, SmallTalkInput, SmallTalkReply, SymptomMention } from "../llm/types.ts";
 import type { InboundMessage, OutboundMessage } from "../relay/messenger.ts";
 import { runRules } from "../rules/index.ts";
 import type { ExtractedPaper } from "../rules/paper-diff.ts";
@@ -56,10 +60,12 @@ import { screenMessage, type SafetyKind } from "../safety/screen.ts";
 import { looksLikeInstructions } from "../safety/injection.ts";
 import {
   BUTTON,
+  CLARIFY_BUTTONS,
   FOLLOW_UP_BUTTONS,
   checkinDone,
   checkinDoneAfterConcern,
   checkinGreeting,
+  clarifyAmount,
   complaintReply,
   crisisReply,
   didntUnderstand,
@@ -80,7 +86,10 @@ import {
   followUpQuestion,
   followUpReply,
   freeTextConfirm,
+  keepAnEye,
+  keepAnEyeReply,
   medicineQuestionReply,
+  notedForDoctor,
   noteSaved,
   notTodayReply,
   READING_ACTIVITY,
@@ -94,8 +103,10 @@ import {
   sharingLevelFromButton,
   sharingMenu,
   smallTalkFallback,
+  symptomNotedReply,
   typedReplyUnavailable,
   urgentReply,
+  withLead,
   type DayOutcome,
   type FollowUpAnswer,
 } from "./copy.ts";
@@ -111,8 +122,20 @@ import {
   type FreshRecord,
   type PaperSend,
 } from "./paper-flow.ts";
-import { evaluateRedFlag } from "./red-flags.ts";
 import { explicitYesAnswer, followUpTopic, reactionFor, type TypedAt } from "./reactions.ts";
+import {
+  REPETITION,
+  TYPED_LEVELS,
+  cleanMentions,
+  highest,
+  labelForLevel,
+  levelFor,
+  needsClarifying,
+  topicOf,
+  type Level,
+  type Severity,
+  type SeverityHistory,
+} from "./severity.ts";
 
 // The daily check-in as a small state machine over the checkins row:
 //   greeting -> question (one per index) -> flag_offer -> flag_detail -> done
@@ -141,12 +164,22 @@ import { explicitYesAnswer, followUpTopic, reactionFor, type TypedAt } from "./r
 // prompt instead. "Not today" from the greeting or any question of the pending
 // check-in still ends the day. Typed text (no replyTo) is matched as before.
 //
-// Red flags (src/checkin/red-flags.ts): her "Yes" to a red-flag question. She is thanked
-// calmly, told who was asked to check on her, to call her doctor and 911 if it gets worse;
-// every family chat is alerted. The remaining questions are still asked (another red-flag
-// question is worth asking), but no flag is offered that day and the closing says we'll check
-// on her again this afternoon (checkins.concern_at). A follow-up check-in is scheduled
-// `followUpDelayMinutes` later (src/db/follow-ups.ts, sent by runDueFollowUps).
+// Severity ladder (src/checkin/severity.ts, docs/DESIGN.md): every answer, typed symptom,
+// follow-up answer and safety hit gets a level from fixed tables, saved in symptom_observations.
+// The reaction follows the level:
+//   0  nothing extra: straight to the next question or the close.
+//   1  "Thanks, I've made a note of that for your doctor." before the next message, at most once
+//      per check-in (in chat: "Sorry to hear about your knee pain..."; mood "Not great": the warm
+//      feeling-low words instead). No advice, no 911.
+//   2  "Thanks for telling me, Harriet. Let's keep an eye on that." before the next message (in
+//      chat, on its own), and a follow-up later today. No alert; a flag may still be offered.
+//   3  A red flag: thanked calmly, told who was told, to call her doctor today and 911 only if it
+//      gets much worse; every family chat is alerted. The remaining questions are still asked,
+//      but no flag is offered that day (checkins.concern_at).
+//   4, 5  The safety screen's urgent and crisis replies (below).
+// A follow-up check-in is scheduled `followUpDelayMinutes` after a level 2 or more (src/db/follow-ups.ts,
+// sent by runDueFollowUps); while one is coming, the closing says we'll check on her this afternoon.
+// Better is level 0, About the same keeps the level (at most 2), Worse is level 3 again.
 //
 // Typed messages: anything she types that isn't a button label, in this order.
 //   1. Safety screen (src/safety/screen.ts), fixed phrases, no LLM: a crisis (self-harm, not
@@ -160,18 +193,24 @@ import { explicitYesAnswer, followUpTopic, reactionFor, type TypedAt } from "./r
 //   3. Fixed rules react by kind (src/checkin/reactions.ts); the model's own words only for chat:
 //      - crisis / urgent_symptom (the screen missed it): as in 1.
 //      - answer to an ordinary question: a high or medium confidence match counts as that tap
-//        (stored with her words, via "free_text"); otherwise "didn't understand" with the buttons.
+//        (stored with her words, via "free_text"), and symptoms she typed may raise its level, never
+//        lower it. No sure match, but a symptom on this question whose amount is unclear and would
+//        change the level: "A little, or a lot?" once (clarifications), her tap sets the level.
+//        Otherwise "didn't understand" with the buttons.
 //      - answer to a red-flag question: an explicit yes in her words ("yes", "yeah", "yes but...",
-//        "I did") counts as her "Yes" (a fixed rule, needs no LLM, checked even when the model says
-//        something else); anything else gets the one-tap confirm, since an AI never clears a red
-//        flag. Her words are saved as a note on that question either way.
+//        "I did") counts as its level-3 answer ("Yes, it was hard"), a fixed rule that needs no LLM,
+//        checked even when the model says something else; anything else gets the one-tap confirm with
+//        the graded buttons, since an AI never clears a red flag. Her words are saved as a note on
+//        that question either way.
 //      - more_detail while a question waits: saved as a note on it (checkin_notes, for her doctor;
 //        family sees notes only at "all"), and noteSaved with the question's buttons again.
 //      - medicine_question: fixed reply, saved for her next visit (visit_questions).
 //      - feeling_low: fixed warm reply, saved as a memory, no alert.
 //      - family_message: her message passed on to every linked family chat (or kept until one links).
-//      - chat: the model's small talk (a health complaint gets complaintReply instead). While a
-//        check-in waits, chat the model isn't sure of gets "didn't understand" with the buttons.
+//      - chat: the model's small talk. Symptoms she mentions get a fixed reply by level instead (1:
+//        symptomNotedReply, 2: keepAnEyeReply and a follow-up, 3: the red-flag reply and alert); a
+//        complaint with no symptom read gets complaintReply (level-1 wording). While a check-in
+//        waits, chat the model isn't sure of gets "didn't understand" with the buttons.
 //      Each reaction while a check-in step waits re-sends that step after it.
 //   Memories and complaints the model picked out are saved as memories (never on a crisis or
 //   urgent symptom), never acted on.
@@ -285,6 +324,7 @@ const ALL_LABELS = new Set(
     SHARING_MENU_BUTTON,
     ...PAPER_CONFIRM_BUTTONS,
     ...FOLLOW_UP_LABELS,
+    ...Object.values(CLARIFY_BUTTONS),
   ].map(norm),
 );
 const isButtonLabel = (text: string) => ALL_LABELS.has(norm(text));
@@ -317,10 +357,38 @@ function contextKey(ctx: TypedContext): string {
   }
 }
 
-/** A classification with its lists made safe to use (strings only). */
+/** A classification with its lists made safe to use (strings only, symptoms with known amounts and changes). */
 function tidy(c: MessageClassification): MessageClassification {
   const strings = (xs: unknown) => (Array.isArray(xs) ? xs.filter((x): x is string => typeof x === "string") : []);
-  return { ...c, complaints: strings(c.complaints), memories: strings(c.memories) };
+  return { ...c, complaints: strings(c.complaints), memories: strings(c.memories), symptoms: cleanMentions(c.symptoms) };
+}
+
+/**
+ * What a chat reply is built from: the symptoms she mentioned (a fixed reply by level), a complaint
+ * the model found without saying which symptom or how much (the fixed level-1 reply), or small talk.
+ */
+function chatBasis(c: Pick<MessageClassification, "complaints" | "symptoms">): "symptoms" | "complaint" | "talk" {
+  const symptoms = c.symptoms ?? [];
+  if (symptoms.some((m) => levelFor({ source: "typed", mention: m }).level > 0)) return "symptoms";
+  if (symptoms.length === 0 && c.complaints.length > 0) return "complaint";
+  return "talk";
+}
+
+/** A clarifying tap ("A little" / "A lot") as an amount. */
+function clarifyTapOf(text: string): "a_little" | "a_lot" | undefined {
+  return (Object.keys(CLARIFY_BUTTONS) as (keyof typeof CLARIFY_BUTTONS)[]).find((k) => is(text, CLARIFY_BUTTONS[k]));
+}
+
+/** The labels a clarifying tap stands for on this question, when it has both (ankles, dizziness). */
+function clarifyLabels(questionId: string): { a_little: string; a_lot: string } | undefined {
+  const aLittle = labelForLevel(questionId, TYPED_LEVELS.a_little.ordinary);
+  const aLot = labelForLevel(questionId, TYPED_LEVELS.a_lot.ordinary);
+  return aLittle && aLot ? { a_little: aLittle, a_lot: aLot } : undefined;
+}
+
+/** The YYYY-MM-DD `days` days before `day`. */
+function daysBefore(day: string, days: number): string {
+  return new Date(Date.parse(day) - days * 86_400_000).toISOString().slice(0, 10);
 }
 
 export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {}): CheckinEngine {
@@ -388,7 +456,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       classification = { ...classification, kind: "chat", answer: undefined, confidence: "low" };
     let smallTalk: SmallTalkReply | undefined;
     const wantsSmallTalk =
-      !steering && !need.noSmallTalk && reactionFor(classification, need.at) === "small_talk" && classification.complaints.length === 0;
+      !steering && !need.noSmallTalk && reactionFor(classification, need.at) === "small_talk" && chatBasis(classification) === "talk";
     if (wantsSmallTalk) {
       try {
         smallTalk = await llm.smallTalk(need.smallTalk);
@@ -425,6 +493,8 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
           .map((f) => ({ message: f.message }))
       : [];
     const notes = all ? checkinNotes(db, c.id).map((n) => ({ questionText: QUESTIONS_BY_ID.get(n.questionId)?.text ?? n.questionId, text: n.text })) : [];
+    // The day's highest level, said in words at "all" ("we're keeping an eye on it").
+    const top = all ? highestOfDay(db, patient.id, c.date) : undefined;
     const text = familyDailyStatus({
       seniorName: patient.preferredName,
       sharing,
@@ -432,57 +502,110 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       answers: c.answers.map(({ questionId, questionText, answer }) => ({ questionId, questionText, answer })),
       flags,
       notes,
+      ...(top && top.level > 0 ? { highest: { level: top.level, topic: top.topic } } : {}),
     });
     return toFamily(patient, text, `${patient.id}:${c.date}:status`);
   }
 
-  /**
-   * A red flag or a safety hit: the check-in (if one is pending) remembers it, so no flag is offered
-   * that day and the closing changes; a follow-up check-in is scheduled. Returns the check-in's concern time.
-   */
-  function noteConcern(patient: CheckinPatient, c: CheckinRow | undefined, reason: string): string {
+  /** A follow-up check-in `followUpDelayMinutes` from now (level 2 or more), joining one already waiting. */
+  function followUpLater(patient: CheckinPatient, c: CheckinRow | undefined, reason: string, level: Level): void {
     const now = clock.now();
-    const concernAt = c?.concernAt ?? now;
+    scheduleFollowUp(db, { patientId: patient.id, checkinId: c?.id ?? null, reason, level, createdAt: now, dueAt: plusMinutes(now, followUpDelayMinutes) });
+  }
+
+  /**
+   * A red flag or a safety hit (level 3 or more): the check-in (if one is pending) remembers it, so no
+   * flag is offered that day and the closing changes; a follow-up check-in is scheduled. Returns the
+   * check-in's concern time.
+   */
+  function noteConcern(patient: CheckinPatient, c: CheckinRow | undefined, reason: string, level: Level): string {
+    const concernAt = c?.concernAt ?? clock.now();
     if (c && !c.concernAt) updateCheckin(db, c.id, { concernAt });
-    scheduleFollowUp(db, { patientId: patient.id, checkinId: c?.id ?? null, reason, createdAt: now, dueAt: plusMinutes(now, followUpDelayMinutes) });
+    followUpLater(patient, c, reason, level);
     return concernAt;
   }
 
-  function askQuestion(patient: CheckinPatient, c: CheckinRow, index: number, chatId: string): Send[] {
+  /** The check-in date an observation belongs to: its check-in's, else the latest check-in's, else the clock's. */
+  function dayFor(patientId: string, c?: CheckinRow): string {
+    return c?.date ?? latestCheckin(db, patientId)?.date ?? clock.now().slice(0, 10);
+  }
+
+  /** What the repetition rule needs: her observations on the last REPETITION.days check-in dates up to `day`. */
+  function historyFor(patientId: string, day: string): SeverityHistory {
+    return { today: day, observations: observationsBetween(db, patientId, daysBefore(day, REPETITION.days - 1), day) };
+  }
+
+  function observe(
+    patient: CheckinPatient,
+    day: string,
+    c: CheckinRow | undefined,
+    sev: Pick<Severity, "level" | "topic">,
+    detail: { source: ObservationSource; questionId?: string; amount?: string; change?: string; words?: string },
+  ): void {
+    addObservation(db, { patientId: patient.id, checkinId: c?.id ?? null, day, topic: sev.topic, level: sev.level, createdAt: clock.now(), ...detail });
+  }
+
+  /**
+   * Level 3: her reply (doctor today, 911 only if it gets much worse, who was told), every family chat
+   * alerted (detail at "all"), the concern noted and a follow-up. `moreQuestions`: the check-in's questions still to come.
+   */
+  function levelThree(
+    patient: CheckinPatient,
+    c: CheckinRow | undefined,
+    reason: string,
+    chatId: string,
+    key: string,
+    detail: { questionText?: string; answer?: string; words?: string },
+    moreQuestions = 0,
+  ): { sends: Send[]; concernAt: string } {
+    const concernAt = noteConcern(patient, c, reason, 3);
+    const sharing = getSharing(db, patient.id) ?? "status";
+    // Name the family members actually told (display name, else their Relay handle); none linked: no family line.
+    const advice = redFlagAdvice(patient.preferredName, familyChats(db, patient.id).map(familyName), moreQuestions);
+    return {
+      concernAt,
+      sends: [{ chatId, message: { text: advice }, key }, ...toFamily(patient, familyRedFlagAlert({ seniorName: patient.preferredName, sharing, ...detail }), key)],
+    };
+  }
+
+  /** Ask question `index`; `lead` (a level 1 or 2 line) goes before it. */
+  function askQuestion(patient: CheckinPatient, c: CheckinRow, index: number, chatId: string, lead?: string): Send[] {
     const q = questionById(c.questionIds[index]!);
     updateCheckin(db, c.id, { step: "question", questionIndex: index });
     return [
       {
         chatId,
-        message: { text: q.text, buttons: [...q.buttons] },
+        message: { text: withLead(lead, q.text), buttons: [...q.buttons] },
         key: `${patient.id}:${c.date}:question:${index}`,
         prompt: { checkinId: c.id, step: "question", questionIndex: index },
       },
     ];
   }
 
-  function finishCheckedIn(patient: CheckinPatient, c: CheckinRow, chatId: string): Send[] {
+  function finishCheckedIn(patient: CheckinPatient, c: CheckinRow, chatId: string, lead?: string): Send[] {
     updateCheckin(db, c.id, { step: "done", pendingFlagId: null, finishedAt: clock.now() });
-    // After a concern, she hears we'll check on her again, while that follow-up is still to come.
-    const followUpComing = c.concernAt !== null && nextFollowUp(db, patient.id) !== undefined;
+    // While a follow-up for today is still to come (a concern, or something worth watching), she hears
+    // we'll check on her again this afternoon.
+    const waiting = nextFollowUp(db, patient.id);
+    const followUpComing = waiting !== undefined && (c.concernAt !== null || waiting.checkinId === c.id);
     const text = followUpComing ? checkinDoneAfterConcern(patient.preferredName) : checkinDone(patient.preferredName);
     return [
-      { chatId, message: { text, buttons: [SHARING_MENU_BUTTON] }, key: `${patient.id}:${c.date}:done` },
+      { chatId, message: { text: withLead(lead, text), buttons: [SHARING_MENU_BUTTON] }, key: `${patient.id}:${c.date}:done` },
       ...familyStatus(patient, "checked_in", c),
     ];
   }
 
-  function afterLastQuestion(patient: CheckinPatient, c: CheckinRow, chatId: string): Send[] {
+  function afterLastQuestion(patient: CheckinPatient, c: CheckinRow, chatId: string, lead?: string): Send[] {
     updateCheckin(db, c.id, { status: "answered" });
     // After a red flag or a safety hit, no flag offer that day: one worry at a time.
     const flag = c.concernAt ? undefined : nextFlagToOffer(db, patient.id, c.date);
-    if (!flag) return finishCheckedIn(patient, c, chatId);
+    if (!flag) return finishCheckedIn(patient, c, chatId, lead);
     markOffered(db, flag.flagId, c.date);
     updateCheckin(db, c.id, { step: "flag_offer", pendingFlagId: Number(flag.flagId) });
     return [
       {
         chatId,
-        message: { text: flagOffer(), buttons: [BUTTON.tellMeMore, BUTTON.later] },
+        message: { text: withLead(lead, flagOffer()), buttons: [BUTTON.tellMeMore, BUTTON.later] },
         key: `${patient.id}:${c.date}:flag-offer`,
         prompt: promptFor(c, "flag_offer"),
       },
@@ -497,43 +620,120 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     ];
   }
 
-  function answerQuestion(patient: CheckinPatient, c: CheckinRow, q: Question, answer: string, chatId: string, freeText?: FreeTextAnswer): Send[] {
-    const stored: StoredAnswer & Partial<FreeTextAnswer> = { questionId: q.id, questionText: q.text, answer, at: clock.now(), ...freeText };
+  /**
+   * Her answer to the pending question (a tap, or her words mapped to a button), and the reaction its
+   * level asks for (see "Severity ladder" above). `mentions`: symptoms the model read in her words.
+   * Those about this question may raise its level, never lower it; others (her knee, while she answers
+   * about her ankles) are saved and reacted to by their own level.
+   */
+  function answerQuestion(
+    patient: CheckinPatient,
+    c: CheckinRow,
+    q: Question,
+    answer: string,
+    chatId: string,
+    freeText?: FreeTextAnswer,
+    mentions: SymptomMention[] = [],
+  ): Send[] {
+    const name = patient.preferredName;
+    const history = historyFor(patient.id, c.date);
+    const button = levelFor({ source: "button", questionId: q.id, label: answer }, history);
+    const typed = mentions.map((m) => ({ m, ...levelFor({ source: "typed", mention: m }, history) }));
+    const raisedBy = highest(typed.filter((t) => t.topic === q.id && t.level > button.level));
+    const own: Severity = raisedBy ? { ...raisedBy, topic: q.id } : button;
+    const others = typed.filter((t) => t.topic !== q.id);
+    const other = highest(others);
+    const level = Math.max(own.level, other?.level ?? 0) as Level;
+
+    const stored: StoredAnswer & Partial<FreeTextAnswer> = { questionId: q.id, questionText: q.text, answer, at: clock.now(), level, ...freeText };
     const answers: StoredAnswer[] = [...c.answers, stored];
     updateCheckin(db, c.id, { answers, ...(q.id === "mood" ? { mood: answer } : {}) });
+    const asked = openClarification(db, c.id, q.id);
+    if (asked) closeClarification(db, asked.id, answer, clock.now());
+    observe(patient, c.date, c, own, {
+      source: freeText ? "typed" : "button",
+      questionId: q.id,
+      ...(raisedBy ? { amount: raisedBy.m.amount, change: raisedBy.m.change } : {}),
+      ...(freeText ? { words: freeText.freeText } : {}),
+    });
+    for (const t of others) observe(patient, c.date, c, t, { source: "typed", amount: t.m.amount, change: t.m.change, words: t.m.words });
+
     let updated: CheckinRow = { ...c, answers };
     const sends: Send[] = [];
     const next = c.questionIndex + 1;
-
-    const red = evaluateRedFlag(q, answer);
-    if (red) {
-      updated = { ...updated, concernAt: noteConcern(patient, c, q.id) };
-      const sharing = getSharing(db, patient.id) ?? "status";
-      const key = `${patient.id}:${c.date}:red-flag:${q.id}`;
-      sends.push(
-        // Name the family members actually told (display name, else their Relay handle); none linked: no family line.
-        {
-          chatId,
-          message: { text: redFlagAdvice(patient.preferredName, familyChats(db, patient.id).map(familyName), c.questionIds.length - next) },
-          key,
-        },
-        ...toFamily(
-          patient,
-          familyRedFlagAlert({
-            seniorName: patient.preferredName,
-            sharing,
-            questionText: red.questionText,
-            answer: red.answer,
-            ...(freeText ? { words: freeText.freeText } : {}),
-          }),
-          key,
-        ),
-      );
+    let lead: string | undefined;
+    if (level >= 3) {
+      const fromAnswer = own.level >= 3;
+      const reason = fromAnswer ? q.id : other!.topic;
+      const detail = fromAnswer ? { questionText: q.text, answer, ...(freeText ? { words: freeText.freeText } : {}) } : { ...(freeText ? { words: freeText.freeText } : {}) };
+      const three = levelThree(patient, c, reason, chatId, `${patient.id}:${c.date}:red-flag:${reason}`, detail, c.questionIds.length - next);
+      updated = { ...updated, concernAt: three.concernAt };
+      sends.push(...three.sends);
+    } else if (level === 2) {
+      followUpLater(patient, c, own.level === 2 ? q.id : other!.topic, 2);
+      lead = keepAnEye(name);
+    } else if (level === 1 && q.id === "mood" && own.level === 1) {
+      lead = feelingLowReply(name); // "Not great": the warm feeling-low words, not "noted for your doctor"
+    } else if (level === 1 && !c.answers.some((a) => a.level === 1)) {
+      lead = notedForDoctor(); // once per check-in
     }
 
-    if (next < c.questionIds.length) sends.push(...askQuestion(patient, updated, next, chatId));
-    else sends.push(...afterLastQuestion(patient, updated, chatId));
+    if (next < c.questionIds.length) sends.push(...askQuestion(patient, updated, next, chatId, lead));
+    else sends.push(...afterLastQuestion(patient, updated, chatId, lead));
     return sends;
+  }
+
+  /** Her tap on "A little" / "A lot": the question's answer at that amount, with what she typed and any change she described. */
+  function answerClarified(patient: CheckinPatient, c: CheckinRow, q: Question, asked: Clarification, amount: "a_little" | "a_lot", chatId: string): Send[] {
+    const labels = clarifyLabels(q.id);
+    const label = labels?.[amount] ?? q.buttons[0]!;
+    const words = asked.words ?? "";
+    const mention: SymptomMention = { topic: q.id, questionId: q.id, amount, change: (asked.change ?? "unknown") as Change, words };
+    return answerQuestion(patient, c, q, label, chatId, words ? { via: "free_text", freeText: words } : undefined, [mention]);
+  }
+
+  /**
+   * The one clarifying question: she typed about today's question, the model isn't sure which button,
+   * and how much she has of it is unclear in a way that changes the level. Asked once per question of a
+   * check-in (never twice); undefined when it doesn't apply.
+   */
+  function planClarify(patient: CheckinPatient, msg: InboundMessage, c: CheckinRow, q: Question, mentions: SymptomMention[], text: string): Send[] | undefined {
+    if (!clarifyLabels(q.id)) return undefined;
+    const unclear = mentions.find((m) => topicOf(m) === q.id && needsClarifying(m));
+    if (!unclear) return undefined;
+    const id = addClarification(db, { patientId: patient.id, checkinId: c.id, questionId: q.id, change: unclear.change, words: text, askedAt: clock.now() });
+    if (id === undefined) return undefined;
+    return [
+      {
+        chatId: msg.chatId,
+        message: { text: clarifyAmount(patient.preferredName), buttons: [CLARIFY_BUTTONS.a_little, CLARIFY_BUTTONS.a_lot] },
+        key: `${patient.id}:${c.date}:clarify:${q.id}`,
+        prompt: promptFor(c, "question"),
+      },
+    ];
+  }
+
+  /**
+   * Symptoms she mentioned in chat (nothing pending, or chat while a check-in waits): saved, and a fixed
+   * reply by the highest level. 1: sorry, noted for her doctor. 2: keep an eye on it, a follow-up later
+   * today. 3: the red-flag reply and alert. No reply mentions 911 below 3.
+   */
+  function planSymptoms(patient: CheckinPatient, msg: InboundMessage, c: CheckinRow | undefined, mentions: SymptomMention[]): Send[] {
+    const name = patient.preferredName;
+    const day = dayFor(patient.id, c);
+    const history = historyFor(patient.id, day);
+    const leveled = mentions.map((m) => ({ m, ...levelFor({ source: "typed", mention: m }, history) }));
+    for (const t of leveled) observe(patient, day, c, t, { source: "typed", amount: t.m.amount, change: t.m.change, words: t.m.words });
+    const top = highest(leveled);
+    const key = `${patient.id}:reply:${msg.messageId}`;
+    if (!top || top.level === 0) return [];
+    if (top.level >= 3) return levelThree(patient, c, top.topic, msg.chatId, `${patient.id}:red-flag:${msg.messageId}`, { words: msg.text.trim() }).sends;
+    if (top.level === 2) {
+      followUpLater(patient, c, top.topic, 2);
+      return [{ chatId: msg.chatId, message: { text: keepAnEyeReply(name) }, key }];
+    }
+    const topics = leveled.filter((t) => t.level >= 1).map((t) => t.topic);
+    return [{ chatId: msg.chatId, message: { text: symptomNotedReply(name, topics) }, key }];
   }
 
   /** The check-in still waiting for her, if any. */
@@ -665,7 +865,11 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     return planFollowUpAnswer(patient, f, answer, msg);
   }
 
-  /** Her answer to a follow-up. "Worse" is treated like a red flag again; the others get a short warm reply. */
+  /**
+   * Her answer to a follow-up, levelled like anything else: Better 0 (a warm close), About the same
+   * keeps the earlier level at most 2 (keep an eye on it), Worse at least 3 (her doctor today and an
+   * alert to every family chat; 911 now after an urgent symptom, 988 after a crisis).
+   */
   function planFollowUpAnswer(patient: CheckinPatient, f: FollowUpRow, answer: FollowUpAnswer, msg: InboundMessage): Send[] {
     if (!answerFollowUp(db, f.id, FOLLOW_UP_BUTTONS[answer], clock.now())) return [];
     const name = patient.preferredName;
@@ -673,7 +877,10 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     const sharing = getSharing(db, patient.id) ?? "status";
     const key = `${patient.id}:follow-up:${f.id}:answer`;
     const names = familyChats(db, patient.id).map(familyName);
-    const worse = topic === "crisis" ? crisisReply(name, names) : redFlagAdvice(name, names);
+    const sev = levelFor({ source: "follow_up", answer, priorLevel: (f.level ?? LEGACY_FOLLOW_UP_LEVEL) as Level });
+    const c = f.checkinId !== null ? getCheckinById(db, f.checkinId) : undefined;
+    observe(patient, dayFor(patient.id, c), c, { level: sev.level, topic: f.reason }, { source: "follow_up" });
+    const worse = topic === "crisis" ? crisisReply(name, names) : sev.level >= 4 ? urgentReply(name, names) : redFlagAdvice(name, names);
     const sends: Send[] =
       answer === "worse"
         ? [
@@ -697,7 +904,10 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     const names = familyChats(db, patient.id).map(familyName);
     const words = msg.text.trim();
     // The check-in pauses: nothing more is asked in this reply, no flag offer today.
-    noteConcern(patient, pendingCheckin(patient.id), kind);
+    const c = pendingCheckin(patient.id);
+    const sev = levelFor({ source: "safety", kind });
+    noteConcern(patient, c, kind, sev.level);
+    observe(patient, dayFor(patient.id, c), c, sev, { source: "safety" });
     const key = `${patient.id}:safety:${msg.messageId}`;
     const reply = kind === "crisis" ? crisisReply(name, names) : urgentReply(name, names);
     const alert = kind === "crisis" ? familyCrisisAlert({ seniorName: name, sharing, words }) : familyUrgentAlert({ seniorName: name, sharing, words });
@@ -748,6 +958,14 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
 
   function saveNote(patient: CheckinPatient, about: NoteTarget, text: string): void {
     addCheckinNote(db, { patientId: patient.id, ...about, text, createdAt: clock.now() });
+  }
+
+  /** Complaints the model found without saying which symptom or how much: saved at level 1 for her doctor (complaintReply). */
+  function noteComplaints(patient: CheckinPatient, ctx: TypedContext, complaints: string[]): void {
+    const c = ctx.at === "question" || ctx.at === "step" ? ctx.c : pendingCheckin(patient.id);
+    const day = dayFor(patient.id, c);
+    for (const words of complaints)
+      observe(patient, day, c, { level: 1, topic: topicOf({ topic: words }) }, { source: "typed", amount: "unknown", change: "unknown", words });
   }
 
   /**
@@ -819,8 +1037,15 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       case "small_talk": {
         const talk = understood?.smallTalk;
         if (talk) addMemories(db, patient.id, [...talk.memories, ...talk.complaints], clock.now());
-        const complained = cls.complaints.length > 0 || (talk?.complaints.length ?? 0) > 0;
-        const said = complained ? complaintReply(name) : talk ? checkedSmallTalk(talk.text) : undefined;
+        const basis = chatBasis(cls);
+        // Symptoms she mentioned: a fixed reply by level (see "Severity ladder" above), never the model's words.
+        if (basis === "symptoms") {
+          const c = ctx.at === "question" || ctx.at === "step" ? ctx.c : pendingCheckin(patient.id);
+          return { sends: [...planSymptoms(patient, msg, c, cls.symptoms ?? []), ...again(patient, ctx, msg)] };
+        }
+        const complaints = basis === "complaint" ? cls.complaints : (talk?.complaints ?? []);
+        if (complaints.length > 0) noteComplaints(patient, ctx, complaints);
+        const said = complaints.length > 0 ? complaintReply(name) : talk ? checkedSmallTalk(talk.text) : undefined;
         if (said === undefined && ctx.at !== "none")
           return { sends: [withButtons(patient, ctx, msg, typedReplyUnavailable(buttonsOf(ctx)), "typed-unavailable")] };
         return { sends: [reply(said ?? smallTalkFallback(name)), ...again(patient, ctx, msg)] };
@@ -850,8 +1075,9 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
           saveNote(patient, { checkinId: c.id, questionId: q.id }, text);
           return [withButtons(patient, ctx, msg, freeTextConfirm(text, q.text), "free-text-confirm")];
         }
-        if (label === undefined) return didnt();
-        return answerQuestion(patient, c, q, label, msg.chatId, { via: "free_text", freeText: text });
+        const mentions = cls.symptoms ?? [];
+        if (label === undefined) return planClarify(patient, msg, c, q, mentions, text) ?? didnt();
+        return answerQuestion(patient, c, q, label, msg.chatId, { via: "free_text", freeText: text }, mentions);
       }
       case "step": {
         if (label === undefined) return didnt();
@@ -927,6 +1153,10 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (c.step === "question") {
       if (is(text, BUTTON.notToday)) return { sends: notToday(patient, c, chatId) };
       const q = questionById(c.questionIds[c.questionIndex]!);
+      // Her tap on "A little, or a lot?" sets the level of what she typed about this question.
+      const asked = openClarification(db, c.id, q.id);
+      const amount = asked ? clarifyTapOf(text) : undefined;
+      if (asked && amount) return { sends: answerClarified(patient, c, q, asked, amount, chatId) };
       const answer = q.buttons.find((b) => is(text, b));
       if (answer === undefined) return planTyped(patient, msg, { at: "question", c, q }, understood);
       return { sends: answerQuestion(patient, c, q, answer, chatId) };

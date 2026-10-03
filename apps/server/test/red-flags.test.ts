@@ -9,20 +9,22 @@ const q = (id: string): Question => {
 };
 
 describe("evaluateRedFlag", () => {
-  it("hf-breathing-lying-flat: Yes is a red flag, No is not", () => {
+  it("hf-breathing-lying-flat: only \"Yes, it was hard\" (level 3) is a red flag; Fine and A little hard are not", () => {
     const question = q("hf-breathing-lying-flat");
-    expect(evaluateRedFlag(question, "Yes")).toEqual({
+    expect(evaluateRedFlag(question, "Yes, it was hard")).toEqual({
       questionId: "hf-breathing-lying-flat",
       questionText: question.text,
-      answer: "Yes",
+      answer: "Yes, it was hard",
     });
-    expect(evaluateRedFlag(question, "No")).toBeUndefined();
+    expect(evaluateRedFlag(question, "Fine")).toBeUndefined();
+    expect(evaluateRedFlag(question, "A little hard")).toBeUndefined();
   });
 
-  it("anticoagulant-bleeding: Yes is a red flag, No is not", () => {
+  it("anticoagulant-bleeding: only \"Yes, bleeding\" is a red flag; A little bruising is worth watching, not a red flag", () => {
     const question = q("anticoagulant-bleeding");
-    expect(evaluateRedFlag(question, "Yes")).toMatchObject({ questionId: "anticoagulant-bleeding", answer: "Yes" });
+    expect(evaluateRedFlag(question, "Yes, bleeding")).toMatchObject({ questionId: "anticoagulant-bleeding", answer: "Yes, bleeding" });
     expect(evaluateRedFlag(question, "No")).toBeUndefined();
+    expect(evaluateRedFlag(question, "A little bruising")).toBeUndefined();
   });
 
   it.each(["hf-ankle-swelling", "dizzy-on-standing", "morning-medicines", "mood"])("%s: no answer is a red flag", (id) => {
@@ -31,12 +33,13 @@ describe("evaluateRedFlag", () => {
   });
 
   it("matches case-insensitively and ignores surrounding spaces, returning the canonical label", () => {
-    expect(evaluateRedFlag(q("hf-breathing-lying-flat"), "  yes ")).toMatchObject({ answer: "Yes" });
-    expect(evaluateRedFlag(q("anticoagulant-bleeding"), "YES")).toMatchObject({ answer: "Yes" });
+    expect(evaluateRedFlag(q("hf-breathing-lying-flat"), "  yes, IT WAS hard ")).toMatchObject({ answer: "Yes, it was hard" });
+    expect(evaluateRedFlag(q("anticoagulant-bleeding"), "YES, BLEEDING")).toMatchObject({ answer: "Yes, bleeding" });
   });
 
   it("free text that only contains a red-flag word is not a red flag", () => {
     expect(evaluateRedFlag(q("hf-breathing-lying-flat"), "yes a little")).toBeUndefined();
+    expect(evaluateRedFlag(q("hf-breathing-lying-flat"), "Yes")).toBeUndefined();
   });
 
   it("every red-flag answer in the bank is one of that question's buttons", () => {

@@ -67,10 +67,10 @@ async function say(text: string, replyTo?: SentMessage): Promise<SentMessage[]> 
 const brief = (messages: SentMessage[]) => messages.map(({ chatId, text, buttons }) => ({ chatId, text, buttons }));
 const msg = (chatId: string, text: string, buttons?: string[]) => ({ chatId, text, buttons });
 
-/** A red flag on the breathing question (day 1, Harriet taps Yes, then No twice), then the follow-up sent. */
+/** A red flag on the breathing question (day 1, Harriet taps "Yes, it was hard", then No twice), then the follow-up sent. */
 async function redFlagThenDue(): Promise<SentMessage> {
   await engine.startDay(P, DAY1);
-  for (const t of [BUTTON.start, "Yes", "No", "No"]) await say(t);
+  for (const t of [BUTTON.start, "Yes, it was hard", "No", "No"]) await say(t);
   now = DUE;
   expect(await engine.runDueFollowUps(now)).toBe(1);
   return messenger.lastIn(ME)!;
@@ -85,7 +85,7 @@ describe("runDueFollowUps", () => {
   it("sends nothing before it is due, then the topic's question with Better / About the same / Worse, once", async () => {
     await engine.startDay(P, DAY1);
     await say(BUTTON.start);
-    await say("Yes");
+    await say("Yes, it was hard");
     expect(await engine.runDueFollowUps("2026-09-01T15:59:00.000Z")).toBe(0);
     now = DUE;
     expect(await engine.runDueFollowUps(now)).toBe(1);
@@ -99,8 +99,8 @@ describe("runDueFollowUps", () => {
   it("asks about bleeding after a bleeding red flag, and how she feels after a safety hit", async () => {
     await engine.startDay(P, DAY1);
     await say(BUTTON.start);
-    await say("No");
-    await say("Yes"); // bleeding
+    await say("Fine");
+    await say("Yes, bleeding");
     now = DUE;
     await engine.runDueFollowUps(now);
     expect(messenger.lastIn(ME)?.text).toBe(followUpQuestion("Harriet", "bleeding"));
@@ -113,7 +113,7 @@ describe("runDueFollowUps", () => {
   it("a send that fails stays unsent and goes out on the next run, once", async () => {
     await engine.startDay(P, DAY1);
     await say(BUTTON.start);
-    await say("Yes");
+    await say("Yes, it was hard");
     now = DUE;
     const send = messenger.send.bind(messenger);
     messenger.send = async () => {
@@ -129,7 +129,7 @@ describe("runDueFollowUps", () => {
   it("two runs at once send each follow-up once", async () => {
     await engine.startDay(P, DAY1);
     await say(BUTTON.start);
-    await say("Yes");
+    await say("Yes, it was hard");
     now = DUE;
     const [a, b] = await Promise.all([engine.runDueFollowUps(now), engine.runDueFollowUps(now)]);
     expect(a + b).toBeGreaterThanOrEqual(1);
@@ -195,7 +195,7 @@ describe("her answer", () => {
     const f = messenger.lastIn(ME)!;
     expect(brief(await say("Better", f))).toEqual([msg(ME, followUpReply("Harriet", "better", "general")), msg(ME, breathing.text, breathing.buttons)]);
     // The re-sent question takes her tap.
-    expect((await say("No", messenger.lastIn(ME)))[0]?.text).toMatch(/bruising or bleeding/);
+    expect((await say("Fine", messenger.lastIn(ME)))[0]?.text).toMatch(/bruising or bleeding/);
   });
 
   it("typed in her own words, the model maps it to a button", async () => {
