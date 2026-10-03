@@ -35,6 +35,14 @@ Open:
 
 - [ ] Red-flag cadence numbers: `redFlagEveryDays = 2` and `followUpDays = 3` in `apps/server/src/context/questions.ts`. Product values, not clinical cutoffs; change them if they feel wrong in rehearsal.
 
+## Lane 3: Presage video spike (2026-10-03)
+
+- Implemented a file-based SmartSpectra runner with `@smartspectra/node-sdk` 3.4.0. It requests pulse and breathing metrics, decodes the SDK protobuf messages, emits normalized JSON, records validation and SDK errors, and exits nonzero when either required reading is missing.
+- Added a Relay `VideoStream` frame adapter design. It maps RGB, BGR, RGBA, BGRA, NV12, NV21 and YUYV, preserves dimensions and stride, supplies strictly increasing monotonic timestamps, and rejects I420 until a tested conversion path exists.
+- Video characteristics: no real clip was available during this run. The spike expects a local 30 to 60 second, well-lit, mostly still MP4/H.264 face clip. Real video must stay local and out of Git.
+- Readings produced: no live Presage reading was attempted without a local clip and API key. Offline unit coverage decodes a representative packet of 73 bpm pulse and 15 breaths/min with confidence 76, but this is a decoder test, not a physiological measurement.
+- Limitations: SmartSpectra authenticates against its service, so the real clip run needs `PRESAGE_API_KEY` and network access. Relay's actual `VideoStream` payload shape still needs confirmation on a live call. Harriet's AFib reading remains an estimate and must not be compared with her usual range.
+
 ## Team tasks (humans only, not for Claude Code)
 
 Relay setup (WebSocket, so no public URL and no webhook secret):

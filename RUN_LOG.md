@@ -167,3 +167,35 @@ Split by lanes in `docs/TEAM_PLAN.md`. Lane 1 (Relay live) first: token, two pho
 Retest on the phone with `FOLLOW_UP_DELAY_MINUTES=2`; add a second phone as family; then tick the remaining M1 boxes in `docs/DEFINITION_OF_DONE.md` and open the lane 1 PR.
 
 **Open questions:** `FEEDBACK.md` (phrase list review, held-out eval, demo-day LLM backup).
+
+## Lane 3: Presage video spike: 2026-10-03 17:44
+
+**Goal of this run:** Add a file-based SmartSpectra spike and prepare the Relay video-frame seam.
+
+**What was built:**
+- Added the pinned `@smartspectra/node-sdk` 3.4.0 dependency and kept `PRESAGE_API_KEY` documented only as an environment variable.
+- Added `npm run vitals:video -- <video.mp4>`, which requests pulse and breathing metrics from `useFile()`, decodes the SDK messages, prints normalized JSON, and exits nonzero without both readings.
+- Added normalized vitals types, metric merging, confidence handling, validation events, SDK error handling and timeout handling.
+- Added the Relay frame adapter design with format mapping, stride preservation, monotonic timestamps and explicit rejection results.
+- Added offline tests for metric normalization, file-runner failures and Relay-frame handling.
+- Documented the spike result and current limitations in `FEEDBACK.md`.
+
+**What was skipped or changed from spec:**
+- No real video was committed or processed because no local clip or Presage API key was available. The integration is ready for the human-provided clip and key.
+- The Relay frame adapter is intentionally not wired into the live call handler because the call/vitals handler does not exist yet and the real `VideoStream` payload shape is unverified.
+- `.env.example` already contained the required empty `PRESAGE_API_KEY` entry, so it required no change.
+
+**Files touched:**
+- `apps/server/package.json`, `apps/server/package-lock.json`: SmartSpectra dependency and reproducible lockfile.
+- `apps/server/src/vitals/`: normalized result types, file runner, and Relay frame adapter.
+- `apps/server/src/cli/vitals-video.ts`: file-based spike CLI.
+- `apps/server/test/vitals-*.test.ts`, `apps/server/test/relay-frame-adapter.test.ts`: offline coverage.
+- `FEEDBACK.md`: spike result and limitations.
+
+**Commits:**
+- Pending: `build: lane3: add Presage video spike`.
+
+**Recommended next step:**
+Put a local 30 to 60 second face clip outside Git, set `PRESAGE_API_KEY` in `.env`, then run `npm run vitals:video -- /absolute/path/to/face.mp4`. After that, connect the verified Relay `VideoStream` frame shape to `createRelayVideoFrameAdapter`.
+
+**Open questions:** Confirm the live Relay `VideoStream` pixel format and whether it supplies a usable source timestamp; if it supplies I420, add and test a conversion path before sending frames to SmartSpectra.
