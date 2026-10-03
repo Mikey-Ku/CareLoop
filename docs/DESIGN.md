@@ -37,7 +37,7 @@ Backend parts:
 | Lint | `tsc --noEmit` (`npm run lint`) | Typecheck only; no ESLint dependency |
 | Relay | `@relaymessenger/sdk`, `@relaymessenger/elevenlabs`, CLI `npx relaymessenger` | Chat, buttons, calls, media, voice memos |
 | Voice | ElevenLabs Agent (configured in the ElevenLabs dashboard) | Warm voice; context passed at call start |
-| LLM | Anthropic Claude via `@anthropic-ai/sdk` | Chat wording and vision for paper photos |
+| LLM | Gemini (free tier) through its REST API, behind a provider-neutral `LlmClient` (`src/llm/`); Claude possible via `LLM_PROVIDER=anthropic` | Reads free-text replies, writes small talk, reads paper photos. Free tier: synthetic data only, and Google may use prompts to improve its products. Decided 2026-10-03 |
 | Vitals | Presage SmartSpectra C++ SDK with custom frame input, as a sidecar in `services/presage-bridge/` | Takes raw frames from the Relay video call. Final choice after the spike |
 | Drug names | NLM RxNav REST API (no key) | Map free-text medication names to RxNorm codes. Exact normalized-name match only (`rxcui.json?search=2`); approximate search guesses wrong drugs |
 | Package manager | npm | Default with Node |
@@ -146,6 +146,17 @@ A rule result is recomputed on every snapshot and shown to no one. A rule result
 - Camera readings are saved in `vitals_readings` for trends and never change the usual range.
 - Breathing rate is said back and saved, never compared: no breathing-rate readings exist in Harriet's record.
 - Atrial fibrillation: camera heart rate is least reliable with an irregular rhythm, so for a patient with active AFib the reading is reported as an estimate and never compared with her usual range (`usualRange.compareHeartRate: false`). Harriet has AFib, so her demo vitals call reports a number without in or out.
+
+## Free-text replies
+
+Buttons stay the main way to answer. Typed replies are the second way, read by the LLM, which never decides what is risky:
+
+- **Ordinary question** (ankles, dizziness, medicines, mood): the LLM maps her words onto one of the question's buttons ("a bit puffy" to "A little"). High or medium confidence counts as that tap; "unclear", low confidence or an LLM failure gets the usual "tap one of these".
+- **Red-flag question** (breathing lying flat, bleeding): the AI never records an answer. She always gets a one-tap confirm built from her own words and the question ("You wrote: ... Just to check: ..."), and her tap goes through the normal red-flag rule. Works with no LLM at all. Measured case: "nah I was fine, just had to prop myself up on a couple pillows" is a breathing symptom despite the "fine".
+- **Nothing pending:** small talk from the LLM (short, says it is an assistant, no medical advice). If she mentions a health complaint, a fixed reply goes out instead (call your doctor; 911 if it feels like an emergency). No family alert: complaints in small talk are not red flags under the rules.
+- Other things she mentions are saved to `memories` for the voice call; never acted on.
+- While the LLM works, her chat shows a Relay activity label ("Reading your message").
+- Resilience (free tier returned 503 "high demand" often on 2026-10-03): models tried in order (`GEMINI_MODELS`, default three lite models, the cheapest tier: `gemini-flash-lite-latest`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`; `thinkingLevel: minimal` and output capped at 200 or 300 tokens, so a mapping call is about 70 tokens in and 20 out), because load moves between models (one returned 503 for minutes while others answered in under a second). A busy model (503, 429, or slower than `LLM_ATTEMPT_TIMEOUT_MS`, 4 s) is skipped at once; a 500 or network error gets one retry; 12 second budget overall; then the button fallback. For the live demo, keep a paid key or Claude credits ready as a one-line `.env` switch.
 
 ## Sharing levels and record consent
 

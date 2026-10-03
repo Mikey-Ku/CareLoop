@@ -12,9 +12,11 @@ import {
   flagDetail,
   flagNotedReply,
   flagOffer,
+  freeTextConfirm,
   notTodayReply,
   redFlagAdvice,
   SHARING_MENU_BUTTON,
+  smallTalkFallback,
 } from "../src/checkin/copy.ts";
 import { createCheckinEngine } from "../src/checkin/engine.ts";
 import type { CheckinEngine } from "../src/checkin/engine-types.ts";
@@ -141,8 +143,10 @@ describe("a full Harriet day", () => {
     // The whole day, in order: 8 to her, 1 to the family.
     expect(messenger.sent.map((m) => m.chatId)).toEqual([ME, ME, ME, ME, ME, ME, ME, ME, FAMILY]);
 
-    // Nothing pending: free text is ignored.
-    expect(await say("thanks dear")).toEqual([]);
+    // Nothing pending: with no LLM, free text gets the fixed small-talk reply (test/free-text.test.ts).
+    expect(brief(await say("thanks dear"))).toEqual([msg(ME, smallTalkFallback("Harriet"))]);
+    // A late tap on one of the day's buttons is ignored.
+    expect(await say("I'll ask my doctor")).toEqual([]);
   });
 
   it("at sharing level status the family gets only the outcome", async () => {
@@ -485,13 +489,22 @@ describe("idempotency and robustness", () => {
     expect(getCheckin(db, P, DAY1)).toMatchObject({ step: "question", questionIndex: 0 });
   });
 
-  it("unrecognised text while a question is pending gets the buttons again and nothing else", async () => {
+  it("unrecognised text while an ordinary question is pending gets the buttons again and nothing else (no LLM)", async () => {
+    await engine.startDay(P, DAY1);
+    for (const t of ["Let's start", "No", "No"]) await say(t);
+    const dizzy = question("dizzy-on-standing");
+    expect(brief(await say("what?"))).toEqual([msg(ME, didntUnderstand(dizzy.buttons), dizzy.buttons)]);
+    expect(getCheckin(db, P, DAY1)).toMatchObject({ step: "question", questionIndex: 2 });
+    expect(getCheckin(db, P, DAY1)?.answers).toHaveLength(2);
+    expect(brief(await say("hello"))).toHaveLength(1); // each unclear message gets its own reply
+  });
+
+  it("unrecognised text on a red-flag question is quoted back with its buttons, even with no LLM", async () => {
     await engine.startDay(P, DAY1);
     await say("Let's start");
     const breathing = question("hf-breathing-lying-flat");
-    expect(brief(await say("what?"))).toEqual([msg(ME, didntUnderstand(breathing.buttons), breathing.buttons)]);
+    expect(brief(await say("what?"))).toEqual([msg(ME, freeTextConfirm("what?", breathing.text), breathing.buttons)]);
     expect(getCheckin(db, P, DAY1)).toMatchObject({ step: "question", questionIndex: 0, answers: [] });
-    expect(brief(await say("hello"))).toHaveLength(1); // each unclear message gets its own reply
   });
 
   it("unrecognised text at the greeting and at the flag offer", async () => {
@@ -501,8 +514,9 @@ describe("idempotency and robustness", () => {
     expect(brief(await say("maybe"))).toEqual([msg(ME, didntUnderstand([BUTTON.tellMeMore, BUTTON.later]), [BUTTON.tellMeMore, BUTTON.later])]);
   });
 
-  it("free text before any check-in is ignored", async () => {
-    expect(await say("hello")).toEqual([]);
+  it("free text before any check-in gets the fixed small-talk reply (no LLM); a button label is ignored", async () => {
+    expect(brief(await say("hello"))).toEqual([msg(ME, smallTalkFallback("Harriet"))]);
+    expect(await say("Let's start")).toEqual([]);
   });
 
   it("messages from an unknown chat are ignored", async () => {

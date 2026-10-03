@@ -81,6 +81,48 @@ export function didntUnderstand(buttons: string[]): string {
   return `Sorry, I didn't understand that. You can tap one of these: ${listJoin(quoted)}.`;
 }
 
+// Free text (src/checkin/engine.ts): what she types instead of tapping a button.
+
+/** The activity label her chat shows while the assistant reads what she typed (Relay: 1 to 21 characters). */
+export const READING_ACTIVITY = "Reading your message";
+
+/** How much of her own words a confirm quotes back. */
+export const QUOTE_MAX_CHARS = 120;
+
+/** Her words on one line, cut at a word near QUOTE_MAX_CHARS. Double quotes and long dashes are softened. */
+function quoteHerWords(reply: string): string {
+  const one = reply.replace(/\s+/g, " ").replace(/"/g, "'").replace(/\s*[\u2013\u2014]\s*/g, " - ").trim();
+  if (one.length <= QUOTE_MAX_CHARS) return one;
+  const cut = one.slice(0, QUOTE_MAX_CHARS);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > QUOTE_MAX_CHARS / 2 ? cut.slice(0, space) : cut).replace(/[\s.,;:]+$/, "")}...`;
+}
+
+/**
+ * She typed an answer to a red-flag question. The app never records that answer from what an
+ * AI made of her words: it quotes them back and asks the question again with its own buttons,
+ * so the red-flag rule only ever acts on a tap.
+ */
+export function freeTextConfirm(reply: string, questionText: string): string {
+  return `You wrote: "${quoteHerWords(reply)}"\nJust to check: ${questionText}`;
+}
+
+/**
+ * She mentioned a health complaint outside a check-in. A fixed reply, not the model's words, and
+ * no family alert: under the rules this isn't a red flag, so she is pointed to her doctor and 911.
+ */
+export function complaintReply(name: string): string {
+  return `Thank you for telling me, ${name}. If this is worrying you, please call your doctor. If it feels like an emergency, call 911.`;
+}
+
+/**
+ * The reply to a message outside a check-in when the assistant can't read it (no LLM, or it is down).
+ * It can't tell what she wrote, so it points to her doctor and 911 in case it was something worrying.
+ */
+export function smallTalkFallback(name: string): string {
+  return `Thanks for your message, ${name}. I'll be back with your next check-in. If something is worrying you, please call your doctor. If it feels like an emergency, call 911.`;
+}
+
 // Hospital paper check (after the read-back)
 
 /** After "No, something's off". */

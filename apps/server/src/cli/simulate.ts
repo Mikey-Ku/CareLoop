@@ -4,6 +4,7 @@ import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { loadConfig, parseHandles } from "../config.ts";
 import { ConsentInactiveError, FinchNodeError, SubjectNotFoundError } from "../finchnode/client.ts";
+import { createLlmClient, describeLlm } from "../llm/index.ts";
 import { painter, useColor } from "./sim-render.ts";
 import {
   DEFAULT_DB_PATH,
@@ -18,13 +19,14 @@ import {
 } from "./simulator.ts";
 
 // npm run simulate -- [subject] [--day YYYY-MM-DD] [--db path] [--reset] [--live]
-//                     [--script file] [--sharing status|status_vitals|all] [--family sarah,tom]
+//                     [--script file] [--sharing status|status_vitals|all] [--family sarah,tom] [--llm]
 // Runs the daily check-in in the terminal: Harriet's phone and each family
 // member's own chat with the agent as separate panes, her replies typed at the
-// prompt. See src/cli/simulator.ts.
+// prompt. --llm reads what she types with the LLM from .env (GEMINI_API_KEY);
+// without it, buttons only. See src/cli/simulator.ts.
 
 const USAGE =
-  "usage: npm run simulate -- [subject] [--day YYYY-MM-DD] [--db path] [--reset] [--live] [--script file] [--sharing status|status_vitals|all] [--family sarah,tom]";
+  "usage: npm run simulate -- [subject] [--day YYYY-MM-DD] [--db path] [--reset] [--live] [--script file] [--sharing status|status_vitals|all] [--family sarah,tom] [--llm]";
 
 /** Delete the simulator DB file (and its WAL siblings). Refuses the app database. */
 function resetDatabase(dbPath: string, appDbPath: string): void {
@@ -48,6 +50,7 @@ async function main(argv: string[]): Promise<number> {
         script: { type: "string" },
         sharing: { type: "string" },
         family: { type: "string" },
+        llm: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
     });
@@ -74,6 +77,11 @@ async function main(argv: string[]): Promise<number> {
   }
 
   const config = loadConfig();
+  const llm = values.llm ? createLlmClient(config) : undefined;
+  if (values.llm && !llm) {
+    console.error(`error: --llm needs an LLM in .env: ${describeLlm(config)}`);
+    return 1;
+  }
   const subject = positionals[0] ?? DEFAULT_SUBJECT;
   const dbPath = values.db ?? DEFAULT_DB_PATH;
   const color = useColor(process.stdout);
@@ -85,6 +93,7 @@ async function main(argv: string[]): Promise<number> {
     output,
     color,
     config,
+    llm,
     ...(values.day ? { day: values.day } : {}),
     ...(values.sharing && isSharingLevel(values.sharing) ? { sharing: values.sharing } : {}),
     // Comma separated handles; "--family ''" means no family members.

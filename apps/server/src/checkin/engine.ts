@@ -30,12 +30,14 @@ import {
   syncFlags,
 } from "../db/index.ts";
 import { familyChats } from "../db/family.ts";
+import { addMemories, recentMemories } from "../db/memories.ts";
 import { inboundSeen, insertPaperScan, paperScanForAttachment } from "../db/paper-scans.ts";
 import { ConsentInactiveError } from "../finchnode/client.ts";
 import { loadRxNavCache } from "../finchnode/fixtures.ts";
 import { asOf, normalizeHealthRecord } from "../finchnode/normalize.ts";
 import type { RxNavCache } from "../finchnode/rxnav.ts";
 import type { SharingLevel } from "../db/index.ts";
+import type { AnswerMapping, MapAnswerInput, SmallTalkInput, SmallTalkReply } from "../llm/types.ts";
 import type { InboundMessage, OutboundMessage } from "../relay/messenger.ts";
 import { runRules } from "../rules/index.ts";
 import type { ExtractedPaper } from "../rules/paper-diff.ts";
@@ -43,6 +45,7 @@ import {
   BUTTON,
   checkinDone,
   checkinGreeting,
+  complaintReply,
   didntUnderstand,
   familyDailyStatus,
   familyMissedAlert,
@@ -50,7 +53,9 @@ import {
   flagDetail,
   flagNotedReply,
   flagOffer,
+  freeTextConfirm,
   notTodayReply,
+  READING_ACTIVITY,
   recordLinkEndedFamily,
   recordLinkEndedSenior,
   redFlagAdvice,
@@ -60,9 +65,10 @@ import {
   sharingChangedSenior,
   sharingLevelFromButton,
   sharingMenu,
+  smallTalkFallback,
   type DayOutcome,
 } from "./copy.ts";
-import type { CheckinEngine, DayResult, EngineDeps } from "./engine-types.ts";
+import type { CheckinEngine, DayResult, EngineDeps, FreeTextAnswer } from "./engine-types.ts";
 import { PAPER_CONFIRM_BUTTONS, paperReadback } from "./paper-check.ts";
 import {
   createPaperFlow,
@@ -101,6 +107,24 @@ import { evaluateRedFlag } from "./red-flags.ts";
 // or no step at all doesn't answer what is pending now. It re-sends the current
 // prompt instead. "Not today" from the greeting or any question of the pending
 // check-in still ends the day. Typed text (no replyTo) is matched as before.
+//
+// Free text (deps.llm, src/llm): what she types that isn't a button label.
+//   - An ordinary question: the LLM maps it to one of the question's buttons. A high or
+//     medium confidence match is recorded as if she tapped it (with her words, via
+//     "free_text"); anything else gets "didn't understand" with the buttons, as before.
+//   - A red-flag question (breathing lying flat, bleeding): never recorded from the LLM.
+//     Her words are quoted back with the question and its buttons (freeTextConfirm), so the
+//     red-flag rule only acts on her tap. Needs no LLM; with one, it is asked afterwards,
+//     in the background, only for other complaints she mentioned.
+//   - Nothing pending (no open step, no paper check waiting): small talk. Things she
+//     mentions are saved as memories; a health complaint gets the fixed complaintReply,
+//     not the model's words, and no family alert (not a red flag under the rules).
+//     No LLM, or it fails: the fixed smallTalkFallback.
+// Other complaints from any mapping are saved as memories, never acted on. The LLM call
+// is async and planning is a synchronous transaction, so planning runs twice: the first
+// pass stops at free text and asks for an LLM answer without writing anything (the
+// message stays unhandled); the second pass plans with it. A message already handled
+// never reaches the LLM. Her chat shows "Reading your message" while it reads.
 
 export type EngineOptions = {
   /** MISSED_CHECKIN_TIME, shown in the family's missed check-in alert. */
@@ -113,6 +137,40 @@ export type EngineOptions = {
 type PromptRef = { checkinId: number; step: PromptStep; questionIndex: number };
 type Send = { chatId: string; message: OutboundMessage; key: string; prompt?: PromptRef };
 
+/** Free text the first planning pass found, which needs the LLM before it can be planned. */
+type FreeTextNeed =
+  | { kind: "answer"; checkinId: number; questionIndex: number; input: MapAnswerInput }
+  | { kind: "small_talk"; input: SmallTalkInput };
+
+/** What the LLM made of it. `undefined` means it couldn't help (unavailable, failed or timed out). */
+type FreeTextResult =
+  | { kind: "answer"; checkinId: number; questionIndex: number; mapping: AnswerMapping | undefined }
+  | { kind: "small_talk"; reply: SmallTalkReply | undefined };
+
+type Plan = {
+  sends: Send[];
+  /** Red-flag free text: once her confirm is out, ask the LLM only for other complaints she mentioned. */
+  complaintsFrom?: { patientId: string; input: MapAnswerInput };
+};
+
+/** A plan, or (first pass only, nothing written) the free text that needs the LLM first. */
+type Planned = Plan | { needs: FreeTextNeed };
+
+/** Memories passed to small talk as context, newest first. */
+export const SMALL_TALK_MEMORIES = 10;
+/** A small-talk reply longer than this (or empty, or with a long dash) is not sent; the fallback is. */
+export const MAX_SMALL_TALK_REPLY = 500;
+
+/** The model's small-talk text if it is fit to send as is, else undefined (the caller sends a template). */
+export function checkedSmallTalk(text: string): string | undefined {
+  const one = text.replace(/[ \t]+/g, " ").trim();
+  if (!one || one.length > MAX_SMALL_TALK_REPLY || /[\u2013\u2014]/.test(one)) return undefined;
+  return one;
+}
+
+/** Only high and medium confidence mappings are recorded. */
+const confident = (m: AnswerMapping) => m.confidence === "high" || m.confidence === "medium";
+
 /** A message carrying `step`'s buttons for check-in `c` (for a question, the one at c.questionIndex). */
 function promptFor(c: CheckinRow, step: PromptStep): PromptRef {
   return { checkinId: c.id, step, questionIndex: step === "question" ? c.questionIndex : 0 };
@@ -124,6 +182,18 @@ const is = (text: string, label: string) => norm(text) === norm(label);
 const QUESTIONS_BY_ID = new Map<string, Question>(
   QUESTION_BANK.map(({ id, text, buttons, redFlagAnswers }) => [id, { id, text, buttons, redFlagAnswers }]),
 );
+
+/** Every button label the engine sends, normalized. A message that equals one is a tap (maybe late), not small talk. */
+const ALL_LABELS = new Set(
+  [
+    ...Object.values(BUTTON),
+    ...QUESTION_BANK.flatMap((q) => q.buttons),
+    ...Object.values(SHARING_BUTTONS),
+    SHARING_MENU_BUTTON,
+    ...PAPER_CONFIRM_BUTTONS,
+  ].map(norm),
+);
+const isButtonLabel = (text: string) => ALL_LABELS.has(norm(text));
 
 function questionById(id: string): Question {
   const q = QUESTIONS_BY_ID.get(id);
@@ -155,6 +225,62 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     }
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1) throw new AggregateError(failures, `${failures.length} of ${sends.length} sends failed`);
+  }
+
+  // Free text (see "Free text" above). The LLM and the activity label are best effort: whatever
+  // goes wrong there, she still gets the button reply or the fixed template.
+
+  async function showActivity(chatId: string): Promise<void> {
+    try {
+      await messenger.setActivity?.(chatId, READING_ACTIVITY);
+    } catch {
+      // A missing label never holds up her reply.
+    }
+  }
+
+  async function clearActivity(chatId: string): Promise<void> {
+    try {
+      await messenger.clearActivity?.(chatId);
+    } catch {
+      // Relay drops it when its lease runs out anyway.
+    }
+  }
+
+  /** Ask the LLM about the free text the first planning pass found. Never throws. */
+  async function understand(need: FreeTextNeed): Promise<FreeTextResult> {
+    const llm = deps.llm;
+    if (need.kind === "answer") {
+      const { checkinId, questionIndex } = need;
+      let mapping: AnswerMapping | undefined;
+      try {
+        mapping = llm ? await llm.mapAnswer(need.input) : undefined;
+      } catch {
+        mapping = undefined; // LlmUnavailableError or anything else: "didn't understand" with the buttons
+      }
+      return { kind: "answer", checkinId, questionIndex, mapping };
+    }
+    let reply: SmallTalkReply | undefined;
+    try {
+      reply = llm ? await llm.smallTalk(need.input) : undefined;
+    } catch {
+      reply = undefined; // the fixed fallback reply
+    }
+    return { kind: "small_talk", reply };
+  }
+
+  /**
+   * After the confirm for a red-flag question is out: ask the LLM only for other complaints she
+   * mentioned and save them as memories. Its answer to the question is ignored. Runs in the
+   * background and never throws.
+   */
+  async function saveOtherComplaints(patientId: string, input: MapAnswerInput): Promise<void> {
+    if (!deps.llm) return;
+    try {
+      const { otherComplaints } = await deps.llm.mapAnswer(input);
+      addMemories(db, patientId, otherComplaints, clock.now());
+    } catch {
+      // Memories are a nice-to-have; her confirm already went out.
+    }
   }
 
   function requirePatient(patientId: string): CheckinPatient {
@@ -241,8 +367,9 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     ];
   }
 
-  function answerQuestion(patient: CheckinPatient, c: CheckinRow, q: Question, answer: string, chatId: string): Send[] {
-    const answers: StoredAnswer[] = [...c.answers, { questionId: q.id, questionText: q.text, answer, at: clock.now() }];
+  function answerQuestion(patient: CheckinPatient, c: CheckinRow, q: Question, answer: string, chatId: string, freeText?: FreeTextAnswer): Send[] {
+    const stored: StoredAnswer & Partial<FreeTextAnswer> = { questionId: q.id, questionText: q.text, answer, at: clock.now(), ...freeText };
+    const answers: StoredAnswer[] = [...c.answers, stored];
     updateCheckin(db, c.id, { answers, ...(q.id === "mood" ? { mood: answer } : {}) });
     const updated: CheckinRow = { ...c, answers };
     const sends: Send[] = [];
@@ -381,18 +508,90 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     return undefined;
   }
 
-  function planInbound(msg: InboundMessage, fresh: FreshRecord | undefined): Send[] {
+  /**
+   * Her typed reply to the pending question, when it isn't one of its labels. See "Free text" above.
+   * `understood` is the LLM's answer from handleInbound; without it (and with an LLM) this asks for one.
+   */
+  function planFreeTextAnswer(
+    patient: CheckinPatient,
+    c: CheckinRow,
+    q: Question,
+    msg: InboundMessage,
+    understood: FreeTextResult | undefined,
+    didnt: () => Send[],
+  ): Planned {
+    const reply = msg.text.trim();
+    if (!reply) return { sends: didnt() };
+    const input: MapAnswerInput = { question: q.text, options: [...q.buttons], reply };
+    if (q.redFlagAnswers.length > 0) {
+      // Never recorded from the LLM: her words and the question again, with its buttons. A tap on this
+      // message answers the question (it is recorded as its prompt), through the normal red-flag rule.
+      return {
+        sends: [
+          {
+            chatId: msg.chatId,
+            message: { text: freeTextConfirm(reply, q.text), buttons: [...q.buttons] },
+            key: `${patient.id}:${c.date}:free-text-confirm:${msg.messageId}`,
+            prompt: promptFor(c, "question"),
+          },
+        ],
+        ...(deps.llm ? { complaintsFrom: { patientId: patient.id, input } } : {}),
+      };
+    }
+    // An answer for another question (the check-in moved on while the LLM read) counts as no answer.
+    const result =
+      understood?.kind === "answer" && understood.checkinId === c.id && understood.questionIndex === c.questionIndex ? understood : undefined;
+    if (deps.llm && understood === undefined) return { needs: { kind: "answer", checkinId: c.id, questionIndex: c.questionIndex, input } };
+    const mapping = result?.mapping;
+    if (mapping) addMemories(db, patient.id, mapping.otherComplaints, clock.now());
+    const answer = mapping && confident(mapping) ? q.buttons.find((b) => is(mapping.answer, b)) : undefined;
+    if (answer === undefined) return { sends: didnt() };
+    return { sends: answerQuestion(patient, c, q, answer, msg.chatId, { via: "free_text", freeText: reply }) };
+  }
+
+  /** A message with nothing pending: small talk. See "Free text" above. */
+  function planSmallTalk(patient: CheckinPatient, msg: InboundMessage, understood: FreeTextResult | undefined): Planned {
+    const message = msg.text.trim();
+    if (!message) return { sends: [] };
+    if (deps.llm && understood === undefined)
+      return {
+        needs: { kind: "small_talk", input: { seniorName: patient.preferredName, message, memories: recentMemories(db, patient.id, SMALL_TALK_MEMORIES) } },
+      };
+    const reply = understood?.kind === "small_talk" ? understood.reply : undefined;
+    let text = smallTalkFallback(patient.preferredName);
+    if (reply) {
+      addMemories(db, patient.id, [...reply.memories, ...reply.complaints], clock.now());
+      text = reply.complaints.length > 0 ? complaintReply(patient.preferredName) : (checkedSmallTalk(reply.text) ?? text);
+    }
+    return { sends: [{ chatId: msg.chatId, message: { text }, key: `${patient.id}:small-talk:${msg.messageId}` }] };
+  }
+
+  /**
+   * Plan one inbound message. Asking for the LLM (`needs`) happens before anything is written,
+   * so the message stays unhandled until the pass that has the LLM's answer.
+   */
+  function planInbound(msg: InboundMessage, fresh: FreshRecord | undefined, understood?: FreeTextResult): Planned {
     const patient = patientForChat(db, msg.chatId);
-    if (!patient) return [];
-    if (!markInboundHandled(db, msg.messageId, msg.chatId, clock.now())) return [];
+    if (!patient) return { sends: [] };
+    if (inboundSeen(db, msg.messageId)) return { sends: [] };
+    const planned = routeInbound(patient, msg, fresh, understood);
+    if (!("needs" in planned)) markInboundHandled(db, msg.messageId, msg.chatId, clock.now());
+    return planned;
+  }
+
+  function routeInbound(patient: CheckinPatient, msg: InboundMessage, fresh: FreshRecord | undefined, understood: FreeTextResult | undefined): Planned {
     const outside = planSharing(patient, msg) ?? planPaper(patient, msg, fresh);
-    if (outside) return outside;
+    if (outside) return { sends: outside };
     const c = pendingCheckin(patient.id);
-    if (!c) return []; // free text with nothing pending: memories are a later run
+    if (!c) {
+      // Nothing pending: small talk, unless it's a late tap (one of our labels) or a paper check waits for her.
+      if (isButtonLabel(msg.text) || pendingReadback(db, patient.id) || pendingFollowUp(db, patient.id)) return { sends: [] };
+      return planSmallTalk(patient, msg, understood);
+    }
     const chatId = msg.chatId;
     const text = msg.text;
     // A tap on an old message re-sends what is pending instead of answering it.
-    if (msg.replyTo !== undefined && isStaleTap(c, msg.replyTo, text)) return reprompt(patient, chatId, msg.messageId);
+    if (msg.replyTo !== undefined && isStaleTap(c, msg.replyTo, text)) return { sends: reprompt(patient, chatId, msg.messageId) };
     // "Didn't understand" repeats the step's buttons, so a tap on it answers that step.
     const didnt = (step: PromptStep, buttons: string[]): Send[] => [
       {
@@ -403,19 +602,25 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       },
     ];
 
+    if (c.step === "question") {
+      if (is(text, BUTTON.notToday)) return { sends: notToday(patient, c, chatId) };
+      const q = questionById(c.questionIds[c.questionIndex]!);
+      const answer = q.buttons.find((b) => is(text, b));
+      if (answer === undefined) return planFreeTextAnswer(patient, c, q, msg, understood, () => didnt("question", q.buttons));
+      return { sends: answerQuestion(patient, c, q, answer, chatId) };
+    }
+    return { sends: planOtherStep(patient, c, msg, didnt) };
+  }
+
+  /** The greeting and the flag steps: buttons only, free text gets "didn't understand". */
+  function planOtherStep(patient: CheckinPatient, c: CheckinRow, msg: InboundMessage, didnt: (step: PromptStep, buttons: string[]) => Send[]): Send[] {
+    const { chatId, text } = msg;
     switch (c.step) {
       case "greeting": {
         if (is(text, BUTTON.notToday)) return notToday(patient, c, chatId);
         if (is(text, BUTTON.start))
           return c.questionIds.length > 0 ? askQuestion(patient, c, 0, chatId) : afterLastQuestion(patient, c, chatId);
         return didnt(c.step, [BUTTON.start, BUTTON.notToday]);
-      }
-      case "question": {
-        if (is(text, BUTTON.notToday)) return notToday(patient, c, chatId);
-        const q = questionById(c.questionIds[c.questionIndex]!);
-        const answer = q.buttons.find((b) => is(text, b));
-        if (answer === undefined) return didnt(c.step, q.buttons);
-        return answerQuestion(patient, c, q, answer, chatId);
       }
       case "flag_offer": {
         if (is(text, BUTTON.tellMeMore)) {
@@ -450,6 +655,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         if (is(text, BUTTON.later) || is(text, BUTTON.notToday)) return finishCheckedIn(patient, c, chatId);
         return didnt(c.step, [BUTTON.willAskDoctor, BUTTON.later]);
       }
+      case "question": // planned by routeInbound
       case "done":
         return [];
     }
@@ -521,8 +727,23 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
           }
         }
       }
-      const sends = db.transaction(() => planInbound(msg, fresh))();
-      await deliver(sends);
+      const plan = (understood?: FreeTextResult) => db.transaction(() => planInbound(msg, fresh, understood))();
+      const first = plan();
+      if (!("needs" in first)) {
+        await deliver(first.sends);
+        // Not awaited: her tap on the confirm (the next message) must never wait for a nice-to-have.
+        if (first.complaintsFrom) void saveOtherComplaints(first.complaintsFrom.patientId, first.complaintsFrom.input);
+        return;
+      }
+      // Free text: read it with the LLM (her chat shows that it's reading), then plan again with the answer.
+      await showActivity(msg.chatId);
+      try {
+        const second = plan(await understand(first.needs));
+        // The second pass has an answer, so it never asks again; if it somehow did, nothing is sent.
+        await deliver("needs" in second ? [] : second.sends);
+      } finally {
+        await clearActivity(msg.chatId);
+      }
     },
 
     async startPaperCheck(patientId: string, paper: ExtractedPaper, attachmentId?: string): Promise<{ scanId: number }> {

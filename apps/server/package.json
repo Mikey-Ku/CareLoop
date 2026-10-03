@@ -15,6 +15,7 @@
     "simulate": "node --env-file-if-exists=../../.env src/cli/simulate.ts",
     "agent": "node --env-file-if-exists=../../.env src/agent.ts",
     "relay:check": "node --env-file-if-exists=../../.env src/cli/relay-check.ts",
+    "llm:check": "node --env-file-if-exists=../../.env src/cli/llm-check.ts",
     "record-fixtures": "node --env-file-if-exists=../../.env ../../scripts/record-fixtures.ts"
   },
   "dependencies": {

@@ -61,6 +61,7 @@ export function renderTable(headers: string[], rows: string[][], maxWidth = 60):
 
 export const HELP_LINES = [
   "Type a number to tap that button on Harriet's latest message, or any other text to send it as Harriet.",
+  "With --llm, what she types is read by the LLM (an answer to a question, or a chat outside the check-in); without it, buttons only.",
   "Each family member (--family, default sarah) has their own chat with the agent, shown as its own pane.",
   "Commands:",
   "  /help                 this list",

@@ -15,6 +15,8 @@ import { ConsentInactiveError } from "./finchnode/client.ts";
 import { loadRxNavCache } from "./finchnode/fixtures.ts";
 import { normalizeHealthRecord } from "./finchnode/normalize.ts";
 import type { HealthRecord } from "./finchnode/types.ts";
+import { createLlmClient, describeLlm } from "./llm/index.ts";
+import type { LlmClient } from "./llm/types.ts";
 import { assertNoWebhookSubscriptions, runRelayInbox } from "./relay/inbox.ts";
 import type { Messenger } from "./relay/messenger.ts";
 import { createRelayClient, type RelayClient, type RelayLog } from "./relay/relay-client.ts";
@@ -32,6 +34,9 @@ import { createDailyScheduler, localDate, zonedInstant, type CancelTimer, type D
 // docs/adr/0001-family-chats-not-a-group.md). Each FAMILY_RELAY_HANDLES member
 // gets a family_members row; their own chat with the agent is linked when they
 // first message it (src/relay/inbox.ts), and family messages go to each linked chat.
+//
+// Free text: with an LLM configured (GEMINI_API_KEY, src/llm) what she types is read
+// (src/checkin/engine.ts "Free text"); without one the check-in runs on buttons only.
 
 export const CHECKIN_JOB = "checkin";
 export const MISSED_JOB = "missed-checkin";
@@ -54,6 +59,8 @@ export type AgentDeps = {
   relay: RelayClient;
   /** Defaults to a RelayMessenger over `relay`. */
   messenger?: Messenger;
+  /** Reads what she types instead of tapping (main passes createLlmClient(config)). Without it: buttons only. */
+  llm?: LlmClient | undefined;
   /** FinchNode snapshot reader (the live client in production). */
   loadSnapshot: (subject: string) => Promise<HealthRecord>;
   /**
@@ -147,16 +154,19 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
     else log(`[agent] Waiting for @${member.handle} to message the agent (family member; family messages skip them until then)`);
   }
 
-  // 3. Engine over Relay.
+  // 3. Engine over Relay, with free text when an LLM is configured.
+  const relayLog: RelayLog = (event, fields) => log(`[relay] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`);
   const clock: Clock = { now: () => now().toISOString() };
-  const messenger = deps.messenger ?? new RelayMessenger(relay);
-  const engine = createCheckinEngine({ db, messenger, clock, loadSnapshot: deps.loadSnapshot }, { missedCheckinTime: config.missedCheckinTime });
+  const messenger = deps.messenger ?? new RelayMessenger(relay, { log: relayLog });
+  log(`[agent] ${llmStatus(config, deps.llm)}`);
+  const engine = createCheckinEngine(
+    { db, messenger, clock, loadSnapshot: deps.loadSnapshot, llm: deps.llm },
+    { missedCheckinTime: config.missedCheckinTime },
+  );
 
   // 4. WebSocket delivery needs zero webhook subscriptions.
   await ops.assertNoWebhookSubscriptions(relay);
   log("[agent] Relay: no webhook subscriptions, WebSocket delivery is available");
-
-  const relayLog: RelayLog = (event, fields) => log(`[relay] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`);
   const isLinked = () => Boolean(getCheckinPatient(db, patientId)?.relayChatId);
 
   // 5. Inbox: holds the socket until stop().
@@ -299,6 +309,14 @@ async function identifyPatient(
   }
 }
 
+/** What free text runs on, for the startup log: provider and models, or why it is off. Never a key. */
+export function llmStatus(config: Config, llm: LlmClient | undefined): string {
+  const configured = describeLlm(config);
+  const on = configured.startsWith("free text on");
+  if (!llm) return on ? "free text off: no LLM client (buttons only)" : configured;
+  return on ? configured : `free text on: ${llm.provider}`;
+}
+
 function describeDay(result: Awaited<ReturnType<CheckinEngine["startDay"]>>): string {
   if (result.kind === "sent") return `sent with ${result.questionIds.length} question(s): ${result.questionIds.join(", ")}`;
   if (result.kind === "already_started") return "already started";
@@ -363,6 +381,7 @@ export async function main(argv: string[] = process.argv.slice(2), env: Record<s
       db,
       relay: createRelayClient({ agentToken: token, apiUrl: config.relay.apiUrl }),
       loadSnapshot: snapshotLoader(config, true),
+      llm: createLlmClient(config),
       checkinNow,
     });
   } catch (error) {

@@ -5,6 +5,7 @@ import {
   MISSED_JOB,
   MISSING_HANDLE_MESSAGE,
   MISSING_TOKEN_MESSAGE,
+  llmStatus,
   main as agentMain,
   startAgent,
   type AgentDeps,
@@ -17,6 +18,8 @@ import { loadConfig, type Config } from "../src/config.ts";
 import { getCheckin } from "../src/db/checkins.ts";
 import { familyChats, familyMembers, linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import { getSharing, openDatabase, setSharing, upsertPatient, type Db } from "../src/db/index.ts";
+import { smallTalkFallback } from "../src/checkin/copy.ts";
+import { FakeLlmClient } from "../src/llm/fake.ts";
 import { patientIdFor } from "../src/patient-id.ts";
 import { FakeMessenger } from "../src/relay/fake-messenger.ts";
 import type { RelayClient } from "../src/relay/relay-client.ts";
@@ -308,6 +311,38 @@ describe("startAgent", () => {
     expect(agent.scheduler.upcoming()).toEqual([]);
     expect(agent.server.listening).toBe(false);
     await agent.stop(); // idempotent
+  });
+
+  it("logs that free text is off without an LLM, and the engine answers typed text with the fixed reply", async () => {
+    const { db, messenger, lines, start } = setup();
+    linkedBeforeStart(db);
+    const agent = await start();
+    await agent.linked;
+    expect(lines).toContain("[agent] free text off: GEMINI_API_KEY is not set (buttons only)");
+    await agent.engine.handleInbound({ chatId: "chat_harriet", messageId: "in_1", text: "hello there", at: BEFORE_CHECKIN.toISOString() });
+    expect(messenger.lastIn("chat_harriet")?.text).toBe(smallTalkFallback("Harriet"));
+  });
+
+  it("passes the LLM to the engine and logs it", async () => {
+    const llm = new FakeLlmClient({ smallTalk: () => ({ text: "Hello, Harriet. Nice to hear from you.", memories: [], complaints: [] }) });
+    const { db, messenger, lines, start } = setup({ deps: { llm } });
+    linkedBeforeStart(db);
+    const agent = await start();
+    await agent.linked;
+    expect(lines).toContain("[agent] free text on: fake");
+    await agent.engine.handleInbound({ chatId: "chat_harriet", messageId: "in_1", text: "hello there", at: BEFORE_CHECKIN.toISOString() });
+    expect(messenger.lastIn("chat_harriet")?.text).toBe("Hello, Harriet. Nice to hear from you.");
+    expect(llm.smallTalkCalls.map((c) => c.message)).toEqual(["hello there"]);
+  });
+
+  it("llmStatus names the provider and models, or why free text is off, never the key", () => {
+    const withKey = testConfig({ GEMINI_API_KEY: "gem_SECRET_key", GEMINI_MODELS: "gemini-a,gemini-b" });
+    const on = llmStatus(withKey, new FakeLlmClient());
+    expect(on).toMatch(/^free text on: gemini gemini-a, gemini-b/);
+    expect(on).not.toContain("SECRET");
+    expect(llmStatus(withKey, undefined)).toBe("free text off: no LLM client (buttons only)");
+    expect(llmStatus(testConfig(), undefined)).toMatch(/^free text off: .*buttons only/);
+    expect(llmStatus(testConfig(), new FakeLlmClient())).toBe("free text on: fake");
   });
 
   it("names the patient like the simulator", () => {

@@ -1,7 +1,7 @@
 import { RelayAPIError, type AgentMe, type WebhookSubscription } from "@relaymessenger/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { describeRelayError, relayApiOrigin, verifyRelayAccess, type RelayClient } from "../src/relay/relay-client.ts";
-import { RelayMessenger, toRelayParts } from "../src/relay/relay-messenger.ts";
+import { ACTIVITY_RENEW_MS, MAX_ACTIVITY_RENEWALS, RelayMessenger, toRelayParts, type Every } from "../src/relay/relay-messenger.ts";
 
 // Synthetic ids and handles only.
 const CHAT = "0199cccc-0000-7000-8000-000000000001";
@@ -96,6 +96,124 @@ describe("RelayMessenger", () => {
     expect(error.message).toContain("trace-1");
     expect(error.message).toMatch(/first message/);
     expect(error.cause).toBeInstanceOf(RelayAPIError);
+  });
+});
+
+const ACTIVITY_ID = "0199cccc-0000-7000-8000-0000000000cc";
+
+/** The fake client plus Relay's activity calls. */
+function fakeRelayWithActivity() {
+  const relay = fakeRelay();
+  const activity = (id: string | null) => ({
+    chat_id: CHAT,
+    agent_id: ME.id,
+    version: "1",
+    activity: id ? { id, text: "Reading your message", emoji: null, updated_at: T, expires_at: T } : null,
+  });
+  const chats = {
+    ...relay.chats,
+    setActivity: vi.fn(async (_chatId: string, body: { text: string; activity_id?: string }) => activity(body.activity_id ?? ACTIVITY_ID)),
+    clearActivity: vi.fn(async (_chatId: string, _query?: { activity_id?: string }) => undefined),
+  };
+  return { ...relay, chats };
+}
+
+/** A manual timer: `tick()` runs every pending callback once. */
+function manualEvery() {
+  const timers = new Set<{ fn: () => void; ms: number }>();
+  const every: Every = (fn, ms) => {
+    const t = { fn, ms };
+    timers.add(t);
+    return () => timers.delete(t);
+  };
+  return { every, timers, tick: () => [...timers].forEach((t) => t.fn()) };
+}
+
+describe("RelayMessenger activity labels", () => {
+  it("sets a label with the SDK, then clears only its own activity id", async () => {
+    const relay = fakeRelayWithActivity();
+    const timer = manualEvery();
+    const messenger = new RelayMessenger(relay, { every: timer.every, log: () => {} });
+    await messenger.setActivity(CHAT, "Reading your message");
+    expect(relay.chats.setActivity).toHaveBeenCalledWith(CHAT, { text: "Reading your message" });
+    expect([...timer.timers].map((t) => t.ms)).toEqual([ACTIVITY_RENEW_MS]);
+    await messenger.clearActivity(CHAT);
+    expect(relay.chats.clearActivity).toHaveBeenCalledWith(CHAT, { activity_id: ACTIVITY_ID });
+    expect(timer.timers.size).toBe(0);
+    // Nothing to clear twice.
+    await messenger.clearActivity(CHAT);
+    expect(relay.chats.clearActivity).toHaveBeenCalledTimes(1);
+  });
+
+  it("renews with the activity id every 60 seconds while it is up, and stops after a few renewals", async () => {
+    const relay = fakeRelayWithActivity();
+    const timer = manualEvery();
+    const messenger = new RelayMessenger(relay, { every: timer.every, log: () => {} });
+    await messenger.setActivity(CHAT, "Reading your message");
+    timer.tick();
+    expect(relay.chats.setActivity).toHaveBeenLastCalledWith(CHAT, { text: "Reading your message", activity_id: ACTIVITY_ID });
+    for (let i = 0; i < MAX_ACTIVITY_RENEWALS + 2; i++) timer.tick();
+    expect(relay.chats.setActivity).toHaveBeenCalledTimes(1 + MAX_ACTIVITY_RENEWALS);
+    expect(timer.timers.size).toBe(0);
+    // Still cleared by id afterwards.
+    await messenger.clearActivity(CHAT);
+    expect(relay.chats.clearActivity).toHaveBeenCalledWith(CHAT, { activity_id: ACTIVITY_ID });
+  });
+
+  it("stops renewing when Relay says the activity was replaced or cleared (409)", async () => {
+    const relay = fakeRelayWithActivity();
+    const timer = manualEvery();
+    const lines: string[] = [];
+    const messenger = new RelayMessenger(relay, { every: timer.every, log: (event, fields) => lines.push(`${event} ${JSON.stringify(fields)}`) });
+    await messenger.setActivity(CHAT, "Reading your message");
+    relay.chats.setActivity.mockRejectedValueOnce(new RelayAPIError("Activity replaced", { status: 409 }));
+    timer.tick();
+    await vi.waitFor(() => expect(lines).toHaveLength(1));
+    expect(lines[0]).toMatch(/^relay_activity_failed .*HTTP 409/);
+    expect(timer.timers.size).toBe(0);
+  });
+
+  it("is best effort: a failed set or clear is logged and swallowed", async () => {
+    const relay = fakeRelayWithActivity();
+    const lines: string[] = [];
+    const messenger = new RelayMessenger(relay, { every: manualEvery().every, log: (event, fields) => lines.push(`${event} ${JSON.stringify(fields)}`) });
+    relay.chats.setActivity.mockRejectedValueOnce(new RelayAPIError("Forbidden", { status: 403 }));
+    await expect(messenger.setActivity(CHAT, "Reading your message")).resolves.toBeUndefined();
+    await messenger.clearActivity(CHAT); // nothing was set
+    expect(relay.chats.clearActivity).not.toHaveBeenCalled();
+    await messenger.setActivity(CHAT, "Reading your message");
+    relay.chats.clearActivity.mockRejectedValueOnce(new Error("socket hang up"));
+    await expect(messenger.clearActivity(CHAT)).resolves.toBeUndefined();
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/^relay_activity_failed .*Setting the activity label.*HTTP 403/);
+    expect(lines[1]).toMatch(/^relay_activity_failed .*Clearing the activity label.*socket hang up/);
+  });
+
+  it("refuses a label Relay would refuse (over 21 visible characters) without calling Relay", async () => {
+    const relay = fakeRelayWithActivity();
+    const lines: string[] = [];
+    const messenger = new RelayMessenger(relay, { every: manualEvery().every, log: (event) => lines.push(event) });
+    await messenger.setActivity(CHAT, "Reading your long message");
+    await messenger.setActivity(CHAT, "  ");
+    expect(relay.chats.setActivity).not.toHaveBeenCalled();
+    expect(lines).toEqual(["relay_activity_failed", "relay_activity_failed"]);
+  });
+
+  it("a new label replaces the old one in the same chat (no second renewal timer)", async () => {
+    const relay = fakeRelayWithActivity();
+    const timer = manualEvery();
+    const messenger = new RelayMessenger(relay, { every: timer.every, log: () => {} });
+    await messenger.setActivity(CHAT, "Reading your message");
+    await messenger.setActivity(CHAT, "Still reading");
+    expect(timer.timers.size).toBe(1);
+    expect(relay.chats.setActivity).toHaveBeenLastCalledWith(CHAT, { text: "Still reading" });
+  });
+
+  it("does nothing on a client slice without the activity calls", async () => {
+    const relay = fakeRelay();
+    const messenger = new RelayMessenger({ chats: relay.chats });
+    await expect(messenger.setActivity(CHAT, "Reading your message")).resolves.toBeUndefined();
+    await expect(messenger.clearActivity(CHAT)).resolves.toBeUndefined();
   });
 });
 

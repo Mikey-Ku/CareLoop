@@ -49,6 +49,8 @@ Voice, vitals, vision:
 
 Demo:
 
+- [ ] Demo-day LLM backup: the free Gemini tier returned 503 "high demand" several times on 2026-10-03. Get a paid Gemini key or Claude API credits before the demo; switching is `LLM_PROVIDER` and a key in `.env`.
+
 - [x] Synthetic discharge sheet: `fixtures/papers/harriet-discharge.html` (aspirin stopped). Print it on letter paper.
 - [ ] Confirm the wording of rules R3 (bleeding combination) and R4 (potassium) against a drug interaction reference.
 - [ ] Check MHacks prize tracks (FinchNode, ElevenLabs, Presage through MLH, Relay) and note them here.

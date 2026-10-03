@@ -4,8 +4,11 @@ import {
   BUTTON,
   SHARING_BUTTONS,
   SHARING_MENU_BUTTON,
+  QUOTE_MAX_CHARS,
+  READING_ACTIVITY,
   checkinDone,
   checkinGreeting,
+  complaintReply,
   didntUnderstand,
   familyDailyStatus,
   familyMissedAlert,
@@ -14,6 +17,7 @@ import {
   flagDetail,
   flagNotedReply,
   flagOffer,
+  freeTextConfirm,
   notTodayReply,
   recordLinkEndedFamily,
   recordLinkEndedSenior,
@@ -22,11 +26,13 @@ import {
   sharingChangedSenior,
   sharingLevelFromButton,
   sharingMenu,
+  smallTalkFallback,
   type AnsweredQuestion,
   type DayOutcome,
 } from "../src/checkin/copy.ts";
 import type { SharingLevel } from "../src/db/index.ts";
 import { QUESTION_BANK } from "../src/context/questions.ts";
+import { MAX_ACTIVITY_LABEL, assertValidActivityLabel } from "../src/relay/messenger.ts";
 import { loadRxNavCache, loadSnapshot } from "../src/finchnode/fixtures.ts";
 import { normalizeHealthRecord } from "../src/finchnode/normalize.ts";
 import { runRules } from "../src/rules/index.ts";
@@ -42,6 +48,13 @@ const ANSWERS: AnsweredQuestion[] = [
 ];
 const FLAG_MESSAGE = "You take apixaban, aspirin and sertraline. Taken together, they can raise the chance of bleeding.";
 const RED_FLAG = { questionText: "Did you have trouble breathing when lying flat last night?", answer: "Yes" };
+// What she might type instead of tapping (synthetic).
+const HER_WORDS = [
+  "nah fine, had to prop myself up on pillows",
+  "a bit puffy",
+  'my "good" knee hurts \u2014 again',
+  "I slept in the chair again last night because lying down felt tight and I could not catch my breath until I sat up and opened the window wide",
+];
 
 // Plain-language flag messages from the real rules on the demo patients.
 const rxnav = loadRxNavCache();
@@ -63,6 +76,8 @@ function allOutputs(): string[] {
   out.push(didntUnderstand([BUTTON.start, BUTTON.notToday]), didntUnderstand(["Yes"]));
   out.push(recordLinkEndedSenior(NAME), recordLinkEndedFamily(NAME), familyMissedAlert(NAME, "12:00 PM"));
   out.push(sharingMenu());
+  out.push(complaintReply(NAME), smallTalkFallback(NAME));
+  for (const words of HER_WORDS) for (const q of QUESTION_BANK) out.push(freeTextConfirm(words, q.text));
   out.push(copy.PAPER_REJECTED_REPLY, copy.PAPER_LATER_REPLY, copy.PAPER_NOTHING_TO_COMPARE, copy.PAPER_NO_RECORD_REPLY);
   for (const level of LEVELS) {
     out.push(sharingMenu(level), sharingChangedSenior(level), sharingChangedFamily(NAME, level));
@@ -80,9 +95,10 @@ describe("copy: style rules across every output", () => {
   it("covers every exported function", () => {
     const fns = Object.entries(copy).filter(([, v]) => typeof v === "function").map(([k]) => k).sort();
     const sampled = [
-      "checkinDone", "checkinGreeting", "didntUnderstand", "familyDailyStatus", "familyMissedAlert", "familyRedFlagAlert",
-      "familyWelcome", "flagDetail", "flagNotedReply", "flagOffer", "notTodayReply", "recordLinkEndedFamily", "recordLinkEndedSenior",
-      "redFlagAdvice", "sharingChangedFamily", "sharingChangedSenior", "sharingLevelFromButton", "sharingMenu",
+      "checkinDone", "checkinGreeting", "complaintReply", "didntUnderstand", "familyDailyStatus", "familyMissedAlert", "familyRedFlagAlert",
+      "familyWelcome", "flagDetail", "flagNotedReply", "flagOffer", "freeTextConfirm", "notTodayReply", "recordLinkEndedFamily",
+      "recordLinkEndedSenior", "redFlagAdvice", "sharingChangedFamily", "sharingChangedSenior", "sharingLevelFromButton", "sharingMenu",
+      "smallTalkFallback",
     ].sort();
     expect(fns).toEqual(sampled);
   });
@@ -199,6 +215,47 @@ describe("copy: senior messages", () => {
 
   it("didn't-understand lists the buttons", () => {
     expect(didntUnderstand(["Yes", "No"])).toContain('"Yes" and "No"');
+  });
+});
+
+describe("copy: free text", () => {
+  const breathing = QUESTION_BANK.find((q) => q.id === "hf-breathing-lying-flat")!;
+
+  it("the confirm quotes her words, then asks the question again", () => {
+    expect(freeTextConfirm("nah fine, had to prop myself up on pillows", breathing.text)).toBe(
+      'You wrote: "nah fine, had to prop myself up on pillows"\nJust to check: Did you have trouble breathing when lying flat last night?',
+    );
+  });
+
+  it("the confirm keeps her words on one line, softens quotes and long dashes, and cuts long ones at a word", () => {
+    expect(freeTextConfirm('  my "good" knee\n hurts \u2014 again ', breathing.text)).toMatch(/^You wrote: "my 'good' knee hurts - again"\n/);
+    const long = freeTextConfirm(HER_WORDS[3]!, breathing.text);
+    const quote = /^You wrote: "(.*)"\n/.exec(long)?.[1] ?? "";
+    expect(quote.endsWith("...")).toBe(true);
+    expect(quote.length).toBeLessThanOrEqual(QUOTE_MAX_CHARS + 3);
+    expect(HER_WORDS[3]!.startsWith(quote.slice(0, -3))).toBe(true);
+    expect(quote.slice(0, -3)).not.toMatch(/\s$/);
+  });
+
+  it("the complaint reply points to her doctor and 911, and says nothing about family or alerts", () => {
+    expect(complaintReply(NAME)).toBe(
+      "Thank you for telling me, Harriet. If this is worrying you, please call your doctor. If it feels like an emergency, call 911.",
+    );
+    expect(complaintReply(NAME)).not.toMatch(/family|told|alert/i);
+  });
+
+  it("the small-talk fallback thanks her, says when it's back, and still points to her doctor and 911", () => {
+    const text = smallTalkFallback(NAME);
+    expect(text).toMatch(/^Thanks for your message, Harriet\. /);
+    expect(text).toContain("next check-in");
+    expect(text).toContain("call your doctor");
+    expect(text).toContain("call 911");
+  });
+
+  it("the reading label fits Relay's activity limit", () => {
+    expect(() => assertValidActivityLabel(READING_ACTIVITY)).not.toThrow();
+    expect(READING_ACTIVITY.length).toBeLessThanOrEqual(MAX_ACTIVITY_LABEL);
+    expect(READING_ACTIVITY).not.toMatch(EM_DASH);
   });
 });
 

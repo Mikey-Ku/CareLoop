@@ -1,5 +1,6 @@
 import type { Db } from "../db/index.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
+import type { LlmClient } from "../llm/types.ts";
 import type { InboundMessage, Messenger } from "../relay/messenger.ts";
 import type { ExtractedPaper } from "../rules/paper-diff.ts";
 
@@ -17,7 +18,18 @@ export type EngineDeps = {
   clock: Clock;
   /** Reads a FinchNode snapshot for a subject (live client or recorded fixture). Throws ConsentInactiveError on 410. */
   loadSnapshot(subject: string): Promise<HealthRecord>;
+  /**
+   * Reads what she types instead of tapping (free text). Optional: without it a typed reply counts
+   * only when it equals a button label, as before, and a message outside a check-in gets a fixed reply.
+   */
+  llm?: LlmClient | undefined;
 };
+
+/**
+ * Extra fields on a stored answer (checkins.answers_json) when what she typed was mapped to a
+ * button: how it came in and her words. A tap, or typing the label itself, stores neither.
+ */
+export type FreeTextAnswer = { via: "free_text"; freeText: string };
 
 export type DayResult =
   | { kind: "sent"; questionIds: string[] }
@@ -37,6 +49,9 @@ export interface CheckinEngine {
    * paper check's "Yes, that's right" / "No, something's off" and the R6 follow-up buttons.
    * A button tap whose replyTo is not the message waiting for an answer (a stale tap) re-sends the
    * current prompt instead of recording an answer; typed text without replyTo is matched as before.
+   * Free text (with `llm`): typed text that isn't a label is mapped to one of an ordinary question's
+   * buttons, quoted back for a one-tap confirm on a red-flag question, and answered as small talk when
+   * nothing is pending. Never more than one reply per message; a message already handled never reaches the LLM.
    */
   handleInbound(message: InboundMessage): Promise<void>;
   /** Noon job: a check-in still unanswered becomes missed and every linked family chat is told. */

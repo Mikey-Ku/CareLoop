@@ -9,6 +9,7 @@ import { SimClock, nextDay, parseScript, runSimulation } from "../src/cli/simula
 import { loadConfig } from "../src/config.ts";
 import { QUESTION_BANK } from "../src/context/questions.ts";
 import { REPO_ROOT } from "../src/finchnode/fixtures.ts";
+import { FakeLlmClient } from "../src/llm/fake.ts";
 
 const SERVER_DIR = join(REPO_ROOT, "apps", "server");
 const DEMO_DIR = join(REPO_ROOT, "scripts", "demo");
@@ -236,6 +237,33 @@ describe("simulator inputs", () => {
     expect(bubbles.at(-1)?.buttons).toEqual(["Let's start", "Not today"]);
   });
 
+  it("without --llm the banner says free text is off", async () => {
+    const { lines } = await run([]);
+    expect(lines.some((l) => /^\[sim\] Free text off: buttons only/.test(l))).toBe(true);
+  });
+
+  it("with an LLM: the reading label shows, a typed answer is mapped, a red-flag answer is quoted back for a tap", async () => {
+    const llm = new FakeLlmClient({
+      mapAnswer: ({ options }) => ({ answer: options.includes("Sometimes") ? "Sometimes" : "unclear", confidence: "high", otherComplaints: [] }),
+    });
+    const lines: string[] = [];
+    const inputs = ["1", "nah fine, had to prop myself up on pillows", "1", "1", "only when I get up too fast"];
+    const exitCode = await runSimulation({ dbPath: ":memory:", inputs, output: (l) => lines.push(l), config: loadConfig({}), llm });
+    expect(exitCode).toBe(0);
+    expect(lines.some((l) => /^\[sim\] Free text on: what she types is read by fake/.test(l))).toBe(true);
+    const list = bubbles(lines);
+    expectInOrder(list, [
+      { chat: PHONE, text: /trouble breathing/ },
+      { chat: PHONE, text: /^You wrote: "nah fine, had to prop myself up on pillows"\nJust to check: Did you have trouble breathing/ },
+      { chat: PHONE, text: /bruising or bleeding/ },
+      { chat: PHONE, text: /dizzy when standing/ },
+      { chat: PHONE, text: /worth asking your doctor/ },
+    ]);
+    expect(list.find((b) => /^You wrote/.test(b.text))?.buttons).toEqual(["No", "Yes"]);
+    expect(lines).toContain(`[sim] Harriet's phone shows "Reading your message".`);
+    expect(llm.mapAnswerCalls.map((c) => c.reply)).toEqual(["nah fine, had to prop myself up on pillows", "only when I get up too fast"]);
+  });
+
   it("a button number that doesn't exist is an error and fails the script", async () => {
     const { exitCode, lines } = await run(["7"]);
     expect(exitCode).toBe(1);
@@ -346,5 +374,18 @@ describe("npm run simulate", () => {
     expect(stdout).toMatch(/--- Sarah's phone \(family\), \d\d:\d\d ---\nHarriet said "not today"/);
     expect(stdout).toMatch(/--- Tom's phone \(family\), \d\d:\d\d ---\nHarriet said "not today"/);
     expect(stdout).not.toMatch(/Family group/);
+  }, 30_000);
+
+  it("--llm without GEMINI_API_KEY exits 1 and says why", async () => {
+    const error = await promisify(execFile)(
+      process.execPath,
+      ["src/cli/simulate.ts", "--llm", "--script", "../../scripts/demo/harriet-not-today.txt", "--db", ":memory:"],
+      { cwd: SERVER_DIR, env: { ...process.env, NO_COLOR: "1", CLOCK_DATE: "", GEMINI_API_KEY: "", LLM_PROVIDER: "gemini" } },
+    ).then(
+      () => undefined,
+      (e: unknown) => e as { code?: number; stderr?: string },
+    );
+    expect(error?.code).toBe(1);
+    expect(error?.stderr).toMatch(/--llm needs an LLM in \.env: free text off: GEMINI_API_KEY is not set/);
   }, 30_000);
 });

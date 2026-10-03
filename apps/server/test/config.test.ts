@@ -1,6 +1,6 @@
 import { inspect } from "node:util";
 import { describe, expect, it } from "vitest";
-import { ConfigError, loadConfig, normalizeHandle, parseHandles, resolveCheckinDate } from "../src/config.ts";
+import { ConfigError, DEFAULT_GEMINI_MODELS, loadConfig, normalizeHandle, parseHandles, resolveCheckinDate } from "../src/config.ts";
 
 const TOKEN = "relay_agent_tok_SECRET_123";
 
@@ -130,6 +130,48 @@ describe("the agent token never leaks", () => {
       expect(err.message).not.toContain(TOKEN);
       expect(String(err.stack)).not.toContain(TOKEN);
       expect(inspect(err)).not.toContain(TOKEN);
+    }
+  });
+});
+
+describe("LLM settings", () => {
+  const KEY = "AIza_gemini_SECRET_456";
+
+  it("defaults to gemini, the two measured models and a 12 s budget, with no key", () => {
+    const c = loadConfig({});
+    expect(c.llm).toEqual({ provider: "gemini", geminiModels: [...DEFAULT_GEMINI_MODELS], timeoutMs: 12_000, attemptTimeoutMs: 4_000 });
+    expect(c.llm.geminiApiKey).toBeUndefined();
+    expect(loadConfig({ GEMINI_API_KEY: "  " }).llm.geminiApiKey).toBeUndefined();
+  });
+
+  it("reads the provider in any case, the model list and the budget", () => {
+    const c = loadConfig({ LLM_PROVIDER: " Anthropic ", GEMINI_MODELS: " a , b,,a ", LLM_TIMEOUT_MS: "8000" });
+    expect(c.llm.provider).toBe("anthropic");
+    expect(c.llm.geminiModels).toEqual(["a", "b"]);
+    expect(c.llm.timeoutMs).toBe(8000);
+    expect(loadConfig({ GEMINI_MODELS: " , " }).llm.geminiModels).toEqual([...DEFAULT_GEMINI_MODELS]);
+  });
+
+  it("rejects an unknown provider and a silly budget", () => {
+    expect(() => loadConfig({ LLM_PROVIDER: "openai" })).toThrow("LLM_PROVIDER");
+    expect(() => loadConfig({ LLM_TIMEOUT_MS: "5" })).toThrow("LLM_TIMEOUT_MS");
+    expect(() => loadConfig({ LLM_TIMEOUT_MS: "soon" })).toThrow(ConfigError);
+  });
+
+  it("keeps GEMINI_API_KEY readable by code but out of JSON, inspect and spreads", () => {
+    const c = loadConfig({ GEMINI_API_KEY: ` ${KEY} ` });
+    expect(c.llm.geminiApiKey).toBe(KEY);
+    expect(JSON.stringify(c)).not.toContain(KEY);
+    expect(inspect(c, { depth: 10 })).not.toContain(KEY);
+    expect(JSON.stringify({ ...c.llm })).not.toContain(KEY);
+  });
+
+  it("never puts GEMINI_API_KEY in a config error", () => {
+    for (const env of [{ LLM_PROVIDER: KEY }, { LLM_TIMEOUT_MS: KEY }, { PORT: "x" }, { RELAY_API_URL: KEY }]) {
+      const err = errorOf(() => loadConfig({ GEMINI_API_KEY: KEY, ...env }));
+      expect(err).toBeInstanceOf(ConfigError);
+      expect(err.message).not.toContain(KEY);
+      expect(inspect(err)).not.toContain(KEY);
     }
   });
 });

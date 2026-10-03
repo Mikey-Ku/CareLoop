@@ -12,6 +12,7 @@ import { ConsentInactiveError, FinchNodeClient } from "../finchnode/client.ts";
 import { FIXTURES_DIR, REPO_ROOT, hasRecordedSnapshot, loadRecorded, loadRxNavCache, replayFetch } from "../finchnode/fixtures.ts";
 import { normalizeHealthRecord, type PatientRecord } from "../finchnode/normalize.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
+import type { LlmClient } from "../llm/types.ts";
 import { patientIdFor } from "../patient-id.ts";
 import { FakeMessenger } from "../relay/fake-messenger.ts";
 import type { InboundMessage, SentMessage } from "../relay/messenger.ts";
@@ -27,6 +28,9 @@ import { HELP_LINES, painter, renderMessage, renderTable, type Painter, type Sty
 // "sarah") has their own family chat with the agent, printed as its own pane
 // ("Sarah's phone (family)"). In Relay they link it by messaging the agent first;
 // here they start pre-linked.
+//
+// Free text: with `llm` (npm run simulate -- --llm, real Gemini from .env) what she
+// types is read as in the agent; without it, buttons only and fixed replies.
 
 export const DEFAULT_SUBJECT = "patient-demo-polypharmacy";
 export const DEFAULT_DB_PATH = join(REPO_ROOT, "data", "simulator.db");
@@ -106,6 +110,8 @@ export type SimulatorOptions = {
   config?: Config;
   /** Injected snapshot reader (tests); defaults to fixtures or the live API. */
   loadSnapshot?: (subject: string) => Promise<HealthRecord>;
+  /** Reads what she types (--llm: createLlmClient(config); tests: FakeLlmClient). Without it: buttons only. */
+  llm?: LlmClient | undefined;
 };
 
 export type InputResult = "ok" | "error" | "quit";
@@ -180,8 +186,11 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
       out("");
       for (const line of renderMessage(m, chatLabel(m.chatId), paint, familyLabels.has(m.chatId))) out(line);
     },
+    onActivity: (event) => {
+      if (event.kind === "set") note(`${chatLabel(event.chatId)} shows "${event.label}".`);
+    },
   });
-  const deps: EngineDeps = { db, messenger, clock, loadSnapshot };
+  const deps: EngineDeps = { db, messenger, clock, loadSnapshot, llm: options.llm };
   const engine: CheckinEngine = createCheckinEngine(deps, { missedCheckinTime: config.missedCheckinTime, rxnav });
 
   // The engine dedupes inbound messages by id across the DB, so ids must be unique per run.
@@ -380,6 +389,11 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
       out(paint(`Check-in simulator: ${seniorName} (${subject}), patient id ${patientId}, sharing ${sharing}`, "bold"));
       out(`Check-in date ${day}, data as-of ${dataAsOf ?? (consentEnded ? "unknown (record consent ended)" : "unknown")}, ${live ? "live FinchNode demo API" : "recorded fixtures"}`);
       out(paint("Synthetic data only. Type a button number or text as her, or /help.", "dim"));
+      note(
+        options.llm
+          ? `Free text on: what she types is read by ${options.llm.provider} (synthetic data only).`
+          : "Free text off: buttons only, and a fixed reply to messages outside a check-in. Add --llm to read typed replies with Gemini.",
+      );
       if (family.length === 0) note("No family members (--family is empty), so family messages go nowhere.");
       else note(`Family, each in their own chat with the agent (pre-linked here): ${family.map((f) => `${familyLabels.get(f.chatId)} @${f.handle}`).join(", ")}.`);
       for (const handle of synced.notConfigured)
