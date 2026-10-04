@@ -10,23 +10,6 @@ Team notes between Claude Code runs. Claude Code reads this at the start of ever
 
 (Claude Code writes questions here when it hits real ambiguity.)
 
-Answered by Michael on 2026-10-03 (built in run 2c):
-
-- [x] [done] R5 refill grace period: 7 days.
-- [x] [done] AFib and camera heart rate: for patients with atrial fibrillation, report the reading as an estimate and skip the usual-range comparison.
-- [x] [done] Red-flag questions: asked periodically, based on her conditions and whether a check is needed (every other day by default, daily for a few days after a worrying answer), not by plain rotation.
-- [x] [done] R4 above the range: keep flagging it.
-- [x] [done] Records dated after the check-in date: ignored, so the app behaves as if it really is that day.
-- [x] [done] Flags when record consent ends: deleted along with the record copy.
-- [x] [done] Family message values (`to_senior`/`to_family`, `voice`/`text`/`photo`): keep.
-- [x] [done] Red-flag advice: keep the 911 line, but lead with telling her family; family alerts ask them to call her today.
-- [x] [done] Stale button taps: a tap on an old message re-prompts instead of answering (checked against the message it replies to).
-- [x] [done] "Later" on a flag she has heard: told, for record and paper flags alike.
-- [x] [done] Family welcome: a family member gets a short welcome the first time they message the agent.
-- [x] [done] Sharing changes: chat flow built in run 2b.
-- [x] [done] R6 results enter the flag lifecycle after Harriet confirms the read-back (run 2b).
-- [x] [done] Branches: merged to `main` through PR #1 (run 2b).
-
 Open:
 
 - [ ] Content eval on a held-out set: someone who hasn't seen `fixtures/content/messages.json` or the classifier prompt writes 50 new messages, so the accuracy numbers aren't flattered by tuning.
@@ -35,7 +18,7 @@ Open:
 
 - [ ] Red-flag cadence numbers: `redFlagEveryDays = 2` and `followUpDays = 3` in `apps/server/src/context/questions.ts`. Product values, not clinical cutoffs; change them if they feel wrong in rehearsal.
 
-## Lane 3: Presage video spike (2026-10-03)
+## Presage video spike (2026-10-03)
 
 - Implemented a file-based SmartSpectra runner with `@smartspectra/node-sdk` 3.4.0. It requests pulse and breathing metrics, decodes the SDK protobuf messages, emits normalized JSON, records validation and SDK errors, and exits nonzero when either required reading is missing.
 - Added `--metrics pulse-breathing|all`; the default remains the full breathing + cardio bundle, while the smaller profile isolates pulse/breathing model access during diagnostics.
@@ -76,12 +59,4 @@ Photon care summaries (branch photon/care-summaries):
 - [ ] Copy `care-contacts.example.json` to `care-contacts.json` and put in the doctor's and the emergency contact's real numbers (synthetic patient, real test phones).
 - [ ] From each of those two phones, text the Photon line once before the first summary (Apple marks cold messages as junk).
 - [ ] Check the summaries with `npm run care:send -- --day 2026-09-01 --dry-run`, then run the agent.
-- [ ] Decide whether the doctor's summary should also go out after a voice call (lanes 2 and 3) as a second trigger, or stay one per day.
-
-## Relay video-call screening implementation
-
-The video-call lane now uses `@relaymessenger/elevenlabs` as the Relay audio and ElevenLabs bridge, while Gemini remains the only model used for structured symptom interpretation and final approved wording. The ElevenLabs Agent must be configured as a conversational shell and must call the backend screening and quiet-measurement tools before it interprets or summarizes symptoms.
-
-The quiet phase is intentionally conservative. SmartSpectra breathing needs a complete 30 second window, upper chest visibility, a stable camera, and no talking. Zero confidence, missing readings, unsupported Relay frames, and interrupted calls are reported as unusable rather than promoted to a medical conclusion. SmartSpectra validation hints should be surfaced to the patient when the client UI is available.
-
-Known integration limitation: the ElevenLabs Agent tool URLs must be configured in the ElevenLabs dashboard and exposed over HTTPS for a real phone call. The repository provides the protected routes and the tool contract, but cannot create the dashboard agent or public tunnel automatically.
+- [ ] Decide whether the doctor's summary should also go out after a voice call (the video call) as a second trigger, or stay one per day.

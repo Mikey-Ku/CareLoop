@@ -5,7 +5,7 @@ This guide is for teammates who did not build the code. Use it to test every cap
 - Demo senior: Harriet Lindqvist, 78, FinchNode subject `patient-demo-polypharmacy` (AFib, heart failure, CKD stage 3, type 2 diabetes and more; 14 medicines on file, including apixaban, aspirin and sertraline). Her local patient id is `harriet`.
 - Family member: Sarah (a second phone). Every family member has their own Relay chat with the agent. There is no group chat.
 - Synthetic data only. Never enter real health details.
-- **(PR #8)** means the behavior arrives with the combined lane A pull request (branch `laneA/meds-and-care`). Until it merges, test those rows on that branch.
+- **(PR #8)** means the behavior arrives with the combined pull request #8 (branch `laneA/meds-and-care`). Until it merges, test those rows on that branch.
 - **check** means the code did not make the answer certain. Please find out and write it down.
 
 ---
@@ -14,27 +14,13 @@ This guide is for teammates who did not build the code. Use it to test every cap
 
 You need: a Mac with Node 22.18 or newer, the Relay app on one phone (Harriet), and ideally a second phone with Relay (Sarah). All commands below run in `apps/server` unless noted.
 
-### Step 1. Clone
+Do "Try it on your phone" in the [README](../README.md#try-it-on-your-phone-about-10-minutes): your own Relay agent, a Gemini key and a first message from your phone. A second phone with Relay plays Sarah. Check out `main` (or `laneA/meds-and-care` until PR #8 merges).
 
-Clone the team repo and check out `main` (or `laneA/meds-and-care` for anything marked "PR #8" until it merges).
-
-### Step 2. Install
-
-```sh
-cd apps/server
-npm install
-npm test        # should pass; a quick sanity check
-```
-
-### Step 3. Make `.env` (repo root, never commit it)
-
-```sh
-cp .env.example .env     # run at the repo root
-```
+### The `.env` keys (repo root, never commit it)
 
 | Key | What it turns on | Needed? |
 | --- | --- | --- |
-| `RELAY_AGENT_TOKEN` | The Relay agent (Step 4 fills it) | Yes, for any phone test |
+| `RELAY_AGENT_TOKEN` | The Relay agent (the README's step 3 fills it) | Yes, for any phone test |
 | `PATIENT_RELAY_HANDLE` | Which Relay handle plays Harriet (your own handle) | Yes, for any phone test |
 | `FAMILY_RELAY_HANDLES` | Family chats, comma separated (second phone plays Sarah) | Optional, needed for family tests |
 | `GEMINI_API_KEY` | Reading typed messages, label and paper photos, small talk, call understanding, Photon wording | Optional, but most tests need it. Without it: buttons only, and photos get "I can't read photos yet" |
@@ -47,25 +33,11 @@ cp .env.example .env     # run at the repo root
 | `CALL_MAX_MINUTES`, `VITALS_MIN_CONFIDENCE` | Server ends the call after N minutes (default 4); lowest camera confidence used (default 1) (PR #8) | Optional |
 | `SPECTRUM_PROJECT_ID`, `SPECTRUM_PROJECT_SECRET` plus `care-contacts.json` | Photon (iMessage) care summaries to the doctor and the emergency contact. Off unless set; not part of the MVP | Optional |
 | `FINCHNODE_BASE_URL`, `FINCHNODE_API_KEY` | The FinchNode demo API needs no key | Leave as is |
-| `CLOCK_DATE`, `FOLLOW_UP_DELAY_MINUTES`, `MEDS_NUDGE_MINUTES`, `CHECKIN_TIME`, `MISSED_CHECKIN_TIME`, `MEDS_MORNING_TIME`, `MEDS_EVENING_TIME`, `REFILL_REMIND_DAYS`, `PATIENT_TIMEZONE`, `DATABASE_PATH`, `PORT` | Demo knobs (see Step 5). Easiest to set inline on the command line | Optional |
+| `CLOCK_DATE`, `FOLLOW_UP_DELAY_MINUTES`, `MEDS_NUDGE_MINUTES`, `CHECKIN_TIME`, `MISSED_CHECKIN_TIME`, `MEDS_MORNING_TIME`, `MEDS_EVENING_TIME`, `REFILL_REMIND_DAYS`, `PATIENT_TIMEZONE`, `DATABASE_PATH`, `PORT` | Demo knobs (see "Run the agent"). Easiest to set inline on the command line | Optional |
 
 Never paste keys in chat, screenshots or `FEEDBACK.md`. The README has copy-paste commands that put the Relay token and the Gemini key into `.env` without showing them.
 
-### Step 4. Create your Relay agent and get its link
-
-Each tester runs their own agent. Two programs on the same agent token steal each other's messages.
-
-```sh
-npx relaymessenger@latest login
-npx relaymessenger agents create --handle yourname_checkin --name "Check-in Companion" --subtitle "Daily check-in assistant (AI)"
-```
-
-1. It prints a `Profile:` name and your agent's link. Do not create a webhook subscription (the agent uses WebSocket).
-2. Put the token in `.env` with the README command (`npx relaymessenger auth token --profile yourname_checkin`).
-3. Open the agent's link on Harriet's phone and send "hi". Relay won't let the agent message you until you write first. Do the same on Sarah's phone.
-4. Run `npm run relay:check`. Every line should say `[ok]`.
-
-### Step 5. Run the agent
+### Run the agent
 
 ```sh
 CLOCK_DATE=2026-09-01 FOLLOW_UP_DELAY_MINUTES=2 npm run agent -- --checkin-now
@@ -359,7 +331,6 @@ Paste one block per finding under a "QA findings" heading in `FEEDBACK.md`. Neve
 - Expected: (from this guide or the docs)
 - Severity: 1 safety (missed or false 911/988, dosing advice, wrong person alerted) / 2 broken (feature does not work) / 3 wrong or confusing wording / 4 polish
 - Evidence: screenshot file name, and the matching agent log line (`[agent] ...`, `[relay] ...`, `[llm] ...`). Remove anything secret.
-- Lane: A (check-in, medicines) / B (video call) / C (doctor, family)
 ```
 
 ---

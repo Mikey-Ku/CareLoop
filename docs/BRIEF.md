@@ -32,7 +32,7 @@ Demo patient: Harriet Lindqvist, FinchNode synthetic scenario `polypharmacy-seni
 
 ## MVP: the five features (team goal, set 2026-10-03)
 
-Everything we build serves one of these. `docs/TEAM_PLAN.md` says who builds which; `docs/DEFINITION_OF_DONE.md` says when each is finished.
+Everything we build serves one of these. `docs/DEFINITION_OF_DONE.md` says when each is finished.
 
 1. **Video check-in call.** Harriet calls the agent on Relay. An ElevenLabs voice holds a short, warm conversation that covers the same check-in as the text path (today's questions, how she's feeling), and guides her through a Presage reading during the call ("look at the camera and hold still for a minute"), then says her heart rate back as an estimate. After the call, what she said goes through the same extraction and severity ladder as text, so a spoken answer and a typed answer are recorded the same way. The voice says it is an AI and ends by pointing her to her family.
 2. **Text check-in.** The Relay chat check-in that exists today: open question first, buttons as a fallback, the severity ladder, the safety screen. Goal now: smooth and reliable, with the Gemini calls working every time.
@@ -49,7 +49,7 @@ Everything we build serves one of these. `docs/TEAM_PLAN.md` says who builds whi
 
 ### Already built (2026-10-03)
 
-Records and rules (R1 to R6), the text check-in live on a real phone (open question, graded answers, severity ladder 0 to 5, safety screen, follow-ups, notes for the doctor), family chats, sharing levels, the paper photo check logic, a terminal simulator, CI. See `RUN_LOG.md`.
+Records and rules (R1 to R6), the text check-in live on a real phone (open question, graded answers, severity ladder 0 to 5, safety screen, follow-ups, notes for the doctor), family chats, sharing levels, the paper photo check logic, a terminal simulator, CI.
 
 Later, not MVP: smart pillbox, other languages, weekly family summary, voice memos between family and Harriet.
 
