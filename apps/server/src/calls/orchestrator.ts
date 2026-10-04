@@ -1,8 +1,10 @@
+import { crisisReply, urgentReply } from "../checkin/copy.ts";
 import type { CallCheckinContext } from "../checkin/engine-types.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import type { CallScreeningLlmOutput, LlmClient } from "../llm/types.ts";
 import type { VitalsResult } from "../vitals/types.ts";
-import { callFirstMessage, quietMeasurementPrompt } from "./copy.ts";
+import { callClosing, callFirstMessage, quietMeasurementPrompt } from "./copy.ts";
+import { emergencyDecision } from "./emergency.ts";
 import type { TranscriptTurn } from "./types.ts";
 
 export type ConversationOrchestratorOptions = {
@@ -150,11 +152,12 @@ export class ConversationOrchestrator {
       return;
     }
     if (decision.nextAction === "complete_screening" || decision.nextAction === "emergency" || decision.nextAction === "end_call") {
-      const screening = await this.#finalScreening();
-      const spoken = screening?.patientResponseText ?? decision.patientResponseText;
-      if (spoken.trim()) await this.#speak(spoken);
+      // The screening is stored with the call and runs while the goodbye is spoken; none of its words, and
+      // none of the model's, are ever said. The goodbye or the emergency words are ours (src/calls/copy.ts).
+      const screening = this.#finalScreening();
+      await this.#speak(decision.nextAction === "emergency" ? this.#emergencyWords() : callClosing(this.#options.firstName, this.#options.initialContext.familyNames));
       this.#completed = true;
-      this.#options.onComplete(screening);
+      this.#options.onComplete(await screening);
       return;
     }
     const spoken = decision.patientResponseText.trim();
@@ -176,6 +179,16 @@ export class ConversationOrchestrator {
     if (!spoken) return;
     this.#options.recordAgentTurn(spoken);
     await this.#options.speak(spoken);
+  }
+
+  /**
+   * What she hears when Gemini declares an emergency: the text check-in's fixed replies, 988 for a crisis
+   * (the fixed screen over her turns decides, never the model) and 911 otherwise. Nobody has been told yet,
+   * so no family member is named; the ladder after the call decides who is alerted.
+   */
+  #emergencyWords(): string {
+    const crisis = (emergencyDecision(this.#options.transcript)?.level ?? 0) >= 5;
+    return crisis ? crisisReply(this.#options.firstName) : urgentReply(this.#options.firstName);
   }
 
   async #loadContext(): Promise<unknown> {

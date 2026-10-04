@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { callClosing } from "../src/calls/copy.ts";
 import { emptyCallVitals } from "../src/calls/screening.ts";
-import { ConversationOrchestrator } from "../src/calls/orchestrator.ts";
+import { ConversationOrchestrator, type ConversationOrchestratorOptions } from "../src/calls/orchestrator.ts";
+import { crisisReply, urgentReply } from "../src/checkin/copy.ts";
 import { loadSnapshot } from "../src/finchnode/fixtures.ts";
 import { FakeLlmClient } from "../src/llm/fake.ts";
-import type { CallTurnLlmOutput } from "../src/llm/types.ts";
+import type { CallScreeningLlmOutput, CallTurnLlmOutput } from "../src/llm/types.ts";
 import type { TranscriptTurn } from "../src/calls/types.ts";
 
 const plan = (overrides: Partial<CallTurnLlmOutput> = {}): CallTurnLlmOutput => ({
@@ -53,7 +55,7 @@ describe("ConversationOrchestrator", () => {
     }
   });
 
-  it("gets the final patient wording and caregiver summary from Gemini's structured screening operation", async () => {
+  it("stores Gemini's structured screening and caregiver summary but speaks only the fixed goodbye", async () => {
     const approved = {
       symptoms: [],
       finchEvidence: [{ source: "patient_transcript", detail: "Patient reported a mild cough today." }],
@@ -87,7 +89,8 @@ describe("ConversationOrchestrator", () => {
     flow.start();
     transcript.push({ speaker: "patient", text: "I have had a mild cough today." });
     await flow.handlePatientTurn("I have had a mild cough today.");
-    expect(spoken.at(-1)).toBe(approved.patientResponseText);
+    expect(spoken.at(-1)).toBe(callClosing("Harriet"));
+    expect(spoken).not.toContain(approved.patientResponseText);
     expect(completion).toHaveBeenCalledWith(approved);
     expect(llm.calls.map((call) => call.method)).toEqual(["callTurn", "screenCall"]);
   });
@@ -200,5 +203,100 @@ describe("ConversationOrchestrator: repeats and the end of the call", () => {
     const before = built.spoken.length;
     await flow.handlePatientTurn("I feel dizzy.");
     expect(built.spoken).toHaveLength(before);
+  });
+});
+
+/** A flow with the fakes wired; `say` records her turn in the transcript (as the call service does) and hands it over. */
+function buildFlow(llm: FakeLlmClient, overrides: Partial<ConversationOrchestratorOptions> = {}) {
+  const transcript: TranscriptTurn[] = [];
+  const spoken: string[] = [];
+  const onComplete = vi.fn();
+  const beginQuietMeasurement = vi.fn();
+  const flow = new ConversationOrchestrator({
+    callId: "call-f",
+    patientId: "harriet",
+    subject: "patient-demo-polypharmacy",
+    firstName: "Harriet",
+    transcript,
+    initialContext: { firstName: "Harriet", questions: [], yesterday: [], memories: [], familyNames: [] },
+    llm,
+    loadSnapshot: async (subject) => loadSnapshot(subject),
+    getVitals: emptyCallVitals,
+    canMeasure: false,
+    quietMeasurementMs: 30_000,
+    speak: async (text) => { spoken.push(text); },
+    recordAgentTurn: (text) => transcript.push({ speaker: "agent", text }),
+    beginQuietMeasurement,
+    onComplete,
+    ...overrides,
+  });
+  const say = (text: string) => {
+    transcript.push({ speaker: "patient", text });
+    return flow.handlePatientTurn(text);
+  };
+  return { flow, spoken, transcript, onComplete, beginQuietMeasurement, say };
+}
+
+describe("ConversationOrchestrator: the end of the call is fixed words", () => {
+  // Advice and a question, as Gemini worded a closing on a real call: the ladder had recorded only level 1.
+  const MODEL_WORDS = "Because you have a history of heart failure, it would be wise to contact your clinician or care team today. If you experience severe symptoms, call 911. Do you have any other symptoms?";
+  const screening: CallScreeningLlmOutput = {
+    symptoms: [],
+    finchEvidence: [],
+    concernLevel: "moderate",
+    recommendedHumanAction: "contact_clinician_today",
+    uncertainty: [],
+    patientResponseText: "Your care team will review this today. Is there anything you would like to add?",
+    caregiverSummary: "Patient reported a mild cough.",
+  };
+  const MODEL_FRAGMENTS = [/clinician|care team|heart failure|911|988/i, /\?/];
+
+  it.each(["complete_screening", "end_call"] as const)("%s: she hears the fixed goodbye and nothing the model wrote, not even a question", async (nextAction) => {
+    const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction, patientResponseText: MODEL_WORDS }), screenCall: () => screening });
+    const { spoken, onComplete, say } = buildFlow(llm, { initialContext: { firstName: "Harriet", questions: [], yesterday: [], memories: [], familyNames: ["Sarah"] } });
+    await say("I have had a bit of a cough.");
+    expect(spoken).toEqual([callClosing("Harriet", ["Sarah"])]);
+    for (const fragment of MODEL_FRAGMENTS) expect(spoken.join(" ")).not.toMatch(fragment);
+    expect(onComplete).toHaveBeenCalledWith(screening); // still stored with the call
+    expect(llm.calls.map((call) => call.method)).toEqual(["callTurn", "screenCall"]);
+  });
+
+  it("speaks the goodbye without waiting for the screening, which is still stored when it ends", async () => {
+    let finish!: (value: CallScreeningLlmOutput) => void;
+    const llm = new FakeLlmClient({ callTurn: () => plan() });
+    llm.screenCall = () => new Promise<CallScreeningLlmOutput>((resolve) => { finish = resolve; });
+    const { spoken, onComplete, say } = buildFlow(llm);
+    const turn = say("I have had a bit of a cough.");
+    await vi.waitFor(() => expect(spoken).toEqual([callClosing("Harriet")]));
+    expect(onComplete).not.toHaveBeenCalled();
+    finish(screening);
+    await turn;
+    expect(onComplete).toHaveBeenCalledWith(screening);
+  });
+
+  it("a screening that fails still ends the call with the fixed goodbye", async () => {
+    const llm = new FakeLlmClient({ callTurn: () => plan() }); // screenCall unscripted: Gemini unavailable
+    const { spoken, onComplete, say } = buildFlow(llm);
+    await say("I have had a bit of a cough.");
+    expect(spoken).toEqual([callClosing("Harriet")]);
+    expect(onComplete).toHaveBeenCalledWith(undefined);
+  });
+
+  it("emergency: she hears the text check-in's fixed 911 reply, never the model's words", async () => {
+    const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction: "emergency", patientResponseText: "Please lie down and rest, and keep an eye on it." }), screenCall: () => screening });
+    const { spoken, onComplete, say } = buildFlow(llm, { initialContext: { firstName: "Harriet", questions: [], yesterday: [], memories: [], familyNames: ["Sarah"] } });
+    await say("I feel a bit odd today.");
+    expect(spoken).toEqual([urgentReply("Harriet")]);
+    expect(spoken[0]).toMatch(/call 911 right away/);
+    expect(spoken[0]).not.toMatch(/Sarah|lie down|keep an eye/); // nobody has been told yet, so no one is named
+    expect(onComplete).toHaveBeenCalledWith(screening);
+  });
+
+  it("emergency after a crisis phrase: the fixed 988 reply, chosen by the fixed screen and not by the model", async () => {
+    const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction: "emergency", patientResponseText: "That sounds hard." }), screenCall: () => screening });
+    const { spoken, say } = buildFlow(llm);
+    await say("I don't want to live anymore.");
+    expect(spoken).toEqual([crisisReply("Harriet")]);
+    expect(spoken[0]).toMatch(/988/);
   });
 });

@@ -390,12 +390,14 @@ export class CallService implements CallEventHandler {
       active.screens.push(Promise.resolve(this.#options.engine?.screenSpokenTurn(active.patientId, turn)).then(() => {}).catch((error) => {
         this.#log("call_safety_send_failed", { call_id: active.call.id, error: summary(error) });
       }));
+      // Nothing but the fixed reply is spoken from here: a Gemini turn still in flight must not talk over it.
+      active.conversation?.close();
       active.tts?.cancel();
       const response = emergency.level >= 5
         ? crisisReply(active.firstName, this.#familyNames(active.patientId))
         : urgentReply(active.firstName, this.#familyNames(active.patientId));
       this.#recordTurn(active, { speaker: "agent", text: response });
-      void active.tts?.speak(response).finally(() => active.transport?.end());
+      void active.tts?.speak(response).finally(() => active.transport?.end()).catch((error) => this.#log("call_emergency_speech_failed", { call_id: active.call.id, error: summary(error) }));
       return;
     }
     const screen = this.#screenTurn(active, turn);

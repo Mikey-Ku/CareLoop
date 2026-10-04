@@ -1,7 +1,9 @@
 import type { Call, CallWebhookEvent } from "@relaymessenger/sdk";
 import type { RelayCallTransport } from "@relaymessenger/sdk/calls";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { callClosing } from "../src/calls/copy.ts";
 import { CallService } from "../src/calls/service.ts";
+import { crisisReply, urgentReply } from "../src/checkin/copy.ts";
 import { callTranscript, getCallSession } from "../src/db/calls.ts";
 import { openDatabase, upsertPatient, type Db } from "../src/db/index.ts";
 import { loadConfig } from "../src/config.ts";
@@ -171,5 +173,80 @@ describe("direct STT/Gemini/TTS Relay call", () => {
     expect(tts.close).toHaveBeenCalledOnce();
     expect(transport.close).toHaveBeenCalledOnce();
     expect(db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND (name LIKE '%audio%' OR name LIKE '%video%')`).all()).toEqual([]);
+  });
+});
+
+const modelPlan = (overrides: Partial<CallTurnLlmOutput> = {}): CallTurnLlmOutput => ({
+  acknowledgment: "Thank you for telling me.",
+  patientResponseText: "I appreciate you sharing that.",
+  nextQuestion: null,
+  nextAction: "complete_screening",
+  informationCollected: [],
+  missingInformation: [],
+  evidence: [],
+  uncertainty: [],
+  ...overrides,
+});
+
+describe("what a call says at its end and in an emergency is fixed copy", () => {
+  it("Gemini ending the call: she hears the fixed goodbye, not its words", async () => {
+    const service = setup({ callTurn: () => modelPlan({ patientResponseText: "It would be wise to contact your clinician today. Do you have any other symptoms?" }) });
+    await start(service);
+    stt.emit("I have had a bit of a cough.");
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(tts.spoken.at(-1)).toBe(callClosing("Harriet", []));
+    expect(tts.spoken.slice(1).join(" ")).not.toMatch(/clinician|\?/); // after the greeting, which asks how she is
+  });
+
+  it.each([
+    ["an urgent symptom", "I have chest pain right now", urgentReply("Harriet", [])],
+    ["a crisis", "I don't want to live anymore", crisisReply("Harriet", [])],
+  ])("%s the fixed screen catches: exactly the text check-in's reply, and Gemini is never asked", async (_kind, words, reply) => {
+    const service = setup();
+    await start(service);
+    stt.emit(words);
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(tts.spoken.at(-1)).toBe(reply);
+    expect(llm.calls.some((call) => call.method === "callTurn")).toBe(false);
+  });
+
+  it("a Gemini turn still being planned when an emergency arrives never speaks over the fixed reply", async () => {
+    const service = setup();
+    await start(service);
+    let release!: (output: CallTurnLlmOutput) => void;
+    llm.callTurn = () => new Promise<CallTurnLlmOutput>((resolve) => { release = resolve; });
+    stt.emit("My ankles are a little swollen today.");
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    // The fixed reply takes a few seconds to play, as real speech does; the call ends only after it.
+    let finishReply!: () => void;
+    tts.speak.mockImplementationOnce(async (text) => {
+      tts.spoken.push(text);
+      await new Promise<void>((resolve) => { finishReply = resolve; });
+    });
+    stt.emit("Now I have chest pain right now");
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(urgentReply("Harriet", [])));
+    release(modelPlan({ nextAction: "ask_follow_up", nextQuestion: "When did the swelling start?" }));
+    await new Promise((resolve) => setImmediate(resolve)); // let the late turn finish
+    expect(tts.spoken.at(-1)).toBe(urgentReply("Harriet", []));
+    expect(tts.spoken.join(" ")).not.toContain("swelling start");
+    finishReply();
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+  });
+
+  it("the call still ends when the voice fails on the emergency reply, and nothing is left unhandled", async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      const service = setup();
+      await start(service);
+      tts.speak.mockRejectedValueOnce(new Error("ElevenLabs TTS returned HTTP 500"));
+      stt.emit("I have chest pain right now");
+      await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
   });
 });
