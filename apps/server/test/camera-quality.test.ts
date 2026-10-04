@@ -42,20 +42,22 @@ describe("camera reading qualification", () => {
   });
 });
 
-function fixture() {
+function fixture(quietDurationMs = 30_000) {
   const handlers = new Map<string, (...args: any[]) => void>();
   const metricHandlers = new Map<string, (...args: any[]) => void>();
+  const epochMs = 1_791_094_000_000;
   let now = 0;
+  const captureEpoch = new Map<number, number>();
   const sent: number[] = [];
   const stopAsync = vi.fn(async () => {});
   const destroy = vi.fn(async () => {});
   const session = {
     on: (name: string, fn: (...args: any[]) => void) => metricHandlers.set(name, fn),
     useCustomInput: () => session,
-    start: () => {}, stopAsync, destroy,
+    start: vi.fn(), stopAsync, destroy,
     sendFrame: (_b: unknown, _w: unknown, _h: unknown, _s: unknown, _f: unknown, t: number) => { sent.push(t); return true; },
   };
-  const bridge = new RelayPresageBridge({ on: (name: string, fn: (...args: any[]) => void) => handlers.set(name, fn) } as never, { apiKey: "test", now: () => now, sessionFactory: () => session as never });
+  const bridge = new RelayPresageBridge({ on: (name: string, fn: (...args: any[]) => void) => handlers.set(name, fn) } as never, { apiKey: "test", quietDurationMs, now: () => epochMs + now, sessionFactory: () => session as never });
   function track() {
     let consumer: { push: (event: unknown) => void; end: () => void };
     const unsubscribe = vi.fn();
@@ -64,18 +66,62 @@ function fixture() {
       result, unsubscribe,
       frame(t: number, wall: number) {
         now = wall;
+        captureEpoch.set(t, (epochMs + wall) * 1000);
         consumer.push({ frame: { type: VideoBufferType.RGBA, data: new Uint8Array(16), width: 2, height: 2 }, timestampUs: t });
       },
       end() { consumer.end(); },
     };
   }
   const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
-  const metrics = (t: number, sampleTime = t, stable: boolean | null = true) => metricHandlers.get("metrics")!(Buffer.from(JSON.stringify({ cardio: { pulseRate: [{ value: 72, confidence: 90, stable, timestamp: sampleTime }] } })), t);
+  const metrics = (t: number, sampleTime = t, stable: boolean | null = true) => metricHandlers.get("metrics")!(Buffer.from(JSON.stringify({ cardio: { pulseRate: [{ value: 72, confidence: 90, stable, timestamp: captureEpoch.get(sampleTime) ?? sampleTime }] }, breathing: { rate: [{ value: 15, confidence: 90, stable, timestamp: captureEpoch.get(sampleTime) ?? sampleTime }] } })), captureEpoch.get(t) ?? t);
   bridge.start();
-  return { bridge, handlers, track, flush, sent, metrics, stopAsync, destroy, session, setNow: (value: number) => { now = value; } };
+  return { bridge, handlers, track, flush, sent, metrics, stopAsync, destroy, session, epoch: (t: number) => captureEpoch.get(t), setNow: (value: number) => { now = value; } };
 }
 
 describe("camera transport lifecycle", () => {
+  it("pauses frames while restarting a previous processing run", async () => {
+    const f = fixture(); const track = f.track();
+    f.handlers.get("trackSubscribed")!(track.result);
+    f.bridge.beginQuietMeasurement(true);
+    track.frame(10_000_000, 0); await f.flush();
+    let drain!: () => void;
+    f.stopAsync.mockImplementationOnce(() => new Promise<void>((resolve) => { drain = resolve; }));
+    f.bridge.beginQuietMeasurement(true);
+    track.frame(11_000_000, 1_000); await f.flush();
+    expect(f.sent).toEqual([f.epoch(10_000_000)]);
+    drain(); await f.flush();
+    expect(f.session.start).toHaveBeenCalledTimes(2);
+    track.frame(12_000_000, 2_000); await f.flush();
+    expect(f.sent).toEqual([f.epoch(10_000_000), f.epoch(12_000_000)]);
+    await f.bridge.stop();
+  });
+
+  it("does not restart processing after shutdown during a retry drain", async () => {
+    const f = fixture(); const track = f.track();
+    f.handlers.get("trackSubscribed")!(track.result);
+    f.bridge.beginQuietMeasurement(true);
+    track.frame(10_000_000, 0); await f.flush();
+    let drain!: () => void;
+    f.stopAsync.mockImplementationOnce(() => new Promise<void>((resolve) => { drain = resolve; }));
+    f.bridge.beginQuietMeasurement(true); await f.flush();
+    const stopped = f.bridge.stop();
+    drain(); await stopped;
+    expect(f.session.start).toHaveBeenCalledOnce();
+    expect(f.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("qualifies breathing warmed at 30 seconds in a longer quiet window", async () => {
+    const f = fixture(45_000); const track = f.track();
+    f.handlers.get("trackSubscribed")!(track.result);
+    f.bridge.beginQuietMeasurement(true);
+    for (let i = 0; i <= 45; i += 1) {
+      track.frame(10_000_000 + i * 1_000_000, i * 1_000); await f.flush();
+      if (i === 35) f.metrics(45_000_000);
+    }
+    expect(f.bridge.result().breathingRate).toBe(15);
+    await f.bridge.stop();
+  });
+
   it("rejects stale samples inside a current packet and clears missing stability", async () => {
     const f = fixture(); const track = f.track();
     f.handlers.get("trackSubscribed")!(track.result);
@@ -110,7 +156,7 @@ describe("camera transport lifecycle", () => {
     track.frame(30_000_001, 30_000); await f.flush();
     expect(f.bridge.quiet.status).toBe("interrupted");
     expect(f.bridge.result().heartRate).toBeNull();
-    expect(f.sent).toEqual([1]);
+    expect(f.sent).toEqual([f.epoch(1)]);
     await f.bridge.stop();
   });
 
@@ -165,8 +211,9 @@ describe("camera transport lifecycle", () => {
     const next = f.track();
     f.handlers.get("trackSubscribed")!(next.result);
     f.bridge.beginQuietMeasurement(true);
+    await f.flush();
     next.frame(2, 10); await f.flush();
-    expect(f.sent).toEqual([2]);
+    expect(f.sent).toEqual([f.epoch(2)]);
     await f.bridge.stop();
   });
 
@@ -180,9 +227,10 @@ describe("camera transport lifecycle", () => {
     f.handlers.get("trackSubscribed")!(next.result);
     expect(f.bridge.quiet.status).toBe("interrupted");
     f.bridge.beginQuietMeasurement(true);
+    await f.flush();
     next.frame(2, 10); await f.flush();
     expect(first.unsubscribe).toHaveBeenCalledOnce();
-    expect(f.sent).toEqual([1, 2]);
+    expect(f.sent).toEqual([f.epoch(1), f.epoch(2)]);
     await f.bridge.stop();
     expect(next.unsubscribe).toHaveBeenCalledOnce();
   });

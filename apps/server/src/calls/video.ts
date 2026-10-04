@@ -1,6 +1,7 @@
 import { VideoBufferType, VideoStream, type RelayAudioFrame, type RelayCallTransport, type RemoteVideoTrack, type VideoFrameEvent } from "@relaymessenger/sdk/calls";
 import { MetricType, ProcessingStatus, SmartSpectraSDK } from "@smartspectra/node-sdk";
 import { decodeMetrics } from "@smartspectra/node-sdk/messages";
+import { createFrameTimestampAnchor } from "../vitals/frame-clock.ts";
 import { createRelayVideoFrameAdapter } from "../vitals/relay-frame-adapter.ts";
 import { mergeMetricSnapshots, normalizePresageMetrics, resultFromSnapshot, type MetricSnapshot } from "../vitals/normalize.ts";
 import type { PresageSession } from "../vitals/presage-file.ts";
@@ -50,6 +51,8 @@ export class RelayPresageBridge {
   #started = false;
   #stopTask: Promise<VitalsResult> | undefined;
   #lastFrameWallMs: number | undefined;
+  #restartTask: Promise<void> | undefined;
+  #inputStarted = false;
   #stopped = false;
   #speechActive = false;
 
@@ -74,7 +77,7 @@ export class RelayPresageBridge {
             heartRate: next.heartRate, heartRateConfidence: next.heartRateConfidence,
             heartRateStable: next.heartRateStable === true, heartRateTimestampUs: next.heartRateTimestampUs,
           } : {}),
-          ...(inWindow(next.breathingRateTimestampUs, this.quiet.durationMs) ? {
+          ...(inWindow(next.breathingRateTimestampUs, 30_000) ? {
             breathingRate: next.breathingRate, breathingRateConfidence: next.breathingRateConfidence,
             breathingRateStable: next.breathingRateStable === true, breathingRateTimestampUs: next.breathingRateTimestampUs,
           } : {}),
@@ -115,6 +118,7 @@ export class RelayPresageBridge {
     this.#measurementEndUs = undefined;
     this.#lastFrameWallMs = undefined;
     this.quiet.requestPermission(permissionGranted);
+    if (permissionGranted && this.#inputStarted) this.#restartProcessing();
     if (permissionGranted) this.#log("call_quiet_measurement_started", { duration_ms: this.quiet.durationMs });
   }
 
@@ -133,6 +137,7 @@ export class RelayPresageBridge {
     this.#interruptIfStalled();
     this.#stopped = true;
     await this.#disconnectVideo();
+    await this.#restartTask;
     try {
       await this.#session.stopAsync();
     } catch (error) {
@@ -144,6 +149,21 @@ export class RelayPresageBridge {
       this.#errors.push({ code: "presage_destroy", message: error instanceof Error ? error.message : String(error) });
     }
     return this.result();
+  }
+
+  #restartProcessing(): void {
+    const previous = this.#restartTask ?? Promise.resolve();
+    const task = previous.then(async () => {
+      await this.#session.stopAsync();
+      if (this.#stopped) return;
+      this.#session.start();
+      this.#inputStarted = false;
+    }).catch((error) => {
+      this.#errors.push({ code: "presage_restart", message: error instanceof Error ? error.message : String(error) });
+      this.#interruptMeasurement();
+    });
+    this.#restartTask = task;
+    void task.then(() => { if (this.#restartTask === task) this.#restartTask = undefined; });
   }
 
   #interruptIfStalled(): void {
@@ -192,15 +212,17 @@ export class RelayPresageBridge {
   }
 
   async #pump(reader: ReadableStreamDefaultReader<VideoFrameEvent>): Promise<void> {
+    const clock = createFrameTimestampAnchor();
     while (!this.#stopped) {
       const next = await reader.read();
       if (next.done || this.#stopped || this.#reader !== reader) break;
       const event = next.value;
-      if (this.quiet.status !== "measuring") continue;
+      if (this.quiet.status !== "measuring" || this.#restartTask) continue;
       const nowMs = this.#now();
+      const timestampUs = clock.next(event.timestampUs, nowMs);
       // A stalled camera must not count as a continuous quiet capture window.
       if (this.#lastFrameWallMs !== undefined && (nowMs - this.#lastFrameWallMs > 1_000
-        || (this.#measurementEndUs !== undefined && Number(event.timestampUs) - this.#measurementEndUs > 1_000_000))) {
+        || (this.#measurementEndUs !== undefined && timestampUs - this.#measurementEndUs > 1_000_000))) {
         this.#interruptMeasurement();
         this.#log("call_quiet_measurement_interrupted", { reason: "video_gap" });
         continue;
@@ -216,12 +238,13 @@ export class RelayPresageBridge {
         height: frame.height,
         stride: frame.width * 4,
         pixelFormat: "RGBA",
-        timestampUs: event.timestampUs,
+        timestampUs,
       });
       if (!result.accepted) {
         this.#log("call_video_frame_rejected", { reason: result.reason, detail: result.detail });
         continue;
       }
+      this.#inputStarted = true;
       this.#lastFrameWallMs = nowMs;
       this.#timestampOriginMs ??= nowMs - result.timestampUs / 1000;
       this.#measurementStartUs ??= result.timestampUs;
