@@ -715,14 +715,17 @@ describe("her video is logged, so a call with no camera offer can be explained",
   describe("the camera offer that was not made", () => {
     const turn = "My ankles are a bit swollen.";
 
-    it("Presage is set up but her video is off: one line says why, and the goodbye is unchanged", async () => {
+    it("Presage is set up but her video is off: one line says why, she is told how to turn the camera on, and a no gets the goodbye", async () => {
       const service = setup({ callTurn: endsTheCall, env: withCamera });
       await start(service);
       stt.emit(turn);
-      await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_GUIDANCE));
       expect(skipped()).toEqual([{ event: "call_camera_offer_skipped", call_id: "call-1", reason: "no_video" }]);
-      expect(tts.spoken.at(-1)).toBe(callClosing("Harriet", []));
       expect(tts.spoken).not.toContain(CAMERA_OFFER_AT_END);
+      stt.emit("No thanks.");
+      await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+      expect(tts.spoken.at(-1)).toBe(callClosing("Harriet", []));
+      expect(skipped()).toHaveLength(1);
     });
 
     it("her camera turned off before the goodbye counts the same", async () => {
@@ -735,20 +738,24 @@ describe("her video is logged, so a call with no camera offer can be explained",
       expect(skipped()).toEqual([]); // not yet: nothing has been skipped
       transport.emit("remoteVideo", false);
       stt.emit("Since Monday.");
-      await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_GUIDANCE));
       expect(skipped()).toEqual([{ event: "call_camera_offer_skipped", call_id: "call-1", reason: "no_video" }]);
+      stt.emit("No thanks.");
+      await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
     });
 
     it("once per call, even when the goodbye could not be spoken and the call carried on to a second one", async () => {
       const service = setup({ callTurn: endsTheCall, env: withCamera });
       await start(service);
-      tts.speak.mockRejectedValueOnce(new Error("ElevenLabs TTS returned HTTP 500")); // the goodbye
+      tts.speak.mockRejectedValueOnce(new Error("ElevenLabs TTS returned HTTP 500")); // the camera guidance, which comes first with her video off
       stt.emit(turn);
       await vi.waitFor(() => expect(tts.spoken.at(-1)).toMatch(/did not catch that/i));
       expect(transport.end).not.toHaveBeenCalled();
       stt.emit("Since Monday.");
+      await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_GUIDANCE)); // not heard the first time, so said now
+      stt.emit("No thanks.");
       await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
-      expect(llm.calls.filter((call) => call.method === "callTurn")).toHaveLength(2); // the goodbye was reached twice
+      expect(llm.calls.filter((call) => call.method === "callTurn")).toHaveLength(3); // the end was reached twice, then her no to the guidance is a turn that ends it
       expect(skipped()).toHaveLength(1);
     });
 

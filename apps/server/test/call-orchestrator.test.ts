@@ -479,6 +479,19 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
       expect(onComplete).toHaveBeenCalledOnce();
     });
 
+    it("her camera is off and she is told how to turn it on: told once, then she may say no and gets the goodbye", async () => {
+      const llm = new FakeLlmClient({ callTurn: () => plan() });
+      const onCameraOfferSkipped = vi.fn();
+      const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: () => false, cameraNeedsVideo: () => true, onCameraOfferSkipped });
+      await say("I have had a bit of a cough.");
+      expect(onCameraOfferSkipped).toHaveBeenCalledOnce();
+      expect(spoken).toEqual([CAMERA_GUIDANCE]);
+      await say("No thanks.");
+      expect(spoken.at(-1)).toBe(callClosing("Harriet"));
+      expect(onCameraOfferSkipped).toHaveBeenCalledOnce();
+      expect(onComplete).toHaveBeenCalledOnce();
+    });
+
     it("not told while the offer is made, nor when she turns it down and gets the goodbye", async () => {
       const llm = new FakeLlmClient({ callTurn: () => plan() });
       const onCameraOfferSkipped = vi.fn();
@@ -495,7 +508,7 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
       vi.useFakeTimers();
       const llm = new FakeLlmClient({ callTurn: () => plan() });
       const onCameraOfferSkipped = vi.fn();
-      const { flow, onComplete, say } = buildFlow(llm, { canMeasure: () => true, onCameraOfferSkipped });
+      const { flow, onComplete, say } = buildFlow(llm, { canMeasure: () => true, onCameraOfferSkipped, getVitals: () => ({ ...emptyCallVitals(), heartRate: 72 }) });
       await say("I have had a bit of a cough.");
       await say("Yes, please.");
       await vi.advanceTimersByTimeAsync(30_500);
