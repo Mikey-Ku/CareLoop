@@ -8,6 +8,12 @@ export const SERVICE_NAME = "mhacks2026-server";
 
 export type AppDeps = {
   config: Pick<Config, "finchnode">;
+  /** Narrow server-tool surface exposed to ElevenLabs. It accepts identifiers and structured state only, never media. */
+  calls?: {
+    screen(callId: string): Promise<unknown>;
+    beginQuietMeasurement(callId: string, permissionGranted: boolean): Promise<unknown>;
+    toolSecret?: string;
+  };
   /** Where server-side errors are reported. Never receives request bodies or secrets. */
   logError?: (line: string) => void;
 };
@@ -22,6 +28,8 @@ export function createApp(deps: AppDeps): Express {
   app.get("/health", (_req, res) => {
     res.json({ ok: true, service: SERVICE_NAME, finchnode: finchnodeHost });
   });
+
+  if (deps.calls) app.use("/integrations/elevenlabs", callToolRouter(deps.calls));
 
   app.use("/webhooks/relay", relayWebhookRouter());
 
@@ -40,6 +48,47 @@ export function createApp(deps: AppDeps): Express {
   app.use(onError);
 
   return app;
+}
+
+function callToolRouter(calls: NonNullable<AppDeps["calls"]>): express.Router {
+  const router = express.Router();
+  router.use(express.json({ limit: "32kb" }));
+  router.use((req, res, next) => {
+    const expected = calls.toolSecret;
+    const received = req.header("authorization")?.replace(/^Bearer\s+/i, "");
+    if (!expected || received !== expected) {
+      res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    next();
+  });
+  router.post("/screen-symptoms", async (req, res, next) => {
+    const callId = typeof req.body?.callId === "string" ? req.body.callId.trim() : "";
+    if (!callId) {
+      res.status(400).json({ error: "callId_required" });
+      return;
+    }
+    try {
+      const result = await calls.screen(callId) as { patientResponseText?: unknown };
+      res.json({ patientResponseText: typeof result.patientResponseText === "string" ? result.patientResponseText : "A member of your care team will review what you shared." });
+    } catch (error) {
+      next(error);
+    }
+  });
+  router.post("/quiet-measurement", async (req, res, next) => {
+    const callId = typeof req.body?.callId === "string" ? req.body.callId.trim() : "";
+    const permissionGranted = req.body?.permissionGranted === true;
+    if (!callId) {
+      res.status(400).json({ error: "callId_required" });
+      return;
+    }
+    try {
+      res.json(await calls.beginQuietMeasurement(callId, permissionGranted));
+    } catch (error) {
+      next(error);
+    }
+  });
+  return router;
 }
 
 /**

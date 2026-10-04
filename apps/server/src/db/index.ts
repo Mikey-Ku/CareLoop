@@ -89,3 +89,4 @@ export function setSharing(db: Db, patientId: string, sharing: SharingLevel): vo
 
 export * from "./flags.ts";
 export * from "./snapshots.ts";
+export * from "./calls.ts";

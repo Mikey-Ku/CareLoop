@@ -18,14 +18,18 @@
     "relay:check": "node --env-file-if-exists=../../.env src/cli/relay-check.ts",
     "llm:check": "node --env-file-if-exists=../../.env src/cli/llm-check.ts",
     "content:eval": "node --env-file-if-exists=../../.env src/cli/content-eval.ts",
+    "vitals:video": "node --env-file-if-exists=../../.env src/cli/vitals-video.ts",
     "record-fixtures": "node --env-file-if-exists=../../.env ../../scripts/record-fixtures.ts"
   },
   "dependencies": {
-    "@relaymessenger/sdk": "^0.5.0",
+    "@relaymessenger/elevenlabs": "0.1.1",
+    "@relaymessenger/sdk": "0.5.1",
+    "@smartspectra/node-sdk": "3.4.0",
     "@spectrum-ts/core": "^12.10.1",
     "@spectrum-ts/imessage": "^12.10.1",
     "better-sqlite3": "^13.0.3",
     "express": "^5.2.1",
+    "node-webcodecs": "1.3.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {

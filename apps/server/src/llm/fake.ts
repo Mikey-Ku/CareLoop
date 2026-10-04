@@ -1,5 +1,7 @@
 import type {
   AnswerMapping,
+  CallScreeningLlmInput,
+  CallScreeningLlmOutput,
   CareMessageInput,
   CheckinExtraction,
   ClassifyInput,
@@ -26,6 +28,7 @@ export type FakeLlmScript = {
   extractCheckin?: (input: ExtractCheckinInput) => CheckinExtraction | Error;
   readImage?: (input: ReadImageInput) => ImageReading | Error;
   writeCareMessage?: (input: CareMessageInput) => string | Error;
+  screenCall?: (input: CallScreeningLlmInput) => CallScreeningLlmOutput | Error;
 };
 
 export type FakeLlmCall =
@@ -34,7 +37,8 @@ export type FakeLlmCall =
   | { method: "classifyMessage"; input: ClassifyInput }
   | { method: "extractCheckin"; input: ExtractCheckinInput }
   | { method: "readImage"; input: ReadImageInput }
-  | { method: "writeCareMessage"; input: CareMessageInput };
+  | { method: "writeCareMessage"; input: CareMessageInput }
+  | { method: "screenCall"; input: CallScreeningLlmInput };
 
 export class FakeLlmClient implements LlmClient {
   readonly provider = "fake";
@@ -115,6 +119,16 @@ export class FakeLlmClient implements LlmClient {
     const result = this.script.writeCareMessage(input);
     if (result instanceof Error) throw result;
     return result;
+  }
+
+  /** Unscripted: unavailable, so the call service records its "review it manually" result. */
+  async screenCall(input: CallScreeningLlmInput, options?: LlmCallOptions): Promise<CallScreeningLlmOutput> {
+    this.calls.push({ method: "screenCall", input });
+    throwIfAborted(options);
+    if (!this.script.screenCall) throw new LlmUnavailableError("fake: no screenCall script");
+    const result = this.script.screenCall(input);
+    if (result instanceof Error) throw result;
+    return { ...result, symptoms: result.symptoms.map((m) => ({ ...m })), finchEvidence: result.finchEvidence.map((e) => ({ ...e })), uncertainty: [...result.uncertainty] };
   }
 
   /** Inputs of the mapAnswer calls only, in order. */

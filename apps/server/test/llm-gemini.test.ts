@@ -705,3 +705,14 @@ describe("writeCareMessage (care texts to the doctor and the emergency contact)"
     expect(fake.careMessageCalls).toHaveLength(1);
   });
 });
+
+describe("FakeLlmClient.screenCall", () => {
+  it("unscripted is unavailable; scripted answers are recorded", async () => {
+    const input = { patientId: "p", transcript: [{ speaker: "patient" as const, text: "my knee aches" }], vitals: null, finchContext: null, recentMemories: [], symptomObservations: [] };
+    await expect(new FakeLlmClient().screenCall(input)).rejects.toBeInstanceOf(LlmUnavailableError);
+    const out = { symptoms: [], finchEvidence: [], concernLevel: "low" as const, recommendedHumanAction: "none" as const, uncertainty: [], patientResponseText: "Thanks.", caregiverSummary: "Fine." };
+    const fake = new FakeLlmClient({ screenCall: () => out });
+    expect(await fake.screenCall(input)).toEqual(out);
+    expect(fake.calls.map((c) => c.method)).toEqual(["screenCall"]);
+  });
+});

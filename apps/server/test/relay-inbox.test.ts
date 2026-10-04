@@ -70,6 +70,23 @@ function contactAdded(handle: string, chatId: string) {
   });
 }
 
+function callCreated(callId = nextId()) {
+  return envelope("call.created", {
+    call: {
+      id: callId,
+      chat_id: HARRIET_CHAT,
+      from: person("harriet.demo"),
+      to: [{ id: AGENT_ID, handle: "agent.demo", kind: "agent" }],
+      status: "ringing",
+      revision: 1,
+      created_at: T,
+      ringing_at: T,
+      answered_at: null,
+      ended_at: null,
+    },
+  });
+}
+
 function fakeRelay(overrides: { chats?: Chat[]; subscriptions?: unknown[] } = {}) {
   const chats = overrides.chats ?? [];
   return {
@@ -136,6 +153,18 @@ describe("onEvent: commit before ACK", () => {
     await inbox.drain();
     expect(engine.handleInbound).toHaveBeenCalledTimes(1);
     expect(rows(db)[0]!.processedAt).toBe(T);
+  });
+
+  it("routes a durable call.created event without waiting for the call lifetime", async () => {
+    const { db, relay } = setup();
+    const handler = { handle: vi.fn(async () => undefined) };
+    const inbox = createRelayInbox({ db, engine: { handleInbound: vi.fn() }, patientHandle: "harriet.demo", relay, callHandler: handler, log: () => {}, now: () => T });
+    const event = callCreated();
+    await inbox.onEvent(event, { sequence: "call-1" });
+    await inbox.drain();
+    expect(handler.handle).toHaveBeenCalledTimes(1);
+    expect(await processEvent({ db, engine: { handleInbound: vi.fn() }, patientHandle: "harriet.demo", relay, callHandler: handler, log: () => {}, now: () => T }, event)).toBe("call_started");
+    expect(handler.handle).toHaveBeenCalledTimes(2);
   });
 
   it("ignores a duplicate event_id: one row, handled once", async () => {

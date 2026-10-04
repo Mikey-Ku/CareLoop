@@ -217,3 +217,45 @@ Retest on the phone with `FOLLOW_UP_DELAY_MINUTES=2`; add a second phone as fami
 
 **Note:** anyone who ran the photon/care-summaries branch has a database with its tables as migration 6: delete `data/*.db` (the app and simulator databases) before running this branch.
 
+## Lane 3: Presage video spike: 2026-10-03 17:44
+
+**Goal of this run:** Add a file-based SmartSpectra spike and prepare the Relay video-frame seam.
+
+**What was built:**
+- Added the pinned `@smartspectra/node-sdk` 3.4.0 dependency and kept `PRESAGE_API_KEY` documented only as an environment variable.
+- Added `npm run vitals:video -- <video.mp4>`, which requests pulse and breathing metrics from `useFile()`, decodes the SDK messages, prints normalized JSON, and exits nonzero without both readings.
+- Added normalized vitals types, metric merging, confidence handling, validation events, SDK error handling and timeout handling.
+- Added the Relay frame adapter design with format mapping, stride preservation, monotonic timestamps and explicit rejection results.
+- Added offline tests for metric normalization, file-runner failures and Relay-frame handling.
+- Documented the spike result and current limitations in `FEEDBACK.md`.
+
+**What was skipped or changed from spec:**
+- No real video was committed. A human-provided 1620 x 1080, 56.45 second clip was smoke-tested with an authorized key. The corrected runner produced heart rate 71.44/min and breathing 11.88/min with no SDK errors; pulse confidence was 13.16, breathing confidence was 0, both stability flags were false, and validation briefly reported that the face was not forward.
+- The file runner now defaults to 33 ms interframe pacing, exposes `--interframe-delay-ms` and `--metrics pulse-breathing|all`, ignores SmartSpectra's initial idle status, waits for actual playback completion, coalesces repeated validation events, anchors relative file timestamps to the run start, and preserves per-metric confidence/stability without rejecting provisional zero-confidence readings. Native timestamp warnings remain an open quality issue for this Photo Booth file.
+- The Relay frame adapter is intentionally not wired into the live call handler because the call/vitals handler does not exist yet and the real `VideoStream` payload shape is unverified.
+- `.env.example` already contained the required empty `PRESAGE_API_KEY` entry, so it required no change.
+
+**Files touched:**
+- `apps/server/package.json`, `apps/server/package-lock.json`: SmartSpectra dependency and reproducible lockfile.
+- `apps/server/src/vitals/`: normalized result types, file runner, and Relay frame adapter.
+- `apps/server/src/cli/vitals-video.ts`: file-based spike CLI.
+- `apps/server/test/vitals-*.test.ts`, `apps/server/test/relay-frame-adapter.test.ts`: offline coverage.
+- `FEEDBACK.md`: spike result and limitations.
+
+**Commits:**
+- Pending: `build: lane3: add Presage video spike`.
+
+**Recommended next step:**
+Re-record a well-lit face-and-chest clip longer than 30 seconds, set `PRESAGE_API_KEY` in `.env`, then run `npm run vitals:video -- /absolute/path/to/face.mp4 --metrics all`. The corrected runner now reaches normal Presage processing; next connect the verified Relay `VideoStream` frame shape to `createRelayVideoFrameAdapter`.
+
+**Open questions:** Confirm the live Relay `VideoStream` pixel format and whether it supplies a usable source timestamp; if it supplies I420, add and test a conversion path before sending frames to SmartSpectra.
+## 2026-10-03, Relay video-call screening lane
+
+- Read `CLAUDE_CODE_BRIEF.md`, `docs/DESIGN.md`, `docs/TEAM_PLAN.md`, and this run log before changing code.
+- Inspected current Relay Calls, VideoStream, WebSocket, and ElevenLabs bridge declarations. The installed bridge uses `ElevenLabsCall.connect`, joins a call while it is ringing, and exposes the underlying `RelayCallTransport`; Relay `VideoStream` can provide RGBA frames and capture timestamps.
+- Added `@relaymessenger/elevenlabs@0.1.1`, pinned `@relaymessenger/sdk@0.5.1`, and added `node-webcodecs@1.3.0`.
+- Added durable call routing for `call.created`, `call.updated`, and `call.ended`; call events remain deduplicated by `event_id` and are acknowledged after SQLite insertion.
+- Added the `apps/server/src/calls/` lifecycle, interview, deterministic emergency precedence, quiet measurement, Gemini screening contract, ElevenLabs bridge, Relay VideoStream to Presage adapter, backend tool routes, cleanup, and diagnostics.
+- Added schema migration 9 for call metadata and bounded transcript turns. No raw audio or video columns are present.
+- Added `docs/CALLS.md` with setup, agent prompt, tool routes, phone test steps, SDK versions, and Presage limitations.
+- Verification: `pnpm lint` passed. The complete `pnpm test` suite passed with 40 files and 1,364 tests after allowing the existing app and agent tests to bind ephemeral loopback ports.
