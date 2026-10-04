@@ -37,6 +37,8 @@ Do "Try it on your phone" in the [README](../README.md#try-it-on-your-phone-abou
 | `FINCHNODE_BASE_URL`, `FINCHNODE_API_KEY` | The FinchNode demo API needs no key | Leave as is |
 | `CLOCK_DATE`, `FOLLOW_UP_DELAY_MINUTES`, `MEDS_NUDGE_MINUTES`, `CHECKIN_TIME`, `MISSED_CHECKIN_TIME`, `MEDS_MORNING_TIME`, `MEDS_EVENING_TIME`, `REFILL_REMIND_DAYS`, `PATIENT_TIMEZONE`, `DATABASE_PATH`, `PORT` | Demo knobs (see "Run the agent"). Easiest to set inline on the command line | Optional |
 
+`npm run voice:check` tries the ElevenLabs key, voice, a short spoken sample and listening for real (about 6 characters of speech): run it before a call test.
+
 Never paste keys in chat, screenshots or `FEEDBACK.md`. The README has copy-paste commands that put the Relay token and the Gemini key into `.env` without showing them.
 
 ### Run the agent

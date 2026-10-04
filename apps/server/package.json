@@ -17,6 +17,7 @@
     "care:send": "node --env-file-if-exists=../../.env src/cli/care-send.ts",
     "relay:check": "node --env-file-if-exists=../../.env src/cli/relay-check.ts",
     "llm:check": "node --env-file-if-exists=../../.env src/cli/llm-check.ts",
+    "voice:check": "node --env-file-if-exists=../../.env src/cli/voice-check.ts",
     "content:eval": "node --env-file-if-exists=../../.env src/cli/content-eval.ts",
     "vitals:video": "node --env-file-if-exists=../../.env src/cli/vitals-video.ts",
     "report": "node --env-file-if-exists=../../.env src/cli/report.ts",
