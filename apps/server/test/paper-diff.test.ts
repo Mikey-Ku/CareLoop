@@ -216,6 +216,21 @@ describe("diffPaper", () => {
     expect(sameIngredient("cholecalciferol (vitamin D3)", "cholecalciferol 0.025 MG Oral Tablet")).toBe(true);
     expect(ingredientTokens("24 HR metoprolol succinate 50 MG Extended Release Oral Tablet")).toEqual(["metoprolol", "succinate"]);
   });
+
+  it("same medicine means the same ingredients; a salt may be abbreviated or left out, but not swapped", () => {
+    const metformin = "metformin hydrochloride 500 MG Oral Tablet";
+    expect(sameIngredient("Metformin HCl", metformin)).toBe(true);
+    expect(sameIngredient("Metformin HCl ER", metformin)).toBe(true);
+    expect(sameIngredient("Metformin", metformin)).toBe(true);
+    expect(sameIngredient("Dextromethorphan HBr", "dextromethorphan hydrobromide")).toBe(true);
+    // A combination product is not one of its ingredients, either way round.
+    expect(sameIngredient("Lisinopril and Hydrochlorothiazide", "lisinopril 10 MG Oral Tablet")).toBe(false);
+    expect(sameIngredient("lisinopril", "hydrochlorothiazide 12.5 MG / lisinopril 10 MG Oral Tablet")).toBe(false);
+    expect(sameIngredient("Lisinopril and Hydrochlorothiazide", "hydrochlorothiazide 12.5 MG / lisinopril 10 MG Oral Tablet")).toBe(true);
+    // Two salts of one base that are different products.
+    expect(sameIngredient("Metoprolol Tartrate", "24 HR metoprolol succinate 50 MG Extended Release Oral Tablet")).toBe(false);
+    expect(sameIngredient("Metoprolol", "24 HR metoprolol succinate 50 MG Extended Release Oral Tablet")).toBe(true);
+  });
 });
 
 // ---------- Dose normalization ----------

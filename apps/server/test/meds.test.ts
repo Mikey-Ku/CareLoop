@@ -37,7 +37,7 @@ import { observationsBetween } from "../src/db/observations.ts";
 import { loadRxNavCache, loadSnapshot } from "../src/finchnode/fixtures.ts";
 import { asOf } from "../src/finchnode/normalize.ts";
 import { FakeLlmClient, ImageRejectedError, LlmUnavailableError, type ImageReading, type MedicineLabelReading } from "../src/llm/index.ts";
-import { memoryAnswer } from "../src/meds/flow.ts";
+import { checkLabel, memoryAnswer } from "../src/meds/flow.ts";
 import { refillsDue } from "../src/meds/refills.ts";
 import { SIG_RULES, asNeededMeds, medsForSlot, readSig } from "../src/meds/schedule.ts";
 import { FakeMessenger } from "../src/relay/fake-messenger.ts";
@@ -272,6 +272,23 @@ describe("label photos", () => {
     expect(await photo()).toBe("papers");
     expect(lastMine().text).toContain("Stop: aspirin 81 mg.");
     expect(lastMine().buttons).toEqual(PAPER_CONFIRM_BUTTONS);
+  });
+
+  it("the label fixtures as read: apixaban 5 mg and metformin HCl match, apixaban 2.5 mg differs, ibuprofen isn't on her list", () => {
+    const active = harrietSchedule.map((s) => s.med);
+    const read = (medicineName: string, strength: string, instructions?: string) =>
+      checkLabel({ medicineName, strength, confidence: "high", ...(instructions ? { instructions } : {}) }, active);
+    expect(read("Apixaban", "5 mg", "Take 1 tablet by mouth twice daily").reply).toBe(
+      "This is your apixaban 5 mg. Your label says: take 1 tablet by mouth twice daily. It matches your medication list.",
+    );
+    expect(read("Apixaban", "2.5 mg", "Take 1 tablet by mouth twice daily").outcome).toBe("strength_differs");
+    expect(read("Metformin HCl", "500 mg", "Take 1 tablet by mouth once daily with the evening meal").reply).toBe(
+      "This is your metformin hydrochloride 500 mg. Your label says: take 1 tablet by mouth once daily with the evening meal. It matches your medication list.",
+    );
+    expect(read("Trazodone HCl", "50 mg").outcome).toBe("match");
+    expect(read("Ibuprofen", "200 mg").outcome).toBe("not_on_list");
+    // A combination product is not her single-ingredient medicine.
+    expect(read("Lisinopril and Hydrochlorothiazide", "10 mg/12.5 mg", "Take 1 tablet by mouth once daily").outcome).toBe("not_on_list");
   });
 
   it("a label's own words that read like instructions to the AI are never echoed", async () => {
