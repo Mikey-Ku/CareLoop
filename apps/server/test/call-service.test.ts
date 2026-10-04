@@ -754,3 +754,18 @@ describe("what a call says at its end and in an emergency is fixed copy", () => 
     }
   });
 });
+
+describe("a call this agent placed itself (the camera check call-back)", () => {
+  it("is left to its recorder: not declined like a stranger's call, and no media session is opened", async () => {
+    const service = setup();
+    const outbound = { ...relayCall("harriet", "call-out"), from: { id: "agent-1", handle: "agent", kind: "agent" }, to: [{ id: "person-harriet", handle: "harriet", kind: "user" }] } as unknown as Call;
+    await service.handle(created(outbound));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(logs.some((entry) => entry.event === "call_outbound_ignored" && entry.call_id === "call-out")).toBe(true);
+    expect(relay.chats.messages.send).not.toHaveBeenCalled();
+    expect(transport.connect).not.toHaveBeenCalled();
+
+    await service.handle(created(relayCall("stranger", "call-stranger"))); // someone else's call is still declined
+    await vi.waitFor(() => expect(relay.chats.messages.send).toHaveBeenCalledOnce());
+  });
+});
