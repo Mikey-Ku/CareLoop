@@ -199,6 +199,34 @@ describe("idioms and everyday words don't hit", () => {
   });
 });
 
+describe("not only affirms an existing safety phrase", () => {
+  it.each([
+    "I have not only chest pain but dizziness",
+    "Not only chest pain, but nausea too",
+    "I have NOT ONLY chest pain but dizziness",
+    "She has not only chest pain but dizziness",
+    "I had not only chest pain but dizziness",
+    "I do not only have chest pain but dizziness",
+  ])("preserves the urgent hit: %s", (text) => {
+    expect(screenMessage(text)).toEqual({ kind: "urgent_symptom", matched: "chest pain" });
+  });
+
+  it.each([
+    "I have not had chest pain",
+    "No not only chest pain",
+    "Not the only chest pain",
+    "She has not had chest pain",
+    "I had not had chest pain",
+    "I do not have chest pain",
+  ])("preserves other negations: %s", (text) => {
+    expect(screenMessage(text)).toBeUndefined();
+  });
+
+  it.each(["I have only chest pain but no dizziness", "I have not, only chest pain"])("preserves affirmative or separate clauses: %s", (text) => {
+    expect(screenMessage(text)?.kind).toBe("urgent_symptom");
+  });
+});
+
 describe("priority and empty input", () => {
   it.each([
     ["I can't breathe and I want to die", "want to die"],
