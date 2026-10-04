@@ -6,7 +6,7 @@ Working title: **Check-in Companion**. Tagline: an AI caregiving companion that 
 Older adults who live alone with several conditions fall between visits. Their doctor sees a snapshot, their family worries without knowing, and a daily "how are you?" is easy to skip or forget. We wanted a check-in people will actually answer, and a summary a clinician can use in two minutes.
 
 ## What it does
-Harriet, 78 (atrial fibrillation, heart failure, kidney disease, 14 medicines), is read from FinchNode's synthetic record.
+Harriet, 78 (atrial fibrillation, heart failure, kidney disease, 14 medicines), is read live from FinchNode's API, and everything below builds on that record.
 - **Video check-in call** in Relay: it says it is an AI, asks the questions she has not answered, and offers a quiet camera reading of pulse and breathing, said back as an estimate.
 - **Text check-in:** at most three questions chosen from her record, by tap or in her own words, with a severity ladder and fixed, careful reactions.
 - **Medication helper:** reminders from her record, a label photo checked against her list, refill reminders.
@@ -16,7 +16,7 @@ Harriet, 78 (atrial fibrillation, heart failure, kidney disease, 14 medicines), 
 ## How we built it
 | Tool | Part |
 | --- | --- |
-| FinchNode | Her synthetic health record, read by our fixed rules (R1 to R6) for interactions, lab trends and hospital-paper differences |
+| FinchNode | Her synthetic health record, read live and read-only: it picks the questions, feeds our fixed rules (R1 to R6) for interactions, lab trends and hospital-paper differences, gives the call and chat their context, and is cited in the doctor report |
 | Relay Messenger | Chat, video call and photos, over WebSocket; the call's audio and video reach our server |
 | ElevenLabs | Realtime speech-to-text (Scribe v2) and the spoken voice (Flash v2.5) on the call |
 | Presage | Pulse and breathing estimates from the call's video, only inside a window she agrees to |

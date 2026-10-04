@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig } from "../config.ts";
+import { DEFAULT_FINCHNODE_BASE_URL, loadConfig } from "../config.ts";
 import { FIXTURES_DIR, REPO_ROOT, loadSnapshot, loadRxNavCache } from "../finchnode/fixtures.ts";
 
 export type Readiness = "ready" | "degraded" | "missing";
@@ -55,8 +55,10 @@ export function checkDemoSetup(env: Record<string, string | undefined>, options:
   else optional("Camera estimation disabled: set PRESAGE_API_KEY to demonstrate camera readings; voice remains available");
   if (config.patient.familyHandles.length) ok("Family delivery handles are configured (not printed)");
   else optional("FAMILY_RELAY_HANDLES is empty; family updates will not be delivered");
-  if (config.finchnode.apiKey?.trim()) ok("FINCHNODE_API_KEY is configured (not authenticated)");
-  else optional("FINCHNODE_API_KEY is absent; use recorded synthetic data or verify the configured demo endpoint allows anonymous reads");
+  const finchnodeHost = new URL(config.finchnode.baseUrl).host;
+  if (config.finchnode.apiKey?.trim()) ok(`FinchNode ${finchnodeHost}: FINCHNODE_API_KEY is configured (not authenticated)`);
+  else if (config.finchnode.baseUrl === DEFAULT_FINCHNODE_BASE_URL) ok(`FinchNode ${finchnodeHost}: the demo API is open and needs no key (the agent reads it live; \`npm run packet -- patient-demo-polypharmacy --live\` shows the record)`);
+  else optional(`FinchNode ${finchnodeHost}: FINCHNODE_API_KEY is absent; set it if this endpoint is authenticated`);
 
   const fixtures = options.fixturesDir ?? FIXTURES_DIR;
   for (const relative of ["finchnode/records/patient-demo-polypharmacy.json", "rxnav-cache.json", "labels/apixaban-5mg.png", "labels/apixaban-2-5mg.png", "labels/metformin-500mg.png", "labels/ibuprofen-200mg.png"]) {

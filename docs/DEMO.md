@@ -10,7 +10,7 @@ The full patient call may take about three minutes itself. To fit five features 
 
 | Time | Action | Presenter words |
 | --- | --- | --- |
-| 0:00-0:20 | Show Harriet's record-backed greeting in Relay. | "Harriet has several conditions and medicines across her records. FinchNode provides this synthetic record; our companion brings it into a short daily check-in." |
+| 0:00-0:20 | Show Harriet's record-backed greeting in Relay (optionally `npm run packet -- patient-demo-polypharmacy --live` beside it: the same record straight from FinchNode's API). | "Harriet has several conditions and medicines across her records. FinchNode provides this synthetic record; our companion brings it into a short daily check-in." |
 | 0:20-0:45 | Show a natural text answer or the rehearsed button path. Show only remaining questions and completion. | "She can type or tap. Fixed rules handle severity and escalation; the model helps understand her words. Not today remains available." |
 | 0:45-1:25 | Show the live video excerpt: AI disclosure, voice check-in, consented reading, and closing. | "Relay carries the call. ElevenLabs listens and speaks; Gemini supports the conversation. Presage supplies a camera wellness estimate when capture quality permits. With Harriet's atrial fibrillation we do not compare it with a usual range." |
 | 1:25-2:00 | Show morning medicines, then the synthetic apixaban 2.5 mg label against the 5 mg record. | "Instructions are read back from the record. A mismatching label leads to a pharmacist check, never a recommendation to change a dose. Refill help prepares a request; it does not order medicine." |

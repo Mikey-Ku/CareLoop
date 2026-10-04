@@ -4,11 +4,23 @@ An AI caregiving companion for older adults who live alone: an easy daily check-
 
 ## What it does
 
-1. **Video check-in call.** Harriet calls the agent in Relay. It says it is an AI, asks how she is and the questions she has not answered, then offers a quiet 30-second camera reading of pulse and breathing (Presage), said back as an estimate. ElevenLabs hears and speaks; Gemini words the questions; fixed rules decide anything medical.
-2. **Text check-in.** Each morning, at most three questions picked from her record, answered by tap or in her own words. A severity ladder sets the reaction, in fixed words: her doctor, her family, 911 or 988. Never dosing advice or a diagnosis.
-3. **Medication helper.** Reminders read from her record; a photo of a label is checked against her list (a mismatch sends her to her pharmacist, never "take this instead"); refill reminders.
-4. **Doctor report.** One week as a two-page clinical summary: symptoms in her words, flags with their evidence, medicines, labs.
+1. **Video check-in call.** Harriet calls the agent in Relay. It says it is an AI, asks how she is and the questions she has not answered, then offers a quiet 30-second camera reading of pulse and breathing (Presage), said back as an estimate. ElevenLabs hears and speaks; Gemini words the questions, with her FinchNode record as context; fixed rules decide anything medical.
+2. **Text check-in.** Each morning, at most three questions picked from her FinchNode record, answered by tap or in her own words. A severity ladder sets the reaction, in fixed words: her doctor, her family, 911 or 988. Never dosing advice or a diagnosis.
+3. **Medication helper.** Reminders read from her FinchNode record; a photo of a label is checked against her list (a mismatch sends her to her pharmacist, never "take this instead"); refill reminders.
+4. **Doctor report.** One week as a two-page clinical summary: symptoms in her words, flags with their FinchNode evidence, medicines, labs.
 5. **Family updates.** Each family member follows along in their own Relay chat, within her sharing settings. Urgent alerts go out at once, and their replies reach her.
+
+## How FinchNode is used
+
+FinchNode is the health record everything else reads, live and read-only (its open demo API, synthetic patients, no key). Harriet's record has 10 conditions, 14 medicines with RxNorm codes, labs and vitals.
+
+- **Questions:** today's questions are chosen from her conditions and drug classes (heart failure: breathing and ankles; a blood thinner: bleeding).
+- **Rules R1 to R6:** fixed rules read the labs and medicines for flags with their evidence: a falling kidney test on metformin, apixaban with aspirin and sertraline, potassium with lisinopril, a hospital paper that differs from the record.
+- **Context:** the chat and the call get her record as reference facts, so the model has nothing to invent.
+- **Report and updates:** the doctor report and the family updates cite it (record ID, data as of, sources).
+- **Consent:** if FinchNode says her consent ended, the agent tells her in plain words and reads nothing more.
+
+See it live: `npm run packet -- patient-demo-polypharmacy --live`.
 
 **Safety by design.** Rules decide every medical flag; the model only words things. Emergencies and self-harm get fixed replies (911, 988) from a phrase screen that runs before any model. Whatever the model writes for the voice is checked first, and it never gives dosing advice, a diagnosis or reassurance. A person is always pointed to.
 
@@ -24,7 +36,7 @@ cp ../../.env.example ../../.env    # the .env lives at the repo root
 
 | Tool | What it does here | You need | Check |
 | --- | --- | --- | --- |
-| FinchNode | Harriet's synthetic health record, read-only | nothing: the demo API is open | `npm run packet -- patient-demo-polypharmacy --live` |
+| FinchNode | Harriet's synthetic health record, read live and read-only | nothing: the demo API is open (`FINCHNODE_API_KEY` only for an authenticated endpoint) | `npm run packet -- patient-demo-polypharmacy --live` |
 | Relay Messenger | Chat, video call and photos with the agent | `RELAY_AGENT_TOKEN`, `PATIENT_RELAY_HANDLE`, and `FAMILY_RELAY_HANDLES` for family | `npm run relay:check` |
 | Gemini | Understands typed and spoken words, words the questions | `GEMINI_API_KEY` (without it, buttons only) | `npm run llm:check` |
 | ElevenLabs | Hears and speaks on the call | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | `npm run demo:check`, then a call |

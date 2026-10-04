@@ -167,7 +167,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   );
 
   // 1. Who she is: her record's given name names the patient row, as in the simulator.
-  const { patientId, preferredName } = await identifyPatient(db, subject, deps.loadSnapshot, log);
+  const { patientId, preferredName } = await identifyPatient(db, subject, deps.loadSnapshot, log, new URL(config.finchnode.baseUrl).host);
 
   // 2. Patient row. Keep what the inbox stored (her chat id) and her sharing level.
   const existing = db
@@ -420,11 +420,12 @@ async function identifyPatient(
   subject: string,
   loadSnapshot: (subject: string) => Promise<HealthRecord>,
   log: (line: string) => void,
+  source = "FinchNode",
 ): Promise<{ patientId: string; preferredName: string }> {
   try {
     const record = normalizeHealthRecord(await loadSnapshot(subject), { rxnav: loadRxNavCache() });
     const givenName = record.demographics?.givenName ?? record.demographics?.name?.split(" ")[0];
-    log(`[agent] FinchNode record for ${subject} read (data as-of ${record.dataAsOf ?? "unknown"})`);
+    log(`[agent] FinchNode (${source}): read ${subject}: ${record.conditions.length} conditions, ${record.medications.length} medicines, ${record.labs.length} labs (data as-of ${record.dataAsOf ?? "unknown"})`);
     return { patientId: patientIdFor(givenName, subject), preferredName: givenName ?? subject };
   } catch (error) {
     // Consent ended: still start, so the engine's consent-ended path tells her. FinchNode down: reuse her row.
