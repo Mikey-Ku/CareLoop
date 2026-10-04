@@ -40,6 +40,16 @@ export type DayResult =
   | { kind: "already_started" }
   | { kind: "record_consent_ended" };
 
+/** A medicines reminder: sent, already sent for that day and slot, nothing taken then, or no record to read (consent ended). */
+export type MedsReminderResult = "sent" | "already_sent" | "nothing_to_send" | "no_record";
+
+/**
+ * What became of a photo she sent: not read (no LLM), a medicine label checked against her list, hospital
+ * papers read back for her confirm, unreadable, something else, rejected (too large or not a photo type),
+ * or failed (the model or her record couldn't be read; she was told).
+ */
+export type PhotoOutcome = "not_read" | "label" | "papers" | "unreadable" | "other" | "rejected" | "failed";
+
 export interface CheckinEngine {
   /**
    * Morning job for one patient on one check-in date (YYYY-MM-DD): snapshot, rules,
@@ -82,4 +92,25 @@ export interface CheckinEngine {
    * one is. Returns how many messages went out (0 while still nobody is linked).
    */
   passOnFamilyMessages(patientId: string): Promise<number>;
+
+  // Medication helper (src/meds/flow.ts). Taps on its buttons arrive through handleInbound.
+
+  /**
+   * MEDS_MORNING_TIME / MEDS_EVENING_TIME job: her medicines for that time (the evening one also lists
+   * bedtime), her prescription's instructions verbatim, with "Taken" / "Not yet" / "I have a question".
+   * Once per patient, day and slot. The morning one also plans the day's memory check.
+   */
+  sendMedsReminder(patientId: string, day: string, slot: "morning" | "evening"): Promise<MedsReminderResult>;
+  /** Every minute: the one re-reminder after "Not yet", when due by `now` (ISO) and still not taken. Returns how many went out. */
+  runMedsNudges(now: string): Promise<number>;
+  /** Morning job: refill reminders for fills running out within REFILL_REMIND_DAYS (at most 2 a day). Returns how many went out. */
+  runRefillCheck(patientId: string, day: string): Promise<number>;
+  /** MISSED_CHECKIN_TIME job, after runMissedCheckin: a morning reminder with no "Taken" becomes missed (family status at "all" only). */
+  runMedsMissed(patientId: string, day: string): Promise<"marked_missed" | "nothing_to_do">;
+  /**
+   * A photo from her chat (the inbox downloaded it; never logged). With an LLM it is read: a medicine
+   * label is checked against her active medicines, discharge papers start the paper check, anything else
+   * gets a kind fixed reply. Without one: photoNotYet. Her chat shows "Reading your photo" meanwhile.
+   */
+  handlePhoto(patientId: string, image: Uint8Array, mimeType: string, attachmentId: string): Promise<PhotoOutcome>;
 }

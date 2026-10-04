@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentStartError,
   CHECKIN_JOB,
+  MEDS_EVENING_JOB,
+  MEDS_MORNING_JOB,
   MISSED_JOB,
+  REFILL_JOB,
   MISSING_HANDLE_MESSAGE,
   MISSING_TOKEN_MESSAGE,
   llmStatus,
@@ -135,7 +138,7 @@ describe("startAgent", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true });
 
-    expect(agent.scheduler.upcoming().map((u) => u.name)).toEqual([CHECKIN_JOB, MISSED_JOB]);
+    expect(agent.scheduler.upcoming().map((u) => u.name)).toEqual([CHECKIN_JOB, MISSED_JOB, MEDS_MORNING_JOB, MEDS_EVENING_JOB, REFILL_JOB]);
     expect(lines).toContain("[agent] Waiting for @harriet to send the agent a message in Relay");
     expect(lines.join("\n")).not.toContain(TOKEN);
   });

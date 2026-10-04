@@ -228,6 +228,8 @@ const TOPIC_FOR_FAMILY: Record<string, string> = {
   "dizzy-on-standing": "some dizziness",
   "morning-medicines": "missing some of her morning medicines",
   mood: "not feeling great",
+  // A photographed medicine label that didn't match her list (src/meds/flow.ts).
+  "medicine check": "a medicine label that didn't match her list",
 };
 
 /** Longest topic, in characters and in words, quoted from her (via the model) in a fixed sentence. */
@@ -561,6 +563,8 @@ export function familyDailyStatus(input: {
   notes?: { questionText: string; text: string }[];
   /** The day's highest severity level and its topic (src/checkin/severity.ts). Said in words at "all" only, from level 1. */
   highest?: { level: number; topic: string };
+  /** Her morning medicines reminder had no "Taken" by MISSED_CHECKIN_TIME. Said at "all" only; never an alert. */
+  medsNotConfirmed?: boolean;
 }): string {
   const name = input.seniorName;
   const base =
@@ -592,6 +596,7 @@ export function familyDailyStatus(input: {
     base,
     vitals,
     highest,
+    input.medsNotConfirmed ? MEDS_NOT_CONFIRMED_LINE : "",
     answers && `${name}'s answers:\n${answers}`,
     notes && `${name} also wrote (kept for the doctor):\n${notes}`,
     flags && `Things for ${name} to ask the doctor about:\n${flags}`,
@@ -679,4 +684,202 @@ export function familyWelcome(seniorName: string): string {
 
 export function familyMissedAlert(seniorName: string, time: string): string {
   return `${seniorName} hasn't answered today's check-in yet (as of ${time}). You may want to give ${seniorName} a call.`;
+}
+
+// Medication helper (src/meds, docs/BRIEF.md "Medication helper"). Dosing: her prescription's or
+// label's instructions are read back word for word (src/meds/schedule.ts labelInstructions), never
+// reworded, and nothing here tells her to change, skip, double or stop a dose. A label that doesn't
+// match her list sends her to her pharmacist. Refills: guide, don't act.
+
+/** The reminder's buttons. "Not yet" is also an answer of the check-in's morning-medicines question. */
+export const MEDS_BUTTONS = { taken: "Taken", notYet: "Not yet", question: "I have a question" } as const;
+
+/** The activity label her chat shows while a photo is read (Relay: 1 to 21 characters). */
+export const READING_PHOTO_ACTIVITY = "Reading your photo";
+
+export type MedsSlotName = "morning" | "evening";
+
+/** One medicine in a reminder: its name and strength ("Apixaban 5 mg") and her prescription's words. */
+export type MedsLine = { name: string; instructions?: string | undefined };
+
+/** "Apixaban 5 mg: take 1 tablet by mouth twice daily" (the instructions verbatim), or just the name. */
+export function medsLine(line: MedsLine): string {
+  return line.instructions ? `${line.name}: ${line.instructions}` : line.name;
+}
+
+/**
+ * The morning or evening reminder: her medicines for that time, one line each, with her prescription's
+ * instructions word for word. The evening one also lists her bedtime medicines.
+ */
+export function medsReminder(name: string, slot: MedsSlotName, lines: MedsLine[], bedtime: MedsLine[] = []): string {
+  const greeting = slot === "morning" ? `Good morning, ${name}.` : `Good evening, ${name}.`;
+  if (lines.length === 0 && bedtime.length > 0) return [`${greeting} Your medicines at bedtime:`, ...bedtime.map(medsLine)].join("\n");
+  const out = [`${greeting} Your ${slot} medicines:`, ...lines.map(medsLine)];
+  if (bedtime.length > 0) out.push("", "At bedtime:", ...bedtime.map(medsLine));
+  return out.join("\n");
+}
+
+/** "Taken". */
+export function medsTakenReply(name: string, slot: MedsSlotName): string {
+  return `Thank you, ${name}. I've noted that you took your ${slot} medicines.`;
+}
+
+/** "Not yet": no guilt. `remindAgain` when the one re-reminder is planned. */
+export function medsNotYetReply(name: string, remindAgain: boolean): string {
+  return remindAgain ? `That's fine, ${name}. I'll remind you once more in a little while.` : `That's fine, ${name}.`;
+}
+
+/** The one gentle re-reminder after "Not yet". */
+export function medsNudge(name: string, slot: MedsSlotName): string {
+  return `Just a gentle reminder about your ${slot} medicines, ${name}, whenever you're ready.`;
+}
+
+/** "I have a question": her next message is read as usual (a medicine question goes on her list for her doctor). */
+export function medsQuestionPrompt(name: string): string {
+  return `Go ahead, ${name}. What would you like to know?`;
+}
+
+/** The memory check's "I'm not sure" button. */
+export const MEMORY_NOT_SURE = "Not sure";
+
+const SLOT_WORDS: Record<"morning" | "midday" | "evening" | "bedtime", string> = {
+  morning: "in the morning",
+  midday: "at midday",
+  evening: "in the evening",
+  bedtime: "at bedtime",
+};
+
+/** "Quick memory check: how many apixaban tablets do you take in the morning?" */
+export function memoryCheckQuestion(ingredient: string, unit: "tablet" | "capsule", slot: "morning" | "midday" | "evening" | "bedtime"): string {
+  return `Quick memory check: how many ${ingredient} ${unit}s do you take ${SLOT_WORDS[slot]}?`;
+}
+
+/** The memory check's buttons: the right count and one other, in order, then "Not sure". */
+export function memoryCheckButtons(count: number): string[] {
+  const other = count === 1 ? 2 : count - 1;
+  return [...[count, other].sort((a, b) => a - b).map(String), MEMORY_NOT_SURE];
+}
+
+/** The right count. */
+export function memoryCheckRight(name: string): string {
+  return `That's right, ${name}.`;
+}
+
+/** A wrong count or "Not sure": only her label's words read back, nothing else. */
+export function labelSaysLine(instructions: string): string {
+  return `Your label says: ${instructions}.`;
+}
+
+/**
+ * A photographed label that matches her list by medicine and strength. `instructions`: the label's words
+ * as read (`from` "label"), else her prescription's from the record (`from` "list").
+ */
+export function labelMatchReply(medicine: string, instructions: string | undefined, from: "label" | "list" = "label"): string {
+  const says = instructions ? ` ${from === "label" ? "Your label says" : "Your prescription says"}: ${instructions}.` : "";
+  return `This is your ${medicine}.${says} It matches your medication list.`;
+}
+
+/** Same medicine, another strength. Never says what to take: her pharmacist decides. */
+export function labelStrengthDiffers(ingredient: string, labelStrength: string, listStrength: string): string {
+  return `This label says ${ingredient} ${labelStrength}, but your medication list has ${listStrength}. These don't match. Please check with your pharmacist before taking it.`;
+}
+
+/** A medicine that isn't on her list. */
+export function labelNotOnList(): string {
+  return "I don't see this medicine on your list. Please check with your pharmacist or doctor before taking it.";
+}
+
+/** The label couldn't be read (blurry, dark, cut off, or the model wasn't sure). */
+export function labelUnreadable(): string {
+  return "I couldn't read the label clearly. Could you take another photo in good light, with the label facing the camera?";
+}
+
+/** The link to her record ended, so a label can't be compared with her list. */
+export function labelNoRecord(): string {
+  return "I can't compare this label with your medication list, because the link to your health record has ended. Please check with your pharmacist.";
+}
+
+/** A photo that is neither a medicine label nor hospital papers. */
+export function photoOther(name: string): string {
+  return `Thanks for the photo, ${name}. I can only read medicine labels and hospital papers.`;
+}
+
+/** The photo couldn't be read on our side (the LLM is down). Our trouble, not hers. */
+export function photoReadFailed(name: string): string {
+  return `Thanks for the photo, ${name}. I'm having trouble reading photos right now. Please try again a little later.`;
+}
+
+/** The photo is too large or not a type that can be read (ImageRejectedError, or the inbox's size guard). */
+export function photoRejected(): string {
+  return "That photo is too large or in a format I can't open. Could you send a regular photo from your camera?";
+}
+
+/** The photo couldn't be downloaded from Relay. */
+export function photoCouldNotOpen(name: string): string {
+  return `Sorry, ${name}, I couldn't open that photo. Could you send it again?`;
+}
+
+// Refill reminders
+
+/** The refill reminder's fixed buttons; a third, "Tell <name>", comes from refillTellButton. */
+export const REFILL_BUTTONS = { asked: "I've asked for it", tomorrow: "Remind me tomorrow" } as const;
+
+/** "Tell Sarah" with one family chat linked (first name), "Tell my family" with several, none without any. */
+export function refillTellButton(familyNames: string[]): string | undefined {
+  const names = familyNames.map((n) => n.trim()).filter(Boolean);
+  if (names.length === 0) return undefined;
+  if (names.length > 1) return "Tell my family";
+  return `Tell ${names[0]!.split(/\s+/)[0]}`;
+}
+
+/**
+ * "Your apixaban 5 mg (30-day supply filled Jul 2) runs out around Aug 1. Time to ask for a refill." and
+ * a ready-to-read request. Dates as "Jul 2"; `born` as "March 2, 1948"; `prescriber` only when known.
+ */
+export function refillReminder(input: {
+  medicine: string;
+  daysSupply: number;
+  filled: string;
+  runOut: string;
+  fullName: string;
+  born?: string | undefined;
+  /** "apixaban 5 mg tablets". */
+  item: string;
+  prescriber?: string | undefined;
+}): string {
+  const who = `Hi, this is ${input.fullName}${input.born ? `, born ${input.born}` : ""}.`;
+  const what = `I'd like a refill of ${input.item}${input.prescriber ? `, prescribed by ${input.prescriber}` : ""}.`;
+  return [
+    `Your ${input.medicine} (${input.daysSupply}-day supply filled ${input.filled}) runs out around ${input.runOut}. Time to ask for a refill.`,
+    "",
+    `Here's what you can say to your pharmacy: "${who} ${what}"`,
+  ].join("\n");
+}
+
+/** "I've asked for it": no more reminders for this fill. */
+export function refillAskedReply(name: string): string {
+  return `Good, ${name}. I won't remind you about this refill again.`;
+}
+
+/** "Remind me tomorrow". */
+export function refillTomorrowReply(name: string): string {
+  return `Okay, ${name}. I'll remind you tomorrow.`;
+}
+
+/** "Tell Sarah": her family was told (`familyNames` as in redFlagAdvice). */
+export function refillToldFamilyReply(name: string, familyNames?: string[]): string {
+  return `I've let ${whoWasTold(familyNames) ?? "your family"} know, ${name}.`;
+}
+
+/** What each family member reads after "Tell Sarah". */
+export function familyRefillNotice(seniorName: string, medicine: string, runOut: string): string {
+  return `${seniorName}'s ${medicine} runs out around ${runOut}. She may need help getting a refill.`;
+}
+
+/** The family's daily status line for a morning reminder with no "Taken" by MISSED_CHECKIN_TIME (sharing "all" only). */
+export const MEDS_NOT_CONFIRMED_LINE = "Morning medicines not confirmed.";
+
+/** The same line on its own, when the day's status already went out before MISSED_CHECKIN_TIME. Sharing "all" only. */
+export function familyMedsNotConfirmed(seniorName: string): string {
+  return `Update on ${seniorName}'s day: ${MEDS_NOT_CONFIRMED_LINE}`;
 }

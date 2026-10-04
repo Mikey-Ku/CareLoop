@@ -54,19 +54,22 @@ import {
   scheduleFollowUp,
   type FollowUpRow,
 } from "../db/follow-ups.ts";
+import { dueNudges, getDose, markNudged, recordMedPrompt } from "../db/meds.ts";
 import { addMemories, recentMemories } from "../db/memories.ts";
 import { addCheckinNote, addVisitQuestion, checkinNotes } from "../db/notes.ts";
 import { addObservation, highestOfDay, observationsBetween, type ObservationSource } from "../db/observations.ts";
 import { inboundSeen, insertPaperScan, paperScanForAttachment } from "../db/paper-scans.ts";
 import { ConsentInactiveError } from "../finchnode/client.ts";
 import { loadRxNavCache } from "../finchnode/fixtures.ts";
-import { asOf, normalizeHealthRecord } from "../finchnode/normalize.ts";
+import { activeMedications, asOf, normalizeHealthRecord, type PatientRecord } from "../finchnode/normalize.ts";
 import type { RxNavCache } from "../finchnode/rxnav.ts";
+import type { HealthRecord } from "../finchnode/types.ts";
 import type { SharingLevel } from "../db/index.ts";
 import type {
   CheckinExtraction,
   Change,
   ClassifyInput,
+  ImageReading,
   ExtractCheckinInput,
   MessageClassification,
   MessageKind,
@@ -74,6 +77,10 @@ import type {
   SmallTalkReply,
   SymptomMention,
 } from "../llm/types.ts";
+import { ImageRejectedError } from "../llm/types.ts";
+import { DEFAULT_MEDS_NUDGE_MINUTES, MEDS_LABELS, createMedsFlow, paperFromReading, type MedPromptRef } from "../meds/flow.ts";
+import { DEFAULT_REFILL_REMIND_DAYS, refillsDue } from "../meds/refills.ts";
+import { medicationSchedule } from "../meds/schedule.ts";
 import type { InboundMessage, OutboundMessage } from "../relay/messenger.ts";
 import { runRules } from "../rules/index.ts";
 import type { ExtractedPaper } from "../rules/paper-diff.ts";
@@ -111,13 +118,20 @@ import {
   freeTextConfirm,
   keepAnEye,
   keepAnEyeReply,
+  labelNoRecord,
+  labelUnreadable,
   medicineQuestionReply,
   notedForDoctor,
   noteSaved,
   notTodayReply,
   openReplyThanks,
   openReplyUnavailable,
+  photoNotYet,
+  photoOther,
+  photoReadFailed,
+  photoRejected,
   READING_ACTIVITY,
+  READING_PHOTO_ACTIVITY,
   recordLinkEndedFamily,
   recordLinkEndedSenior,
   redFlagAdvice,
@@ -141,7 +155,7 @@ import {
   type FollowUpAnswer,
   type UnderstoodItem,
 } from "./copy.ts";
-import type { CheckinEngine, DayResult, EngineDeps, FreeTextAnswer } from "./engine-types.ts";
+import type { CheckinEngine, DayResult, EngineDeps, FreeTextAnswer, MedsReminderResult, PhotoOutcome } from "./engine-types.ts";
 import { PAPER_CONFIRM_BUTTONS, paperReadback } from "./paper-check.ts";
 import {
   createPaperFlow,
@@ -187,6 +201,13 @@ import {
 // the paper check (src/checkin/paper-flow.ts) answers its own buttons; a follow-up's
 // "Better" / "About the same" / "Worse" answers the follow-up. Each re-sends whatever
 // the check-in was waiting for, so she can carry on.
+//
+// Medication helper (src/meds/flow.ts, planned here in the same transactions): taps on a medicines
+// reminder ("Taken" / "Not yet" / "I have a question"), the memory check and a refill reminder are
+// found by the message they reply to (med_prompts); a typed label is the helper's unless the
+// check-in's waiting step shows the same label ("Not yet" on morning-medicines). "Taken" on the
+// morning reminder records the check-in's morning-medicines question as "Yes" (asked no more that
+// day). Photos come through handlePhoto: the LLM reads, fixed rules compare a label with her list.
 //
 // Stale taps: every message that carries a check-in step's buttons is remembered
 // with that step (checkin_prompts). A tap names the message it replies to
@@ -306,7 +327,14 @@ export type EngineOptions = {
   rxnav?: RxNavCache;
   /** Minutes from a red flag or safety hit to its follow-up check-in. Defaults to DEFAULT_FOLLOW_UP_DELAY_MINUTES. */
   followUpDelayMinutes?: number;
+  /** MEDS_NUDGE_MINUTES: from "Not yet" on a medicines reminder to its one re-reminder. Defaults to 60. */
+  medsNudgeMinutes?: number;
+  /** REFILL_REMIND_DAYS: a fill is reminded about when it runs out within this many days. Defaults to 5. */
+  refillRemindDays?: number;
 };
+
+/** The check-in question a "Taken" on the morning medicines reminder answers ("Yes"). */
+export const MORNING_MEDICINES_QUESTION = "morning-medicines";
 
 /** A follow-up check-in comes this many minutes after a red flag or a safety hit (a morning concern: early afternoon). */
 export const DEFAULT_FOLLOW_UP_DELAY_MINUTES = 180;
@@ -320,6 +348,8 @@ type Send = {
   prompt?: PromptRef;
   /** This send is a follow-up check-in: its message id is stored once it is out. */
   followUpId?: number;
+  /** This send carries the medication helper's buttons (src/meds/flow.ts): stored with its message id. */
+  medPrompt?: MedPromptRef;
 };
 
 /** What a check-in step shows: its text and buttons. */
@@ -528,6 +558,7 @@ const ALL_LABELS = new Set(
     ...PAPER_CONFIRM_BUTTONS,
     ...FOLLOW_UP_LABELS,
     ...Object.values(CLARIFY_BUTTONS),
+    ...MEDS_LABELS,
   ].map(norm),
 );
 const isButtonLabel = (text: string) => ALL_LABELS.has(norm(text));
@@ -601,6 +632,26 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
   let rxnav = options.rxnav;
   const rxnavCache = () => (rxnav ??= loadRxNavCache());
   const paperFlow = createPaperFlow({ db, clock, rxnav: rxnavCache });
+  const refillRemindDays = options.refillRemindDays ?? DEFAULT_REFILL_REMIND_DAYS;
+  // The medication helper (src/meds/flow.ts), with what it needs from the check-in. Function
+  // declarations below are hoisted, so the hooks can name them here.
+  const meds = createMedsFlow({
+    db,
+    clock,
+    options: { nudgeMinutes: options.medsNudgeMinutes ?? DEFAULT_MEDS_NUDGE_MINUTES },
+    hooks: {
+      toFamily: (patient, text, prefix) => toFamily(patient, text, prefix),
+      familyNames: (patientId) => familyChats(db, patientId).map(familyName),
+      morningTaken: (patient, day, chatId) => medsMorningTaken(patient, day, chatId),
+      reprompt: (patient, chatId, messageId) => reprompt(patient, chatId, messageId),
+      checkinBusy: (patientId) => pendingCheckin(patientId) !== undefined,
+      checkinTakes: (patient, text) => {
+        const c = pendingCheckin(patient.id);
+        const p = c && currentPrompt(patient, c);
+        return p !== undefined && p.buttons.some((b) => is(b, text));
+      },
+    },
+  });
 
   /**
    * Send in order. Every send is attempted even if an earlier one fails, so one family
@@ -614,6 +665,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         const sent = await messenger.send(s.chatId, s.message, s.key);
         if (s.prompt) recordCheckinPrompt(db, { messageId: sent.messageId, ...s.prompt, sentAt: clock.now() });
         if (s.followUpId !== undefined) markFollowUpSent(db, s.followUpId, sent.messageId, clock.now());
+        if (s.medPrompt) recordMedPrompt(db, { messageId: sent.messageId, ...s.medPrompt, sentAt: clock.now() });
       } catch (error) {
         failures.push(error);
       }
@@ -625,9 +677,9 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
   // Typed messages (see "Typed messages" above). The LLM and the activity label are best effort:
   // whatever goes wrong there, she still gets the buttons or a fixed reply.
 
-  async function showActivity(chatId: string): Promise<void> {
+  async function showActivity(chatId: string, label: string = READING_ACTIVITY): Promise<void> {
     try {
-      await messenger.setActivity?.(chatId, READING_ACTIVITY);
+      await messenger.setActivity?.(chatId, label);
     } catch {
       // A missing label never holds up her reply.
     }
@@ -725,6 +777,8 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     const notes = all ? checkinNotes(db, c.id).map((n) => ({ questionText: noteHeading(n), text: n.text })) : [];
     // The day's highest level, said in words at "all" ("we're keeping an eye on it").
     const top = all ? highestOfDay(db, patient.id, c.date) : undefined;
+    // Her morning medicines reminder had no "Taken" by MISSED_CHECKIN_TIME: one line at "all" (src/meds/flow.ts).
+    const medsNotConfirmed = all && getDose(db, patient.id, c.date, "morning")?.status === "missed";
     const text = familyDailyStatus({
       seniorName: patient.preferredName,
       sharing,
@@ -733,6 +787,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       flags,
       notes,
       ...(top && top.level > 0 ? { highest: { level: top.level, topic: top.topic } } : {}),
+      ...(medsNotConfirmed ? { medsNotConfirmed: true } : {}),
     });
     return toFamily(patient, text, `${patient.id}:${c.date}:status`);
   }
@@ -993,6 +1048,44 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     }
     const topics = leveled.filter((t) => t.level >= 1).map((t) => t.topic);
     return [{ chatId: msg.chatId, message: { text: symptomNotedReply(name, topics) }, key }];
+  }
+
+  // Medication helper hooks (src/meds/flow.ts).
+
+  /**
+   * "Taken" on the morning medicines reminder of `day`: the check-in's morning-medicines question that
+   * day is "Yes" and not asked. When it is the question waiting, it is answered like a tap (her next
+   * question follows: `advanced`); otherwise it is recorded quietly. A finished check-in is left alone.
+   */
+  function medsMorningTaken(patient: CheckinPatient, day: string, chatId: string): { sends: Send[]; advanced: boolean } {
+    const c = getCheckin(db, patient.id, day);
+    const answered = (row: CheckinRow) => row.answers.some((a) => a.questionId === MORNING_MEDICINES_QUESTION);
+    if (!c || c.finishedAt !== null || !c.questionIds.includes(MORNING_MEDICINES_QUESTION) || answered(c)) return { sends: [], advanced: false };
+    if (c.step === "question" && c.questionIds[c.questionIndex] === MORNING_MEDICINES_QUESTION && pendingCheckin(patient.id)?.id === c.id)
+      return { sends: answerQuestion(patient, c, questionById(MORNING_MEDICINES_QUESTION), "Yes", chatId), advanced: true };
+    recordMorningMedicines(patient, c);
+    return { sends: [], advanced: false };
+  }
+
+  /** The morning-medicines question recorded as "Yes" without asking it (her "Taken" on the reminder), levelled like a tap. */
+  function recordMorningMedicines(patient: CheckinPatient, c: CheckinRow): void {
+    const q = questionById(MORNING_MEDICINES_QUESTION);
+    const sev = levelFor({ source: "button", questionId: q.id, label: "Yes" }, historyFor(patient.id, c.date));
+    const stored: StoredAnswer = { questionId: q.id, questionText: q.text, answer: "Yes", at: clock.now(), level: sev.level };
+    updateCheckin(db, c.id, { answers: [...c.answers, stored], suggestions: withoutSuggestion(c, q.id) });
+    observe(patient, c.date, c, sev, { source: "button", questionId: q.id });
+  }
+
+  /** Her record as it stood on `day` (asOf), or undefined when record consent has ended. */
+  async function recordOn(patient: CheckinPatient, day: string): Promise<{ raw: HealthRecord; record: PatientRecord } | undefined> {
+    let raw: HealthRecord;
+    try {
+      raw = await deps.loadSnapshot(patient.finchnodePatientId);
+    } catch (error) {
+      if (error instanceof ConsentInactiveError) return undefined;
+      throw error;
+    }
+    return { raw, record: asOf(normalizeHealthRecord(raw, { rxnav: rxnavCache() }), day) };
   }
 
   /** The check-in still waiting for her, if any. */
@@ -1430,7 +1523,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (hit) return { sends: planSafety(patient, msg, hit.kind) };
 
     // 2. Buttons that live outside the check-in.
-    const outside = planSharing(patient, msg) ?? planPaper(patient, msg, fresh) ?? planFollowUpTap(patient, msg);
+    const outside = planSharing(patient, msg) ?? planPaper(patient, msg, fresh) ?? planFollowUpTap(patient, msg) ?? meds.planTap(patient, msg);
     if (outside) return { sends: outside };
 
     const typed = understood?.kind === "classify" ? understood : undefined;
@@ -1753,6 +1846,72 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     }
   }
 
+  async function startPaperCheck(patientId: string, paper: ExtractedPaper, attachmentId?: string): Promise<{ scanId: number }> {
+    const patient = requirePatient(patientId);
+    if (!patient.relayChatId) throw new Error(`Patient "${patientId}" has no Relay chat yet`);
+    const chatId = patient.relayChatId;
+    const scanId = db.transaction((): number => {
+      // The same photo delivered twice is one paper check.
+      const existing = attachmentId ? paperScanForAttachment(db, patientId, attachmentId) : undefined;
+      return existing?.id ?? insertPaperScan(db, { patientId, paper, attachmentId: attachmentId ?? null, createdAt: clock.now() });
+    })();
+    await messenger.send(chatId, { text: paperReadback(paper), buttons: [...PAPER_CONFIRM_BUTTONS] }, `${patientId}:paper:${scanId}:readback`);
+    return { scanId };
+  }
+
+  /**
+   * A photo she sent (see CheckinEngine.handlePhoto). The model only reads; fixed rules compare a label
+   * with her list (src/meds/flow.ts checkLabel). Her chat shows READING_PHOTO_ACTIVITY while it works.
+   */
+  async function handlePhoto(patientId: string, image: Uint8Array, mimeType: string, attachmentId: string): Promise<PhotoOutcome> {
+    const patient = requirePatient(patientId);
+    if (!patient.relayChatId) throw new Error(`Patient "${patientId}" has no Relay chat yet`);
+    const chatId = patient.relayChatId;
+    const name = patient.preferredName;
+    const say = async (text: string, outcome: PhotoOutcome): Promise<PhotoOutcome> => {
+      await deliver([{ chatId, message: { text }, key: `${patientId}:photo:${attachmentId}` }]);
+      return outcome;
+    };
+    const llm = deps.llm;
+    if (!llm) return say(photoNotYet(name), "not_read");
+    await showActivity(chatId, READING_PHOTO_ACTIVITY);
+    try {
+      let reading: ImageReading;
+      try {
+        reading = await llm.readImage({ seniorName: name, image, mimeType });
+      } catch (error) {
+        // Too large or not a photo type: hers to fix. Anything else (LlmUnavailableError): our trouble.
+        return say(error instanceof ImageRejectedError ? photoRejected() : photoReadFailed(name), error instanceof ImageRejectedError ? "rejected" : "failed");
+      }
+      switch (reading?.kind) {
+        case "discharge_papers":
+          await startPaperCheck(patientId, paperFromReading(reading.paper), attachmentId);
+          return "papers";
+        case "medicine_label": {
+          const day = dayFor(patientId);
+          let loaded;
+          try {
+            loaded = await recordOn(patient, day);
+          } catch {
+            return say(photoReadFailed(name), "failed");
+          }
+          if (!loaded) return say(labelNoRecord(), "label");
+          const active = activeMedications(loaded.record);
+          const label = reading.label;
+          const planned = db.transaction(() => meds.planLabel(patient, attachmentId, label, active, { day, checkinId: getCheckin(db, patientId, day)?.id ?? null }))();
+          await deliver(planned.sends);
+          return planned.outcome === "unreadable" ? "unreadable" : "label";
+        }
+        case "other":
+          return say(photoOther(name), "other");
+        default:
+          return say(labelUnreadable(), "unreadable");
+      }
+    } finally {
+      await clearActivity(chatId);
+    }
+  }
+
   /** Sends follow-ups due by `now`; at most one run at a time (the agent's timer may fire during a slow send). */
   let followUpRun: Promise<number> | undefined;
   async function sendDueFollowUps(now: string): Promise<number> {
@@ -1815,7 +1974,11 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         const now = clock.now();
         saveSnapshot(db, { patientId, fetchedAt: now, syncStatus: raw.meta.syncStatus, raw });
         syncFlags(db, patientId, runRules({ record, checkinDate: day }), now);
-        return insertCheckin(db, { patientId, date: day, questionIds, sentAt: now });
+        const id = insertCheckin(db, { patientId, date: day, questionIds, sentAt: now });
+        // She already tapped "Taken" on this morning's medicines reminder: that question isn't asked.
+        const c = questionIds.includes(MORNING_MEDICINES_QUESTION) && getDose(db, patientId, day, "morning")?.status === "taken" ? getCheckinById(db, id) : undefined;
+        if (c) recordMorningMedicines(patient, c);
+        return id;
       })();
       if (checkinId === undefined) return { kind: "already_started" };
 
@@ -1862,18 +2025,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       }
     },
 
-    async startPaperCheck(patientId: string, paper: ExtractedPaper, attachmentId?: string): Promise<{ scanId: number }> {
-      const patient = requirePatient(patientId);
-      if (!patient.relayChatId) throw new Error(`Patient "${patientId}" has no Relay chat yet`);
-      const chatId = patient.relayChatId;
-      const scanId = db.transaction((): number => {
-        // The same photo delivered twice is one paper check.
-        const existing = attachmentId ? paperScanForAttachment(db, patientId, attachmentId) : undefined;
-        return existing?.id ?? insertPaperScan(db, { patientId, paper, attachmentId: attachmentId ?? null, createdAt: clock.now() });
-      })();
-      await messenger.send(chatId, { text: paperReadback(paper), buttons: [...PAPER_CONFIRM_BUTTONS] }, `${patientId}:paper:${scanId}:readback`);
-      return { scanId };
-    },
+    startPaperCheck,
 
     async runMissedCheckin(patientId: string, day: string): Promise<"marked_missed" | "nothing_to_do"> {
       const patient = requirePatient(patientId);
@@ -1896,6 +2048,61 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       });
       return followUpRun;
     },
+
+    async sendMedsReminder(patientId: string, day: string, slot: "morning" | "evening"): Promise<MedsReminderResult> {
+      const patient = requirePatient(patientId);
+      if (!patient.relayChatId) throw new Error(`Patient "${patientId}" has no Relay chat yet`);
+      const loaded = await recordOn(patient, day);
+      if (!loaded) return "no_record";
+      const schedule = medicationSchedule(activeMedications(loaded.record));
+      const sends = db.transaction(() => meds.planReminder(patient, day, slot, schedule))();
+      if (sends === undefined) return "already_sent";
+      if (sends.length === 0) return "nothing_to_send";
+      await deliver(sends);
+      return "sent";
+    },
+
+    async runMedsNudges(now: string): Promise<number> {
+      const failures: unknown[] = [];
+      let sent = 0;
+      for (const dose of dueNudges(db, now)) {
+        const patient = getCheckinPatient(db, dose.patientId);
+        const send = patient ? meds.nudgeSend(patient, dose) : undefined;
+        if (!send) continue; // not linked (any more): it waits
+        try {
+          await deliver([send]);
+          markNudged(db, dose.id, clock.now());
+          sent += 1;
+        } catch (error) {
+          failures.push(error); // the next run tries again with the same key
+        }
+      }
+      if (failures.length > 0) throw failures[0];
+      return sent;
+    },
+
+    async runRefillCheck(patientId: string, day: string): Promise<number> {
+      const patient = requirePatient(patientId);
+      if (!patient.relayChatId) return 0;
+      const loaded = await recordOn(patient, day);
+      if (!loaded) return 0;
+      const due = refillsDue(loaded.record, day, refillRemindDays);
+      const demo = loaded.record.demographics;
+      const who = { fullName: demo.name?.trim() || patient.preferredName, birthDate: demo.birthDate };
+      const sends = db.transaction(() => meds.planRefills(patient, day, due, who))();
+      await deliver(sends);
+      return sends.length;
+    },
+
+    async runMedsMissed(patientId: string, day: string): Promise<"marked_missed" | "nothing_to_do"> {
+      const patient = requirePatient(patientId);
+      const sends = db.transaction(() => meds.planMissed(patient, day))();
+      if (sends === undefined) return "nothing_to_do";
+      await deliver(sends);
+      return "marked_missed";
+    },
+
+    handlePhoto,
 
     async passOnFamilyMessages(patientId: string): Promise<number> {
       const patient = requirePatient(patientId);

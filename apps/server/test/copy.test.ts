@@ -71,6 +71,7 @@ import { MAX_ACTIVITY_LABEL, assertValidActivityLabel } from "../src/relay/messe
 import { loadRxNavCache, loadSnapshot } from "../src/finchnode/fixtures.ts";
 import { normalizeHealthRecord } from "../src/finchnode/normalize.ts";
 import { runRules } from "../src/rules/index.ts";
+import { MEDS_COPY_FUNCTIONS, medsOutputs } from "./meds-samples.ts";
 
 const NAME = "Harriet";
 const LEVELS: SharingLevel[] = ["status", "status_vitals", "all"];
@@ -130,6 +131,7 @@ function allOutputs(): string[] {
   out.push(sharingMenu());
   out.push(complaintReply(NAME), smallTalkFallback(NAME));
   out.push(...levelZeroToTwoOutputs());
+  out.push(...medsOutputs());
   for (const words of HER_WORDS) for (const q of QUESTION_BANK) out.push(freeTextConfirm(words, q.text));
   out.push(copy.PAPER_REJECTED_REPLY, copy.PAPER_LATER_REPLY, copy.PAPER_NOTHING_TO_COMPARE, copy.PAPER_NO_RECORD_REPLY);
   for (const level of LEVELS) {
@@ -222,6 +224,7 @@ describe("copy: style rules across every output", () => {
       "recordLinkEndedFamily", "recordLinkEndedSenior", "redFlagAdvice", "sharingChangedFamily", "sharingChangedSenior", "sharingLevelFromButton",
       "sharingMenu", "smallTalkFallback", "sorryNotGreat", "symptomNotedReply", "topicWords", "typedReplyUnavailable", "urgentReply", "withLead",
       "withTypingHint", "answerPhrase", "suggestedConfirm", "understoodLine",
+      ...MEDS_COPY_FUNCTIONS,
     ].sort();
     expect(fns).toEqual(sampled);
   });

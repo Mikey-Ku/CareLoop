@@ -301,6 +301,104 @@ export const MIGRATIONS: readonly string[] = [
 
   ALTER TABLE checkins ADD COLUMN suggestions_json TEXT;
   `,
+  // 10: the medication helper (src/meds, src/db/meds.ts).
+  // med_doses: one row per morning or evening reminder sent (patient, check-in date, slot) and what
+  // she said: sent, taken, not_yet (one gentle re-reminder at nudge_due_at, never more), missed (no
+  // answer by MISSED_CHECKIN_TIME, morning only). med_memory_checks: the day's "how many do you take?"
+  // (one medicine a day, planned with the morning reminder, asked after "Taken"). med_refills: one row
+  // per fill reminded about (patient, medication, fill date); "I've asked for it" stops that fill.
+  // med_prompts: which sent message carries which buttons, so a tap finds its dose, check or refill.
+  // med_label_checks: a photographed label compared with her list, once per Relay attachment.
+  // symptom_observations.source gains 'photo' (a label that doesn't match her list is a level-2
+  // "medicine check" for her doctor); SQLite can't change a CHECK in place, so the table is rebuilt.
+  `
+  CREATE TABLE med_doses (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    day TEXT NOT NULL,
+    slot TEXT NOT NULL CHECK (slot IN ('morning', 'evening')),
+    status TEXT NOT NULL CHECK (status IN ('sent', 'taken', 'not_yet', 'missed')),
+    at TEXT NOT NULL,
+    sent_at TEXT NOT NULL,
+    nudge_due_at TEXT,
+    nudged_at TEXT,
+    UNIQUE (patient_id, day, slot)
+  );
+  CREATE INDEX med_doses_nudge ON med_doses (nudge_due_at) WHERE nudge_due_at IS NOT NULL AND nudged_at IS NULL;
+
+  CREATE TABLE med_memory_checks (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    day TEXT NOT NULL,
+    medication_key TEXT NOT NULL,
+    ingredient TEXT NOT NULL,
+    unit TEXT NOT NULL CHECK (unit IN ('tablet', 'capsule')),
+    slot TEXT NOT NULL CHECK (slot IN ('morning', 'midday', 'evening', 'bedtime')),
+    count INTEGER NOT NULL CHECK (count > 0),
+    instructions TEXT NOT NULL,
+    planned_at TEXT NOT NULL,
+    asked_at TEXT,
+    answered_at TEXT,
+    answer TEXT,
+    correct INTEGER,
+    UNIQUE (patient_id, day)
+  );
+
+  CREATE TABLE med_refills (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    medication_key TEXT NOT NULL,
+    fill_date TEXT NOT NULL,
+    name TEXT NOT NULL,
+    run_out TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('reminded', 'snoozed', 'asked')),
+    last_reminded_day TEXT,
+    snoozed_until TEXT,
+    family_told_at TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE (patient_id, medication_key, fill_date)
+  );
+
+  CREATE TABLE med_prompts (
+    message_id TEXT PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('dose', 'memory', 'refill')),
+    ref_id INTEGER NOT NULL,
+    sent_at TEXT NOT NULL
+  );
+
+  CREATE TABLE med_label_checks (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    attachment_id TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('match', 'strength_differs', 'not_on_list', 'unreadable')),
+    medication_key TEXT,
+    label_medicine TEXT,
+    label_strength TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE (patient_id, attachment_id)
+  );
+
+  CREATE TABLE symptom_observations_v10 (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    checkin_id INTEGER REFERENCES checkins(id) ON DELETE SET NULL,
+    day TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    question_id TEXT,
+    level INTEGER NOT NULL CHECK (level BETWEEN 0 AND 5),
+    amount TEXT CHECK (amount IS NULL OR amount IN ('none', 'a_little', 'a_lot', 'unknown')),
+    change TEXT CHECK (change IS NULL OR change IN ('new', 'worse', 'same', 'better', 'unknown')),
+    source TEXT NOT NULL CHECK (source IN ('button', 'typed', 'follow_up', 'safety', 'photo')),
+    words TEXT,
+    created_at TEXT NOT NULL
+  );
+  INSERT INTO symptom_observations_v10 (id, patient_id, checkin_id, day, topic, question_id, level, amount, change, source, words, created_at)
+    SELECT id, patient_id, checkin_id, day, topic, question_id, level, amount, change, source, words, created_at FROM symptom_observations;
+  DROP TABLE symptom_observations;
+  ALTER TABLE symptom_observations_v10 RENAME TO symptom_observations;
+  CREATE INDEX symptom_observations_patient_day ON symptom_observations (patient_id, day);
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

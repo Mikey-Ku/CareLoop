@@ -60,7 +60,7 @@ describe("schema", () => {
     expect(tables).toEqual(
       [
         "checkin_notes", "checkin_prompts", "checkins", "clarifications", "family_members", "family_messages", "family_relays", "flags", "follow_ups",
-        "inbound_messages", "memories", "paper_scans", "patients", "record_snapshots", "relay_events", "relay_full_syncs", "symptom_observations",
+        "inbound_messages", "med_doses", "med_label_checks", "med_memory_checks", "med_prompts", "med_refills", "memories", "paper_scans", "patients", "record_snapshots", "relay_events", "relay_full_syncs", "symptom_observations",
         "visit_questions", "vitals_readings",
       ].sort(),
     );

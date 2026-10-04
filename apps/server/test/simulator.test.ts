@@ -456,7 +456,7 @@ describe("simulator inputs", () => {
   it("/later with no follow-up waiting just says so", async () => {
     const { exitCode, lines } = await run(["/later"]);
     expect(exitCode).toBe(0);
-    expect(lines).toContain("[sim] No follow-up check-in is waiting.");
+    expect(lines).toContain("[sim] No follow-up check-in or medicines re-reminder is waiting.");
   });
 
   it("without an LLM, the safety screen and an explicit yes on a red-flag question still work", async () => {
@@ -573,6 +573,21 @@ describe("npm run simulate", () => {
     expect(stdout).toMatch(/Good morning, Harriet/);
     expect(stdout).toMatch(/--- Sarah's phone \(family\), \d\d:\d\d ---\nHarriet checked in/);
     expect(stdout).not.toMatch(/\x1b\[/);
+  }, 30_000);
+
+  it("runs the medication helper demo (reminder, memory check, label photos, refill) and exits 0", async () => {
+    const { stdout } = await promisify(execFile)(
+      process.execPath,
+      ["src/cli/simulate.ts", "--script", "../../scripts/demo/harriet-meds.txt", "--db", ":memory:", "--day", "2026-07-28"],
+      { cwd: SERVER_DIR, env: { ...process.env, NO_COLOR: "1", CLOCK_DATE: "" } },
+    );
+    expect(stdout).toMatch(/Good morning, Harriet\. Your morning medicines:\nApixaban 5 mg: take 1 tablet by mouth twice daily\n/);
+    expect(stdout).toContain("Quick memory check: how many apixaban tablets do you take in the morning?");
+    expect(stdout).toContain("Your label says: take 1 tablet by mouth twice daily.");
+    expect(stdout).toContain("This is your apixaban 5 mg. Your label says: take 1 tablet by mouth twice daily. It matches your medication list.");
+    expect(stdout).toContain("This label says apixaban 2.5 mg, but your medication list has 5 mg.");
+    expect(stdout).toContain("Your apixaban 5 mg (30-day supply filled Jul 2) runs out around Aug 1. Time to ask for a refill.");
+    expect(stdout).toMatch(/--- Sarah's phone \(family\), \d\d:\d\d ---\nHarriet's apixaban 5 mg runs out around Aug 1\./);
   }, 30_000);
 
   it("--family sarah,tom gives each family member their own pane", async () => {

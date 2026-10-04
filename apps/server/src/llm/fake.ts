@@ -3,10 +3,12 @@ import type {
   CheckinExtraction,
   ClassifyInput,
   ExtractCheckinInput,
+  ImageReading,
   LlmCallOptions,
   LlmClient,
   MapAnswerInput,
   MessageClassification,
+  ReadImageInput,
   SmallTalkInput,
   SmallTalkReply,
 } from "./types.ts";
@@ -21,13 +23,15 @@ export type FakeLlmScript = {
   smallTalk?: (input: SmallTalkInput) => SmallTalkReply | Error;
   classifyMessage?: (input: ClassifyInput) => MessageClassification | Error;
   extractCheckin?: (input: ExtractCheckinInput) => CheckinExtraction | Error;
+  readImage?: (input: ReadImageInput) => ImageReading | Error;
 };
 
 export type FakeLlmCall =
   | { method: "mapAnswer"; input: MapAnswerInput }
   | { method: "smallTalk"; input: SmallTalkInput }
   | { method: "classifyMessage"; input: ClassifyInput }
-  | { method: "extractCheckin"; input: ExtractCheckinInput };
+  | { method: "extractCheckin"; input: ExtractCheckinInput }
+  | { method: "readImage"; input: ReadImageInput };
 
 export class FakeLlmClient implements LlmClient {
   readonly provider = "fake";
@@ -89,6 +93,17 @@ export class FakeLlmClient implements LlmClient {
     };
   }
 
+  /** Unscripted: unreadable, so the caller asks her for a clearer photo. */
+  async readImage(input: ReadImageInput, options?: LlmCallOptions): Promise<ImageReading> {
+    this.calls.push({ method: "readImage", input });
+    throwIfAborted(options);
+    const result: ImageReading | Error = this.script.readImage
+      ? this.script.readImage(input)
+      : { kind: "unreadable", reason: "fake" };
+    if (result instanceof Error) throw result;
+    return cloneReading(result);
+  }
+
   /** Inputs of the mapAnswer calls only, in order. */
   get mapAnswerCalls(): MapAnswerInput[] {
     return this.calls.flatMap((c) => (c.method === "mapAnswer" ? [c.input] : []));
@@ -107,6 +122,25 @@ export class FakeLlmClient implements LlmClient {
   /** Inputs of the extractCheckin calls only, in order. */
   get extractCalls(): ExtractCheckinInput[] {
     return this.calls.flatMap((c) => (c.method === "extractCheckin" ? [c.input] : []));
+  }
+
+  /** Inputs of the readImage calls only, in order. */
+  get readImageCalls(): ReadImageInput[] {
+    return this.calls.flatMap((c) => (c.method === "readImage" ? [c.input] : []));
+  }
+}
+
+function cloneReading(reading: ImageReading): ImageReading {
+  switch (reading.kind) {
+    case "medicine_label":
+      return { kind: "medicine_label", label: { ...reading.label } };
+    case "discharge_papers":
+      return {
+        kind: "discharge_papers",
+        paper: { ...reading.paper, medications: reading.paper.medications.map((m) => ({ ...m })) },
+      };
+    default:
+      return { ...reading };
   }
 }
 

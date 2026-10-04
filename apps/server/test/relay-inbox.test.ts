@@ -1,6 +1,6 @@
 import type { Chat, MessageSendParams, RelayWebhookEvent, WebhookSubscription, WebSocketRunOptions } from "@relaymessenger/sdk";
 import { describe, expect, it, vi } from "vitest";
-import { familyWelcome, photoNotYet } from "../src/checkin/copy.ts";
+import { familyWelcome, photoCouldNotOpen, photoNotYet, photoRejected } from "../src/checkin/copy.ts";
 import { familyChats, familyMembers, linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import { openDatabase, upsertPatient, type Db } from "../src/db/index.ts";
 import { FakeMessenger } from "../src/relay/fake-messenger.ts";
@@ -242,6 +242,61 @@ describe("message.received", () => {
       message: { parts: [{ type: "text", value: photoNotYet("Harriet") }], idempotency_key: `harriet:photo:${messageId}` },
     });
     expect(relay.chats.markAsRead).toHaveBeenCalledWith(HARRIET_CHAT);
+  });
+
+  describe("photos read by the engine", () => {
+    const SIGNED = "https://files.example.org/signed?token=synthetic-secret";
+    function photoSetup(fetchImpl: typeof fetch) {
+      const db = openDatabase(":memory:");
+      upsertPatient(db, { id: "harriet", finchnodePatientId: "patient-demo-polypharmacy", preferredName: "Harriet", relayHandle: "harriet.demo", relayChatId: HARRIET_CHAT });
+      const photos: { patientId: string; bytes: number[]; mimeType: string; attachmentId: string }[] = [];
+      const engine = {
+        handleInbound: vi.fn(async () => undefined),
+        handlePhoto: vi.fn(async (patientId: string, image: Uint8Array, mimeType: string, attachmentId: string) => {
+          photos.push({ patientId, bytes: [...image], mimeType, attachmentId });
+          return "label" as const;
+        }),
+      };
+      const relay = fakeRelay();
+      const log = vi.fn();
+      const inbox = createRelayInbox({ db, engine, patientHandle: "harriet.demo", relay, log, now: () => T, fetch: fetchImpl });
+      return { inbox, engine, photos, relay, log };
+    }
+    const media = (size: number) => ({ type: "media", id: "media_1", url: SIGNED, filename: "label.png", mime_type: "image/png", size_bytes: size, reactions: null });
+
+    it("downloads the signed URL and hands the bytes to handlePhoto; the URL is never logged", async () => {
+      const fetchImpl = vi.fn(async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-length": "3" } })) as unknown as typeof fetch;
+      const { inbox, engine, photos, relay, log } = photoSetup(fetchImpl);
+      await inbox.onEvent(textMessage({ chatId: HARRIET_CHAT, parts: [media(3), { type: "text", value: "my pills", reactions: null }] }), { sequence: "1" });
+      await inbox.drain();
+      expect(photos).toEqual([{ patientId: "harriet", bytes: [1, 2, 3], mimeType: "image/png", attachmentId: "media_1" }]);
+      expect(engine.handleInbound).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledWith("relay_photo_handled", expect.objectContaining({ outcome: "label" }));
+      expect(JSON.stringify(log.mock.calls)).not.toContain("synthetic-secret");
+      expect(relay.chats.markAsRead).toHaveBeenCalledWith(HARRIET_CHAT);
+    });
+
+    it("a photo over 8 MB is never downloaded and she is asked for a regular one", async () => {
+      const fetchImpl = vi.fn() as unknown as typeof fetch;
+      const { inbox, engine, relay } = photoSetup(fetchImpl);
+      await inbox.onEvent(textMessage({ chatId: HARRIET_CHAT, parts: [media(9 * 1024 * 1024)] }), { sequence: "1" });
+      await inbox.drain();
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(engine.handlePhoto).not.toHaveBeenCalled();
+      expect(relay.chats.messages.send).toHaveBeenCalledWith(HARRIET_CHAT, expect.objectContaining({ message: expect.objectContaining({ parts: [{ type: "text", value: photoRejected() }] }) }));
+    });
+
+    it("a failed download gets a kind ask to send it again", async () => {
+      const fetchImpl = vi.fn(async () => new Response("gone", { status: 404 })) as unknown as typeof fetch;
+      const { inbox, engine, relay } = photoSetup(fetchImpl);
+      await inbox.onEvent(textMessage({ chatId: HARRIET_CHAT, parts: [media(10)] }), { sequence: "1" });
+      await inbox.drain();
+      expect(engine.handlePhoto).not.toHaveBeenCalled();
+      expect(relay.chats.messages.send).toHaveBeenCalledWith(
+        HARRIET_CHAT,
+        expect.objectContaining({ message: expect.objectContaining({ parts: [{ type: "text", value: photoCouldNotOpen("Harriet") }] }) }),
+      );
+    });
   });
 
   it("a photo in a family chat gets no reply", async () => {

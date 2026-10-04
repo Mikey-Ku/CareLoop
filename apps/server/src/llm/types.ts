@@ -121,6 +121,56 @@ export type CheckinExtraction = {
   memories: string[];
 };
 
+/** What she photographed: a medicine bottle or label, discharge or visit papers, or something else. */
+export type MedicineLabelReading = {
+  /** As printed, e.g. "Apixaban". */
+  medicineName: string;
+  /** As printed, e.g. "5 mg". */
+  strength?: string | undefined;
+  /** The directions exactly as printed, e.g. "Take 1 tablet by mouth twice daily". */
+  instructions?: string | undefined;
+  quantity?: string | undefined;
+  prescriber?: string | undefined;
+  pharmacy?: string | undefined;
+  refillsLeft?: string | undefined;
+  confidence: Confidence;
+};
+
+export type DischargePaperReading = {
+  organization?: string | undefined;
+  /** YYYY-MM-DD when printed. */
+  date?: string | undefined;
+  medications: { name: string; strength?: string | undefined; instructions?: string | undefined; change: "continue" | "new" | "stopped" | "changed" }[];
+};
+
+export type ImageReading =
+  | { kind: "medicine_label"; label: MedicineLabelReading }
+  | { kind: "discharge_papers"; paper: DischargePaperReading }
+  | { kind: "unreadable"; reason: string } // blurry, dark, cut off
+  | { kind: "other"; description: string }; // not a medicine or medical paper
+
+export type ReadImageInput = {
+  seniorName: string;
+  image: Uint8Array;
+  /** e.g. "image/jpeg". */
+  mimeType: string;
+};
+
+/** Largest photo readImage sends; a bigger one is rejected before any call. */
+export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+/** Photo types readImage sends ("image/jpg" is read as image/jpeg). */
+export const IMAGE_MIME_TYPES: readonly string[] = ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"];
+
+/** readImage refused the photo before calling any model: too large, or not a photo type it can send. */
+export class ImageRejectedError extends Error {
+  override name = "ImageRejectedError";
+  readonly reason: "too_large" | "unsupported_type";
+  constructor(reason: "too_large" | "unsupported_type", message: string) {
+    super(message);
+    this.reason = reason;
+  }
+}
+
 export type LlmCallOptions = {
   /** Aborts the whole call, including retries and model fallbacks. */
   signal?: AbortSignal;
@@ -135,6 +185,8 @@ export interface LlmClient {
   classifyMessage(input: ClassifyInput, options?: LlmCallOptions): Promise<MessageClassification>;
   /** Pull answers to all of today's questions, and every symptom, out of her reply to the open question. */
   extractCheckin(input: ExtractCheckinInput, options?: LlmCallOptions): Promise<CheckinExtraction>;
+  /** Read a photo she sent: a medicine label (read as printed, never interpreted) or discharge papers. */
+  readImage(input: ReadImageInput, options?: LlmCallOptions): Promise<ImageReading>;
 }
 
 /** Every model in the chain failed or the time budget ran out. Callers fall back to buttons or a template. */

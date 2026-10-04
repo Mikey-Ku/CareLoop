@@ -5,7 +5,8 @@ import type { Db } from "./index.ts";
 // rule, the family's daily status at "all" and the visit-prep sheet read them. Her words are kept
 // only when she typed them, and never logged.
 
-export type ObservationSource = "button" | "typed" | "follow_up" | "safety";
+/** "photo": a medicine label photo that didn't match her list (migration 10). */
+export type ObservationSource = "button" | "typed" | "follow_up" | "safety" | "photo";
 
 export type SymptomObservation = {
   id: number;

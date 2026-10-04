@@ -25,6 +25,11 @@ const ConfigSchema = z.object({
   DATABASE_PATH: z.string().default("./data/app.db"),
   CHECKIN_TIME: z.string().regex(TIME, "must be HH:MM (24 hour)").default("09:00"),
   MISSED_CHECKIN_TIME: z.string().regex(TIME, "must be HH:MM (24 hour)").default("12:00"),
+  /** Medication helper (src/meds): the morning and evening reminders, the one re-reminder after "Not yet", the refill window. */
+  MEDS_MORNING_TIME: z.string().regex(TIME, "must be HH:MM (24 hour)").default("08:00"),
+  MEDS_EVENING_TIME: z.string().regex(TIME, "must be HH:MM (24 hour)").default("20:00"),
+  MEDS_NUDGE_MINUTES: z.coerce.number().positive("must be a positive number of minutes").max(24 * 60).default(60),
+  REFILL_REMIND_DAYS: z.coerce.number().int().min(1).max(30).default(5),
   /** Demo clock (docs/DESIGN.md "Dates"). Empty means use the snapshot's data as-of date. */
   CLOCK_DATE: z
     .string()
@@ -88,6 +93,8 @@ export type Config = {
   checkinTime: string;
   missedCheckinTime: string;
   clockDate: string | undefined;
+  /** Medication helper: MEDS_MORNING_TIME, MEDS_EVENING_TIME (HH:MM in her time zone), MEDS_NUDGE_MINUTES, REFILL_REMIND_DAYS. */
+  meds: { morningTime: string; eveningTime: string; nudgeMinutes: number; refillRemindDays: number };
 };
 
 /** Thrown for a bad environment. The message names variables and problems, never values. */
@@ -133,6 +140,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     checkinTime: c.CHECKIN_TIME,
     missedCheckinTime: c.MISSED_CHECKIN_TIME,
     clockDate: c.CLOCK_DATE,
+    meds: {
+      morningTime: c.MEDS_MORNING_TIME,
+      eveningTime: c.MEDS_EVENING_TIME,
+      nudgeMinutes: c.MEDS_NUDGE_MINUTES,
+      refillRemindDays: c.REFILL_REMIND_DAYS,
+    },
   };
 }
 
