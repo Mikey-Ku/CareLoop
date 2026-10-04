@@ -144,11 +144,6 @@ function sameSecret(received: string, expected: string): boolean {
   return timingSafeEqual(digest(received), digest(expected));
 }
 
-/**
- * Placeholder for the Relay webhook (docs/DESIGN.md "Relay"). The body is kept raw
- * because the Standard Webhooks signature check in run 2 must run on the exact bytes.
- */
-
 function hostOf(url: string): string {
   try {
     return new URL(url).host;

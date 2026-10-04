@@ -264,9 +264,3 @@ export function insertLabelCheck(db: Db, c: Omit<LabelCheckRow, "id">): number {
     .run(c.patientId, c.attachmentId, c.outcome, c.medicationKey, c.labelMedicine, c.labelStrength, c.createdAt);
   return Number(info.lastInsertRowid);
 }
-
-/** Her label checks, newest first (the doctor report). */
-export function recentLabelChecks(db: Db, patientId: string, n: number): LabelCheckRow[] {
-  if (n <= 0) return [];
-  return db.prepare(`SELECT ${LABEL_COLUMNS} FROM med_label_checks WHERE patient_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`).all(patientId, Math.floor(n)) as LabelCheckRow[];
-}

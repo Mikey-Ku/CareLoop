@@ -33,11 +33,6 @@ export function getCareSummary(db: Db, patientId: string, day: string, trigger: 
   );
 }
 
-/** Any summary for that day, whatever triggered it. */
-export function hasCareSummaryForDay(db: Db, patientId: string, day: string): boolean {
-  return db.prepare(`SELECT 1 FROM care_summaries WHERE patient_id = ? AND day = ? LIMIT 1`).get(patientId, day) !== undefined;
-}
-
 /** The newest summary that went out to `audience`: what a follow-up question is answered from. */
 export function latestSentSummary(db: Db, patientId: string, audience: CareAudience): CareSummaryRow | undefined {
   return summaryFromRaw(

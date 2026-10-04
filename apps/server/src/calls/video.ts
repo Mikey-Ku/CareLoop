@@ -4,7 +4,7 @@ import { decodeMetrics } from "@smartspectra/node-sdk/messages";
 import { createRelayVideoFrameAdapter, type FrameSink } from "../vitals/relay-frame-adapter.ts";
 import { mergeMetricSnapshots, normalizePresageMetrics, resultFromSnapshot, type MetricSnapshot } from "../vitals/normalize.ts";
 import type { PresageSession } from "../vitals/presage-file.ts";
-import { emptyVitalsResult, type ValidationEvent, type VitalsError, type VitalsResult } from "../vitals/types.ts";
+import type { ValidationEvent, VitalsError, VitalsResult } from "../vitals/types.ts";
 import { QuietMeasurement } from "./quiet-measurement.ts";
 
 export type RelayVideoLogger = (event: string, fields?: Record<string, unknown>) => void;
@@ -143,7 +143,3 @@ export class RelayPresageBridge {
 }
 
 export type RelayVideoBridgeOptions = RelayPresageBridgeOptions;
-
-export function noRelayVideoResult(): VitalsResult {
-  return emptyVitalsResult("relay_video", [{ code: "no_video", message: "No supported remote video track was received" }]);
-}
