@@ -314,7 +314,8 @@ export class ElevenLabsTts {
       try {
         while (!controller.signal.aborted) {
           const next = await reader.read();
-          if (next.done) break;
+          // She may have interrupted while read() was pending: a chunk that arrives after cancel() is not played.
+          if (next.done || controller.signal.aborted) break;
           const bytes = concatBytes(remainder, next.value);
           const usableLength = bytes.byteLength - (bytes.byteLength % 2);
           remainder = bytes.slice(usableLength);

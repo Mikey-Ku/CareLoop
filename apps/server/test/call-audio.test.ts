@@ -97,6 +97,28 @@ describe("call audio adapters", () => {
     expect(failed.isSpeaking).toBe(false);
   });
 
+  it("writes nothing after it was cancelled, even for a chunk whose read was still pending", async () => {
+    const relay = { writeAudio: vi.fn(async (_frame: { samples: Int16Array }) => {}), clearAudio: vi.fn(), waitForPlayout: vi.fn(async () => {}) };
+    type Read = { done: boolean; value?: Uint8Array };
+    let deliver!: (result: Read) => void;
+    const reader = {
+      read: vi.fn(() => new Promise<Read>((resolve) => { deliver = resolve; })),
+      cancel: vi.fn(async () => {}), // like a stream that does not release a read already under way
+      releaseLock: vi.fn(),
+    };
+    const response = { ok: true, status: 200, body: { getReader: () => reader, cancel: vi.fn(async () => {}) } } as unknown as Response;
+    const tts = new ElevenLabsTts(relay as never, { apiKey: "test", voiceId: "voice-id", fetch: vi.fn(async () => response) });
+    const speaking = tts.speak("This response is interrupted.");
+    await vi.waitFor(() => expect(reader.read).toHaveBeenCalledOnce()); // read() is pending
+    tts.cancel(); // she interrupts
+    deliver({ done: false, value: new Uint8Array(Int16Array.from([1000, -1000]).buffer.slice(0)) }); // and then the chunk arrives
+    await expect(speaking).resolves.toBeUndefined();
+    expect(relay.writeAudio).not.toHaveBeenCalled();
+    expect(relay.waitForPlayout).not.toHaveBeenCalled();
+    expect(reader.releaseLock).toHaveBeenCalled();
+    expect(tts.isSpeaking).toBe(false);
+  });
+
   it("treats a barge-in cancellation as a normal interruption", async () => {
     const relay = { writeAudio: vi.fn(async () => {}), clearAudio: vi.fn(), waitForPlayout: vi.fn(async () => {}) };
     const tts = new ElevenLabsTts(relay as never, {
