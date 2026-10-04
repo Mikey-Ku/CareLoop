@@ -20,6 +20,12 @@ export type ConversationOrchestratorOptions = {
   canMeasure: boolean;
   quietMeasurementMs: number;
   speak: (text: string) => Promise<void>;
+  /**
+   * Awaited before the greeting, the first utterance of the call only (the call service waits for her
+   * audio to arrive and writes a short silence). The greeting is spoken even if this rejects, and not at
+   * all if the call has ended meanwhile.
+   */
+  beforeGreeting?: () => Promise<void>;
   recordAgentTurn: (text: string) => void;
   beginQuietMeasurement: () => void;
   onComplete: (screening?: CallScreeningLlmOutput) => void;
@@ -50,11 +56,23 @@ export class ConversationOrchestrator {
   start(): void {
     if (this.#started) return;
     this.#started = true;
-    void this.#speak(callFirstMessage(this.#options.firstName)).catch((error) => {
+    void this.#greet().catch((error) => {
       this.#log("call_greeting_failed", { error: summary(error) });
       this.#completed = true;
       this.#options.onComplete();
     });
+  }
+
+  async #greet(): Promise<void> {
+    if (this.#options.beforeGreeting) {
+      try {
+        await this.#options.beforeGreeting();
+      } catch (error) {
+        this.#log("call_greeting_lead_in_failed", { error: summary(error) }); // a missing lead-in never costs her the greeting
+      }
+      if (this.#completed) return; // the call ended while we waited: nobody to greet
+    }
+    await this.#speak(callFirstMessage(this.#options.firstName));
   }
 
   handlePatientTurn(text: string): Promise<void> {

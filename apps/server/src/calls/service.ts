@@ -37,6 +37,9 @@ export type CallLog = (event: string, fields?: Record<string, unknown>) => void;
 export const RELAY_ANSWER_DEADLINE_MS = 32_000;
 /** Longest wait for her check-in context before answering (Relay's answer deadline is 32 s). */
 export const CALL_CONTEXT_TIMEOUT_MS = 5_000;
+/** Before the greeting: the longest wait for her audio to arrive, and the silence written ahead of the first words. */
+export const GREETING_PEER_AUDIO_WAIT_MS = 2_000;
+export const GREETING_LEAD_IN_MS = 300;
 
 export function withinRelayAnswerDeadline(ringingAt: string, answeredAt: string, deadlineMs = RELAY_ANSWER_DEADLINE_MS): boolean {
   const elapsed = Date.parse(answeredAt) - Date.parse(ringingAt);
@@ -303,6 +306,14 @@ export class CallService implements CallEventHandler {
         canMeasure: Boolean(active.bridge),
         quietMeasurementMs: calls.quietMeasurementMs,
         speak: (text) => tts.speak(text),
+        beforeGreeting: async () => {
+          // The greeting used to start the instant the call was answered, and came out rough. Let her audio
+          // arrive (its rejection, a timeout or an ended call, is ignored), then a short silence, played out
+          // before speaking because speak() clears whatever is still queued.
+          await transport.waitForPeerAudio(GREETING_PEER_AUDIO_WAIT_MS).catch(() => {});
+          await transport.writeAudio({ samples: new Int16Array((48_000 * GREETING_LEAD_IN_MS) / 1000), sampleRate: 48_000, channelCount: 1 });
+          await transport.waitForPlayout();
+        },
         recordAgentTurn: (text) => this.#recordTurn(active, { speaker: "agent", text }),
         beginQuietMeasurement: () => {
           if (!active.bridge) return;

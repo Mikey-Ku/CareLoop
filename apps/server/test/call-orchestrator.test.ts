@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CAMERA_OFFER_AT_END, callClosing } from "../src/calls/copy.ts";
+import { CAMERA_OFFER_AT_END, callClosing, callFirstMessage } from "../src/calls/copy.ts";
 import { emptyCallVitals } from "../src/calls/screening.ts";
 import { ConversationOrchestrator, type ConversationOrchestratorOptions } from "../src/calls/orchestrator.ts";
 import { crisisReply, urgentReply } from "../src/checkin/copy.ts";
@@ -391,5 +391,58 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
     await say("I feel a bit odd today.");
     expect(spoken).toEqual([urgentReply("Harriet")]);
     expect(onComplete).toHaveBeenCalledOnce();
+  });
+});
+
+describe("ConversationOrchestrator: the start of the call", () => {
+  const llm = () => new FakeLlmClient({ callTurn: () => plan({ nextAction: "ask_follow_up", nextQuestion: "When did it begin?" }) });
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  it("waits for the lead-in before it greets", async () => {
+    let release!: () => void;
+    const beforeGreeting = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
+    const { flow, spoken } = buildFlow(llm(), { beforeGreeting });
+    flow.start();
+    await settle();
+    expect(beforeGreeting).toHaveBeenCalledOnce();
+    expect(spoken).toEqual([]);
+    release();
+    await vi.waitFor(() => expect(spoken).toEqual([callFirstMessage("Harriet")]));
+  });
+
+  it("still greets, and does not end the call, when the lead-in fails", async () => {
+    const beforeGreeting = vi.fn(async () => { throw new Error("Relay Call transport is closed."); });
+    const { flow, spoken, onComplete } = buildFlow(llm(), { beforeGreeting });
+    flow.start();
+    await vi.waitFor(() => expect(spoken).toEqual([callFirstMessage("Harriet")]));
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["resolves", (release: () => void) => release()],
+    ["rejects", (_release: () => void, reject: (error: Error) => void) => reject(new Error("Relay Call ended before the person's audio arrived."))],
+  ])("says nothing when the call ends while the lead-in is pending and it then %s", async (_how, settleHook) => {
+    let release!: () => void;
+    let reject!: (error: Error) => void;
+    const beforeGreeting = () => new Promise<void>((resolve, rejectHook) => { release = resolve; reject = rejectHook; });
+    const { flow, spoken, onComplete } = buildFlow(llm(), { beforeGreeting });
+    flow.start();
+    await settle();
+    flow.close();
+    settleHook(release, reject);
+    await settle();
+    expect(spoken).toEqual([]);
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it("is for the greeting only: started twice or followed by turns, the hook runs once", async () => {
+    const beforeGreeting = vi.fn(async () => {});
+    const { flow, spoken, say } = buildFlow(llm(), { beforeGreeting });
+    flow.start();
+    flow.start();
+    await vi.waitFor(() => expect(spoken).toHaveLength(1));
+    await say("I have been dizzy since this morning.");
+    expect(spoken.at(-1)).toContain("When did it begin?");
+    expect(beforeGreeting).toHaveBeenCalledOnce();
   });
 });

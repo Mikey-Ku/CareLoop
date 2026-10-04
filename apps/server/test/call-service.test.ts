@@ -35,9 +35,10 @@ const created = (call: Call) => ({ event_type: "call.created", event_id: `event-
 
 class FakeTransport {
   readonly listeners = new Map<string, ((...args: any[]) => void)[]>();
-  readonly writeAudio = vi.fn(async () => {});
+  readonly writeAudio = vi.fn(async (_frame: { samples: Int16Array; sampleRate: number; channelCount: number }) => {});
   readonly clearAudio = vi.fn();
   readonly waitForPlayout = vi.fn(async () => {});
+  readonly waitForPeerAudio = vi.fn(async (_timeoutMs: number) => {});
   readonly connect = vi.fn(async () => {});
   readonly close = vi.fn(() => this.emit("close"));
   readonly end = vi.fn(() => this.emit("ended"));
@@ -190,6 +191,45 @@ const modelPlan = (overrides: Partial<CallTurnLlmOutput> = {}): CallTurnLlmOutpu
   evidence: [],
   uncertainty: [],
   ...overrides,
+});
+
+describe("the start of the call", () => {
+  const firstCall = (mock: { mock: { invocationCallOrder: number[] } }) => mock.mock.invocationCallOrder[0]!;
+
+  it("waits for her audio, writes 300 ms of silence and lets it play, and only then greets", async () => {
+    const service = setup();
+    await start(service);
+    expect(transport.waitForPeerAudio).toHaveBeenCalledWith(2000);
+    const frame = transport.writeAudio.mock.calls[0]![0];
+    expect(frame).toMatchObject({ sampleRate: 48_000, channelCount: 1 });
+    expect(frame.samples).toHaveLength(14_400);
+    expect(frame.samples.every((sample) => sample === 0)).toBe(true);
+    expect(firstCall(transport.waitForPeerAudio)).toBeLessThan(firstCall(transport.writeAudio));
+    expect(firstCall(transport.writeAudio)).toBeLessThan(firstCall(transport.waitForPlayout));
+    expect(firstCall(transport.waitForPlayout)).toBeLessThan(firstCall(tts.speak)); // speak() clears what is queued, so the silence must have played
+    expect(tts.spoken[0]).toMatch(/Hi Harriet, I'm an AI check-in assistant/i);
+    await service.end("call-1");
+  });
+
+  it("greets anyway when her audio never arrives", async () => {
+    const service = setup();
+    transport.waitForPeerAudio.mockRejectedValueOnce(new Error("Timed out waiting for the person's audio"));
+    await start(service);
+    expect(tts.spoken[0]).toMatch(/Hi Harriet, I'm an AI check-in assistant/i);
+    await service.end("call-1");
+  });
+
+  it("says nothing when the call ends while it waits for her audio", async () => {
+    const service = setup();
+    let giveUp!: (error: Error) => void;
+    transport.waitForPeerAudio.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { giveUp = reject; }));
+    await service.handle(created(relayCall("harriet")));
+    await vi.waitFor(() => expect(transport.waitForPeerAudio).toHaveBeenCalled());
+    await service.end("call-1");
+    giveUp(new Error("Relay Call ended before the person's audio arrived."));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(tts.speak).not.toHaveBeenCalled();
+  });
 });
 
 describe("the voice and the transcriber are set up from the configuration", () => {
