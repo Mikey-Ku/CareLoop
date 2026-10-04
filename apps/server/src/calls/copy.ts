@@ -25,6 +25,14 @@ export const QUIET_MINUTE_PROMPT = quietMeasurementPrompt();
 /** Gemini would end the call and the camera reading is possible: offered once, in these words, before the goodbye. She answers yes or no. */
 export const CAMERA_OFFER_AT_END = "Before we finish, would you like to try a quiet camera measurement? You can say yes or no.";
 
+/**
+ * The camera reading is set up but her camera is off: how to turn it on, said once before the goodbye. Her
+ * "ready" is her yes to the reading, so it says what follows.
+ */
+export const CAMERA_GUIDANCE =
+  "If you would like a quick camera reading, tap the video button to turn your camera on, and keep your face and upper chest in view. I will then take a short, quiet reading. Say ready when your camera is on, or say no thanks.";
+export const CAMERA_STILL_OFF = "I can't see your camera yet. Please tap the video button, then say ready, or say no thanks and we can skip it.";
+
 /** The goodbye: points her to her family, by name when we know them. */
 export function callClosing(name: string, familyNames: readonly string[] = []): string {
   const names = familyNames.map((n) => n.trim()).filter(Boolean);
@@ -152,6 +160,8 @@ export function callCopySamples(name = "Harriet"): { level: number; text: string
     { level: 0, text: callFirstMessage(name) },
     { level: 0, text: QUIET_MINUTE_PROMPT },
     { level: 0, text: CAMERA_OFFER_AT_END },
+    { level: 0, text: CAMERA_GUIDANCE },
+    { level: 0, text: CAMERA_STILL_OFF },
     { level: 0, text: MEDICINE_QUESTION_REPLY },
     { level: 0, text: callClosing(name, ["Sarah"]) },
     { level: 0, text: callClosing(name) },

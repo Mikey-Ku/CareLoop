@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CAMERA_OFFER_AT_END, callClosing, callFirstMessage } from "../src/calls/copy.ts";
+import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, callClosing, callFirstMessage } from "../src/calls/copy.ts";
 import { emptyCallVitals } from "../src/calls/screening.ts";
 import { ConversationOrchestrator, type ConversationOrchestratorOptions } from "../src/calls/orchestrator.ts";
 import { crisisReply, urgentReply } from "../src/checkin/copy.ts";
@@ -786,5 +786,97 @@ describe("ConversationOrchestrator: what the model writes is checked before it i
     const b = buildFlow(clean, { canMeasure: () => true });
     await b.say("My heart feels fluttery.");
     expect(b.spoken).toEqual(["Thank you for telling me. Would you like to try a quiet camera measurement now?"]);
+  });
+});
+
+describe("ConversationOrchestrator: her camera is off, so she is told how to turn it on", () => {
+  const DECLINE = "Of course. We can skip the camera measurement.";
+  /** The camera reading is set up (Presage); `cameraOn` is her video. */
+  function offCamera(nextAction: "complete_screening" | "end_call" = "complete_screening") {
+    const state = { on: false, configured: true };
+    const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction }) });
+    const flow = buildFlow(llm, { canMeasure: () => state.configured && state.on, cameraNeedsVideo: () => state.configured && !state.on });
+    return { ...flow, state, llm };
+  }
+
+  it("says how to turn the camera on, in fixed words, once, and waits for her answer", async () => {
+    const { spoken, onComplete, beginQuietMeasurement, say } = offCamera();
+    await say("I have had a bit of a cough.");
+    expect(spoken).toEqual([CAMERA_GUIDANCE]);
+    expect(spoken[0]).not.toMatch(/911|988/);
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(beginQuietMeasurement).not.toHaveBeenCalled(); // never without her ready
+  });
+
+  it("ready with her camera now on starts the quiet reading", async () => {
+    vi.useFakeTimers();
+    const { flow, spoken, state, onComplete, beginQuietMeasurement, say } = offCamera();
+    await say("I have had a bit of a cough.");
+    state.on = true;
+    await say("Ready.");
+    expect(beginQuietMeasurement).toHaveBeenCalledOnce();
+    expect(spoken.at(-1)).toMatch(/face and upper chest.*30 seconds/i);
+    await vi.advanceTimersByTimeAsync(30_500);
+    await vi.waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
+    expect(spoken.at(-1)).toBe(callClosing("Harriet"));
+    flow.close();
+  });
+
+  it("no thanks: the decline line, no reading, then the goodbye, and the guidance is not said again", async () => {
+    const { spoken, onComplete, beginQuietMeasurement, say } = offCamera();
+    await say("I have had a bit of a cough.");
+    await say("No thanks.");
+    expect(spoken).toEqual([CAMERA_GUIDANCE, DECLINE, callClosing("Harriet")]);
+    expect(beginQuietMeasurement).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledOnce();
+  });
+
+  it("ready but the camera is still off: told once more, then a second ready ends it without a reading", async () => {
+    const { spoken, onComplete, beginQuietMeasurement, say } = offCamera();
+    await say("I have had a bit of a cough.");
+    await say("Ready.");
+    expect(spoken).toEqual([CAMERA_GUIDANCE, CAMERA_STILL_OFF]);
+    expect(onComplete).not.toHaveBeenCalled();
+    await say("Ready!");
+    expect(spoken).toEqual([CAMERA_GUIDANCE, CAMERA_STILL_OFF, DECLINE, callClosing("Harriet")]);
+    expect(beginQuietMeasurement).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledOnce();
+  });
+
+  it("an answer that is neither is told once more, and the camera coming on in between lets the next ready start it", async () => {
+    vi.useFakeTimers();
+    const { flow, spoken, state, beginQuietMeasurement, say } = offCamera();
+    await say("I have had a bit of a cough.");
+    await say("What camera?");
+    expect(spoken).toEqual([CAMERA_GUIDANCE, CAMERA_STILL_OFF]);
+    state.on = true;
+    await say("Okay, it's on.");
+    expect(beginQuietMeasurement).toHaveBeenCalledOnce();
+    flow.close();
+  });
+
+  it("is not said when she says she has to go (end_call), or when the camera reading is not set up", async () => {
+    const goes = offCamera("end_call");
+    await goes.say("I have to go now.");
+    expect(goes.spoken).toEqual([callClosing("Harriet")]);
+
+    const unconfigured = offCamera();
+    unconfigured.state.configured = false;
+    await unconfigured.say("I have had a bit of a cough.");
+    expect(unconfigured.spoken).toEqual([callClosing("Harriet")]);
+  });
+
+  it("with her camera already on it is the offer, not the guidance", async () => {
+    const { spoken, state, say } = offCamera();
+    state.on = true;
+    await say("I have had a bit of a cough.");
+    expect(spoken).toEqual([CAMERA_OFFER_AT_END]);
+  });
+
+  it("never when the reading was already taken or declined", async () => {
+    const declined = offCamera();
+    await declined.say("I have had a bit of a cough.");
+    await declined.say("No thanks.");
+    expect(declined.spoken.filter((text) => text === CAMERA_GUIDANCE)).toHaveLength(1);
   });
 });
