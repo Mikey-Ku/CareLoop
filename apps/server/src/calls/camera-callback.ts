@@ -8,7 +8,7 @@ import { addVitalsReading } from "../db/vitals.ts";
 import { REPO_ROOT } from "../finchnode/fixtures.ts";
 import { runPresageVideo } from "../vitals/presage-file.ts";
 import type { VitalsResult } from "../vitals/types.ts";
-import { CAMERA_CHECK_END, CAMERA_CHECK_MISSED, CAMERA_CHECK_NOTICE, CAMERA_CHECK_START, heartRateReadback, noReadingReadback } from "./copy.ts";
+import { CAMERA_CHECK_END, CAMERA_CHECK_MISSED, CAMERA_CHECK_NOTICE, CAMERA_CHECK_NO_VIDEO, CAMERA_CHECK_START, heartRateReadback, noReadingReadback } from "./copy.ts";
 
 // The camera check call-back: a short second call that only records her camera, then reads the recording.
 // On live calls the Relay TypeScript receiver drops frames every few seconds, so Presage never gets the 12 s of
@@ -39,9 +39,19 @@ export type CameraCallbackDeps = {
   log: (event: string, fields?: Record<string, unknown>) => void;
   /** How long the whole call-back may take before the recorder is stopped. */
   timeoutMs?: number;
+  /** The wait before the one more try (CAMERA_CHECK_RETRY_MS). */
+  retryDelayMs?: number;
 };
 
 export type CameraCallbackOutcome = "reading" | "no_reading" | "not_recorded";
+
+/**
+ * Relay sometimes ends a call-back within 2 s as no-answer, before her phone rang (twice on 2026-10-04; one placed
+ * between them was answered in 3 s), or can't place it while her last call is still open. Those are tried once more
+ * after this long. A call she let ring out (not_answered) is not.
+ */
+export const CAMERA_CHECK_RETRY_MS = 10_000;
+const RETRIED = new Set(["call_ended", "call_not_placed"]);
 
 /** The recorder as a child process: `uv run` in apps/camera-check, or CAMERA_CHECK_PYTHON when set. Keys pass through the environment. */
 export const pythonRecorder: Recorder = (args) => {
@@ -93,16 +103,15 @@ export async function runCameraCallback(deps: CameraCallbackDeps, patient: Camer
   };
   const dir = await mkdtemp(join(tmpdir(), "camera-check-"));
   const out = join(dir, "check.mp4");
-  try {
-    await text(CAMERA_CHECK_NOTICE, "notice");
-    const recorder = (deps.record ?? pythonRecorder)(["--chat-id", patient.chatId, "--to", patient.handle, "--out", out, "--say-start", CAMERA_CHECK_START, "--say-end", CAMERA_CHECK_END]);
+  const callOnce = async (): Promise<{ recorded?: RecorderEvent; failure: string }> => {
+    const recorder = (deps.record ?? pythonRecorder)(["--chat-id", patient.chatId, "--to", patient.handle, "--out", out, "--say-start", CAMERA_CHECK_START, "--say-end", CAMERA_CHECK_END, "--say-camera", CAMERA_CHECK_NO_VIDEO]);
     const timer = setTimeout(() => recorder.kill(), deps.timeoutMs ?? 4 * 60_000);
     timer.unref?.();
     let recorded: RecorderEvent | undefined;
     let failure = "no_result";
     try {
       for await (const event of recorder.events) {
-        deps.log("camera_check_step", { step: event.event, ...pick(event, ["reason", "detail", "frames", "seconds", "received", "longest_gap_ms", "width", "height"]) });
+        deps.log("camera_check_step", { step: event.event, ...pick(event, ["reason", "detail", "frames", "seconds", "received", "longest_gap_ms", "width", "height", "camera_flag", "has_track", "readers", "frames_decoded", "frames_dropped", "decode_errors", "codec"]) });
         if (event.event === "recorded") recorded = event;
         if (event.event === "failed") failure = String(event.reason ?? "failed");
       }
@@ -110,6 +119,17 @@ export async function runCameraCallback(deps: CameraCallbackDeps, patient: Camer
     } finally {
       clearTimeout(timer);
     }
+    return recorded ? { recorded, failure } : { failure };
+  };
+  try {
+    await text(CAMERA_CHECK_NOTICE, "notice");
+    let call = await callOnce();
+    if (!call.recorded && RETRIED.has(call.failure)) {
+      deps.log("camera_check_retry", { reason: call.failure });
+      await new Promise((resolve) => setTimeout(resolve, deps.retryDelayMs ?? CAMERA_CHECK_RETRY_MS));
+      call = await callOnce();
+    }
+    const { recorded, failure } = call;
     if (!recorded) {
       deps.log("camera_check_not_recorded", { reason: failure });
       await text(CAMERA_CHECK_MISSED, "result");

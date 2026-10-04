@@ -55,6 +55,8 @@ export const CAMERA_CHECK_START =
   "Hi, it's your check-in assistant for the camera check. If your camera is off, please tap the video button. Then hold your phone steady with your face and upper chest in view, and stay still and quiet for about 30 seconds.";
 export const CAMERA_CHECK_END = "Thank you, that's all. I'll text you the estimate in about a minute.";
 export const CAMERA_CHECK_MISSED = "I couldn't reach your camera for the check this time. That's okay, we can try again another day.";
+/** Said on the call-back when her camera has sent nothing 10 s after the start prompt. */
+export const CAMERA_CHECK_NO_VIDEO = "I can't see your camera yet. Please tap the video button, and hold the phone so I can see your face.";
 export const CAMERA_STILL_OFF = "I can't see your camera yet. Please tap the video button, then say ready, or say no thanks and we can skip it.";
 /**
  * With CAMERA_CALLBACK=on the reading is always the call-back: offered before the goodbye in these words, camera on
@@ -200,6 +202,7 @@ export function callCopySamples(name = "Harriet"): { level: number; text: string
     { level: 0, text: CAMERA_CHECK_START },
     { level: 0, text: CAMERA_CHECK_END },
     { level: 0, text: CAMERA_CHECK_MISSED },
+    { level: 0, text: CAMERA_CHECK_NO_VIDEO },
     { level: 0, text: CAMERA_CALLBACK_OFFER },
     { level: 0, text: CAMERA_CALLBACK_LATER },
     { level: 0, text: `${CAMERA_CALLBACK_SOON} ${callClosing(name, ["Sarah"])}` },

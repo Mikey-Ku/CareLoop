@@ -5,7 +5,7 @@ The call goes through the Relay Python SDK (aiortc), which repairs lost video pa
 TypeScript receiver dropped frames every few seconds, so Presage never had 12 s of continuous video. Presage
 reads the file afterwards (apps/server/src/calls/camera-callback.ts), so nothing here is real-time.
 
-    python camera_check.py --chat-id ID --to HANDLE --out FILE.mp4 [--seconds 35] [--say-start TEXT] [--say-end TEXT]
+    python camera_check.py --chat-id ID --to HANDLE --out FILE.mp4 [--seconds 35] [--say-start TEXT] [--say-end TEXT] [--say-camera TEXT]
     python camera_check.py --self-test FILE.mp4
 
 Environment: RELAY_AGENT_TOKEN (and RELAY_API_URL); ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID speak the prompts
@@ -29,7 +29,8 @@ import numpy as np
 FPS = 30
 TICK_US = 1_000_000 / FPS
 ANSWER_TIMEOUT_S = 75
-VIDEO_TIMEOUT_S = 30
+VIDEO_TIMEOUT_S = 45  # after the start prompt, for her camera's first frame
+CAMERA_REMINDER_S = 10  # no frame yet by then: she is asked once more to tap the video button
 
 
 def emit(event: str, **fields) -> None:
@@ -162,7 +163,8 @@ async def run(args: argparse.Namespace) -> int:
     if not token:
         emit("failed", reason="no_token")
         return 2
-    start_pcm, end_pcm = speech(args.say_start), speech(args.say_end)  # rendered before the phone rings
+    # The prompts, rendered together before the phone rings.
+    start_pcm, end_pcm, camera_pcm = await asyncio.gather(*(asyncio.to_thread(speech, text) for text in (args.say_start, args.say_end, args.say_camera)))
     try:
         call_id = place_call(api, token, args.chat_id, args.to)
     except Exception as error:
@@ -178,20 +180,49 @@ async def run(args: argparse.Namespace) -> int:
     recording = asyncio.Event()
     finished = asyncio.Event()
     ended = asyncio.Event()  # she declined or hung up
+    camera_flag = None  # her camera on or off, as the call room says
+    reader = None
+    readers = 0
 
     async def read(track) -> None:
-        async for event in VideoStream(track, capacity=2):
-            if not first_frame.is_set():
-                first_frame.set()
-                answered.set()
-                emit("video", width=event.frame.width, height=event.frame.height)
-            if recording.is_set() and not finished.is_set():
-                if recorder.add(event.frame.to_av(), event.timestamp_us):
-                    finished.set()
+        try:
+            async for event in VideoStream(track, capacity=2):
+                if not first_frame.is_set():
+                    first_frame.set()
+                    answered.set()
+                    emit("video", width=event.frame.width, height=event.frame.height)
+                if recording.is_set() and not finished.is_set():
+                    if recorder.add(event.frame.to_av(), event.timestamp_us):
+                        finished.set()
+        except Exception as error:  # a reader that dies says so, and the wait for her camera starts another
+            emit("video_error", detail=type(error).__name__)
+
+    def start_reading(track) -> None:
+        nonlocal reader, readers
+        if track is None or (reader is not None and not reader.done()) or readers >= 3:
+            return
+        readers += 1
+        reader = loop.create_task(read(track))
+
+    def video_facts() -> dict:
+        """What the call knew about her video, for a check that got none."""
+        facts = {"camera_flag": camera_flag, "has_track": call.remote_video_track is not None, "readers": readers}
+        try:
+            inbound = call.video_stats().inbound
+            if inbound is not None:
+                facts.update(frames_decoded=inbound.frames_decoded, frames_dropped=inbound.frames_dropped, decode_errors=inbound.decode_errors, codec=inbound.codec)
+        except Exception:
+            pass
+        return facts
 
     @call.on("track_subscribed")
     def _camera(track) -> None:
-        loop.create_task(read(track))
+        start_reading(track)
+
+    @call.on("remote_video")
+    def _camera_switched(on) -> None:
+        nonlocal camera_flag
+        camera_flag = bool(on)
 
     @call.on("peer_audio")
     def _picked_up() -> None:
@@ -209,8 +240,18 @@ async def run(args: argparse.Namespace) -> int:
             return 2
         emit("answered")
         await say(call, start_pcm)  # it asks her to tap the video button when her camera is off
-        if not await first_of(first_frame, ended, timeout=VIDEO_TIMEOUT_S) or not first_frame.is_set():
-            emit("failed", reason="no_video")
+        video_deadline = loop.time() + VIDEO_TIMEOUT_S
+        reminder_at = loop.time() + CAMERA_REMINDER_S
+        while not first_frame.is_set() and not ended.is_set() and loop.time() < video_deadline:
+            # The SDK says "track_subscribed" once; its track is also read here, and a reader that died is started again.
+            start_reading(call.remote_video_track)
+            if camera_pcm is not None and loop.time() >= reminder_at:
+                pcm, camera_pcm = camera_pcm, None
+                emit("camera_reminder")
+                await say(call, pcm)
+            await first_of(first_frame, ended, timeout=0.5)
+        if not first_frame.is_set():
+            emit("failed", reason="hung_up" if ended.is_set() else "no_video", **video_facts())
             return 2
         recording.set()
         emit("recording", seconds=args.seconds)
@@ -232,9 +273,9 @@ async def run(args: argparse.Namespace) -> int:
         return 2
     finally:
         try:
-            ended = call.end()
-            if asyncio.iscoroutine(ended):
-                await ended
+            result = call.end()
+            if asyncio.iscoroutine(result):
+                await result
         except Exception:
             pass
         try:
@@ -270,6 +311,7 @@ def main() -> int:
     parser.add_argument("--seconds", type=float, default=35)
     parser.add_argument("--say-start")
     parser.add_argument("--say-end")
+    parser.add_argument("--say-camera")
     parser.add_argument("--self-test", metavar="FILE")
     args = parser.parse_args()
     if args.self_test:

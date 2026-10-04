@@ -1226,3 +1226,61 @@ describe("ConversationOrchestrator: the call is a full check-in", () => {
     expect(onComplete).toHaveBeenCalledOnce();
   });
 });
+
+describe("ConversationOrchestrator: no check-in question is asked twice", () => {
+  const ANKLES = { id: "hf-ankle-swelling", text: "Have your ankles or feet been more swollen than usual?" };
+  const BLEEDING = { id: "anticoagulant-bleeding", text: "Any unusual bruising or bleeding?" };
+  const MEDICINES = { id: "morning-medicines", text: "Did you take your morning medicines?" };
+  const initialContext = { firstName: "Harriet", questions: [ANKLES, BLEEDING, MEDICINES], yesterday: [], memories: [], familyNames: [] };
+  const timesSaid = (spoken: string[], text: string) => spoken.filter((s) => s.includes(text)).length;
+
+  it("the model's own words for today's questions (from a live call) are said as the fixed questions, each once", async () => {
+    const questions = ["Have you noticed any swelling in your ankles or feet lately?", "Have you noticed any unusual bruising or bleeding?", "Did you take your morning medications today?"];
+    let turns = 0;
+    const llm = new FakeLlmClient({ callTurn: () => (turns < questions.length ? plan({ nextAction: "ask_follow_up", nextQuestion: questions[turns++]! }) : plan()) });
+    const cameraCallBack = vi.fn();
+    const { spoken, say } = buildFlow(llm, { initialContext, canMeasure: () => true, cameraCallBack });
+    await say("Feeling good.");
+    await say("Uh, no swelling.");
+    await say("Not that I know of.");
+    await say("I have.");
+    expect(spoken).toEqual([
+      `Thank you for telling me. ${ANKLES.text}`,
+      `Thank you for telling me. ${BLEEDING.text}`,
+      `Thank you for telling me. ${MEDICINES.text}`,
+      CAMERA_CALLBACK_OFFER,
+    ]);
+    for (const q of [ANKLES, BLEEDING, MEDICINES]) expect(timesSaid(spoken, q.text)).toBe(1);
+  });
+
+  it("its follow-up on what she said is kept (\"Is the bleeding heavy?\" after the bleeding question)", async () => {
+    let turns = 0;
+    const llm = new FakeLlmClient({
+      callTurn: () => ((turns += 1) === 1 ? plan({ nextAction: "ask_follow_up", nextQuestion: BLEEDING.text }) : turns === 2 ? plan({ nextAction: "ask_follow_up", nextQuestion: "Is the bleeding heavy or does it keep flowing?" }) : plan()),
+    });
+    const { spoken, say } = buildFlow(llm, { initialContext: { ...initialContext, questions: [BLEEDING] } });
+    await say("Feeling good.");
+    await say("I'm bleeding in the knee from a cut.");
+    expect(spoken).toEqual([`Thank you for telling me. ${BLEEDING.text}`, "Thank you for telling me. Is the bleeding heavy or does it keep flowing?"]);
+  });
+
+  it("its repeat of a question already asked is not said: the next of today's questions is asked instead", async () => {
+    let turns = 0;
+    const llm = new FakeLlmClient({
+      callTurn: () => ((turns += 1) === 1 ? plan({ nextAction: "ask_follow_up", nextQuestion: ANKLES.text }) : turns === 2 ? plan({ nextAction: "ask_follow_up", nextQuestion: "Are your feet or ankles swelling at all?" }) : plan()),
+    });
+    const { spoken, say } = buildFlow(llm, { initialContext });
+    await say("Feeling good.");
+    await say("No swelling.");
+    expect(spoken).toEqual([`Thank you for telling me. ${ANKLES.text}`, `Thank you for telling me. ${BLEEDING.text}`]);
+  });
+
+  it("a question about something else that shares a word is not taken for the medicines question", async () => {
+    let turns = 0;
+    const llm = new FakeLlmClient({ callTurn: () => ((turns += 1) === 1 ? plan({ nextAction: "ask_follow_up", nextQuestion: "Did you take anything for the pain this morning?" }) : plan()) });
+    const { spoken, say } = buildFlow(llm, { initialContext: { ...initialContext, questions: [MEDICINES] } });
+    await say("My knee hurts.");
+    await say("No, nothing.");
+    expect(spoken).toEqual(["Thank you for telling me. Did you take anything for the pain this morning?", `Thank you for telling me. ${MEDICINES.text}`]);
+  });
+});

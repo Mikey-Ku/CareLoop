@@ -1,7 +1,7 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { runCameraCallback, usableReading, type RecorderEvent } from "../src/calls/camera-callback.ts";
-import { CAMERA_CHECK_MISSED, CAMERA_CHECK_NOTICE, noReadingReadback } from "../src/calls/copy.ts";
+import { CAMERA_CHECK_MISSED, CAMERA_CHECK_NOTICE, CAMERA_CHECK_NO_VIDEO, noReadingReadback } from "../src/calls/copy.ts";
 import { openDatabase, upsertPatient } from "../src/db/index.ts";
 import { emptyVitalsResult, type VitalsResult } from "../src/vitals/types.ts";
 
@@ -83,5 +83,41 @@ describe("runCameraCallback", () => {
     expect(await runCameraCallback(f.deps, PATIENT)).toBe("not_recorded");
     expect(f.sent.at(-1)!.text).toBe(CAMERA_CHECK_MISSED);
     expect(existsSync(f.out())).toBe(false);
+  });
+});
+
+describe("runCameraCallback: a call Relay ends before her phone rings is tried once more", () => {
+  const endedAtOnce: RecorderEvent[] = [{ event: "calling" }, { event: "failed", reason: "call_ended", detail: "RelayCallTransportError" }];
+  /** A recorder that plays one script per call. */
+  function scripted(...attempts: RecorderEvent[][]) {
+    return vi.fn((args: string[]) => {
+      const events = attempts.shift() ?? [];
+      if (events.some((e) => e.event === "recorded")) writeFileSync(args[args.indexOf("--out") + 1]!, "mp4");
+      return { events: (async function* () { yield* events; })(), exit: Promise.resolve(events.some((e) => e.event === "recorded") ? 0 : 2), kill: vi.fn() };
+    });
+  }
+
+  it("ended before her phone rang, then answered: the reading, and she was told only once that it was coming", async () => {
+    const f = setup(recorded, vitals({ heartRate: 82.5, heartRateConfidence: 70, heartRateStable: true }));
+    const record = scripted(endedAtOnce, recorded);
+    expect(await runCameraCallback({ ...f.deps, record, retryDelayMs: 0 }, PATIENT)).toBe("reading");
+    expect(record).toHaveBeenCalledTimes(2);
+    expect(f.sent.map((m) => m.text)).toEqual([CAMERA_CHECK_NOTICE, "Your heart rate is about 83 beats a minute. This is a camera estimate, not a medical test."]);
+    expect(record.mock.calls[0]![0]).toEqual(expect.arrayContaining(["--say-camera", CAMERA_CHECK_NO_VIDEO]));
+  });
+
+  it("ended at once twice: not a third time, and she is told kindly", async () => {
+    const f = setup(recorded);
+    const record = scripted(endedAtOnce, endedAtOnce);
+    expect(await runCameraCallback({ ...f.deps, record, retryDelayMs: 0 }, PATIENT)).toBe("not_recorded");
+    expect(record).toHaveBeenCalledTimes(2);
+    expect(f.sent.map((m) => m.text)).toEqual([CAMERA_CHECK_NOTICE, CAMERA_CHECK_MISSED]);
+  });
+
+  it.each(["not_answered", "hung_up", "no_video"])("%s (her phone rang, or she was on the call) is not tried again", async (reason) => {
+    const f = setup(recorded);
+    const record = scripted([{ event: "calling" }, { event: "failed", reason }], recorded);
+    expect(await runCameraCallback({ ...f.deps, record, retryDelayMs: 0 }, PATIENT)).toBe("not_recorded");
+    expect(record).toHaveBeenCalledOnce();
   });
 });

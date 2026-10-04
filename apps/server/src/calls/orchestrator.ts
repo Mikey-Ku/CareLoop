@@ -275,7 +275,7 @@ export class ConversationOrchestrator {
     // reassurance, 911 or 988); a sentence that does not is replaced by a fixed one.
     const acknowledgment = guardSpoken(decision.acknowledgment) ?? FALLBACK_ACKNOWLEDGMENT;
     if (decision.nextAction === "ask_follow_up" && decision.nextQuestion) {
-      const question = this.#question(decision.nextQuestion);
+      const question = this.#checkinWording(this.#question(decision.nextQuestion));
       this.#lastQuestion = question;
       if (isRepeatedQuestion(question, this.#options.transcript)) {
         await this.#speak("Thank you. I have that information, so I will ask about the next detail instead. What changed most recently?");
@@ -470,9 +470,24 @@ export class ConversationOrchestrator {
     return this.#unaskedQuestion ?? OPEN_QUESTION;
   }
 
-  /** Today's first check-in question not yet said on this call, in its fixed words. */
+  /**
+   * The model's question, unless it is one of today's check-in questions: one not asked yet is asked in its fixed words
+   * (so it is asked once, and known to be asked), and one already asked is not asked again (the next one is, or the open
+   * question). It asked "Did you take your morning medications today?" and the call later asked "Did you take your
+   * morning medicines?": she said "I have", then "Yes". Its follow-ups on what she said ("Is the bleeding heavy?") are kept.
+   */
+  #checkinWording(question: string): string {
+    const questions = this.#options.initialContext.questions;
+    const unasked = questions.filter((q) => !askedOnCall(q.text, this.#options.transcript));
+    const about = closestQuestion(question, unasked, 1);
+    if (about) return about.text;
+    if (closestQuestion(question, questions.filter((q) => !unasked.includes(q)), 2)) return unasked[0]?.text ?? OPEN_QUESTION;
+    return question;
+  }
+
+  /** Today's first check-in question not yet asked on this call, in its fixed words or in the model's. */
   get #unaskedQuestion(): string | undefined {
-    return this.#options.initialContext.questions.find((q) => !isRepeatedQuestion(q.text, this.#options.transcript))?.text;
+    return this.#options.initialContext.questions.find((q) => !askedOnCall(q.text, this.#options.transcript))?.text;
   }
 
   async #loadContext(): Promise<unknown> {
@@ -538,6 +553,55 @@ function isRepeatedQuestion(question: string, transcript: readonly TranscriptTur
   const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   const candidate = normalize(question);
   return transcript.some((turn) => turn.speaker === "agent" && normalize(turn.text).includes(candidate));
+}
+
+/** Words of four letters or more that say little about which question it is ("take" and "morning" too: "take anything for the pain this morning" is not the medicines question). */
+const COMMON_WORDS = new Set([
+  "about", "anything", "been", "chance", "could", "does", "doing", "down", "else", "evening", "feel", "feeling", "felt", "from", "have", "into",
+  "just", "know", "last", "lately", "like", "more", "morning", "much", "night", "notice", "noticed", "please", "really", "recently", "said",
+  "should", "since", "some", "something", "still", "take", "taken", "taking", "tell", "than", "that", "them", "there", "they", "this", "today",
+  "unusual", "usual", "were", "what", "when", "will", "with", "would", "your",
+]);
+
+/** The same thing said another way ("swelling" is "swollen", "meds" are "medicines"), before the first five letters are compared. */
+function sameWord(word: string): string {
+  if (/^(swel|swol)/.test(word)) return "swell";
+  if (/^dizz/.test(word)) return "dizzy";
+  if (word === "meds" || /^(pill|tablet)/.test(word)) return "medic";
+  if (word === "foot") return "feet";
+  return word.slice(0, 5);
+}
+
+/** The telling words of the questions in a sentence or turn ("medicines" and "medication" match). */
+function tellingWords(text: string): Set<string> {
+  return new Set((text.toLowerCase().match(/[a-z]+/g) ?? []).filter((w) => w.length >= 4 && !COMMON_WORDS.has(w)).map(sameWord));
+}
+
+/** The questions an agent turn asks: its sentences that end in a question mark (not the acknowledgment before them). */
+function askedSentences(text: string): string[] {
+  return text.split(/(?<=[.!?])\s+/).filter((s) => s.trim().endsWith("?"));
+}
+
+/** The question among `candidates` that `text` shares the most telling words with: at least `needed`, or all of its own when it has fewer. */
+function closestQuestion<Q extends { text: string }>(text: string, candidates: readonly Q[], needed: number): Q | undefined {
+  const said = tellingWords(text);
+  let best: { q: Q; shared: number } | undefined;
+  for (const q of candidates) {
+    const wanted = tellingWords(q.text);
+    const shared = [...wanted].filter((w) => said.has(w)).length;
+    if (wanted.size > 0 && shared >= Math.min(needed, wanted.size) && shared > (best?.shared ?? 0)) best = { q, shared };
+  }
+  return best?.q;
+}
+
+/**
+ * The agent asked this check-in question on the call: in its fixed words, or a question of the model's sharing two of its
+ * telling words (all of them when it has fewer). A safety net: the model's version of a question not yet asked is replaced
+ * by the fixed words before it is said (#checkinWording).
+ */
+function askedOnCall(question: string, transcript: readonly TranscriptTurn[]): boolean {
+  if (isRepeatedQuestion(question, transcript)) return true;
+  return transcript.some((turn) => turn.speaker === "agent" && askedSentences(turn.text).some((s) => closestQuestion(s, [{ text: question }], 2)));
 }
 
 function summarize(collected: string[], missing: string[], uncertainty: string[]): string {
