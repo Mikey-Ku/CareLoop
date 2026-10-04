@@ -1,3 +1,4 @@
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { VideoBufferType, VideoStream, type RelayAudioFrame, type RelayCallTransport, type RemoteVideoTrack, type VideoFrameEvent } from "@relaymessenger/sdk/calls";
 import { MetricType, ProcessingStatus, SmartSpectraSDK } from "@smartspectra/node-sdk";
 import { decodeMetrics } from "@smartspectra/node-sdk/messages";
@@ -54,6 +55,8 @@ export class RelayPresageBridge {
   #stopTask: Promise<VitalsResult> | undefined;
   #lastFrameWallMs: number | undefined;
   readonly #maxFrameGapMs: number;
+  /** How long this process went without running timers (a GC pause or a blocking call would show here), since the window began. */
+  readonly #loopDelay = monitorEventLoopDelay({ resolution: 20 });
   #restartTask: Promise<void> | undefined;
   #inputStarted = false;
   #stopped = false;
@@ -114,13 +117,14 @@ export class RelayPresageBridge {
   start(): void {
     if (this.#started || this.#stopped) return;
     this.#started = true;
+    this.#loopDelay.enable();
     this.#session.useCustomInput();
     this.#session.start();
     this.#transport.on("audio", (frame) => this.#updateSpeech(frame));
     this.#transport.on("trackSubscribed", (track) => this.#subscribe(track));
     this.#transport.on("trackUnsubscribed", () => {
       this.#log("call_video_unsubscribed");
-      this.#interruptMeasurement();
+      this.#interruptMeasurement("track_unsubscribed");
       void this.#disconnectVideo();
     });
     this.#transport.on("remoteVideo", (enabled) => this.#log("call_remote_video", { enabled }));
@@ -129,6 +133,7 @@ export class RelayPresageBridge {
   }
 
   beginQuietMeasurement(permissionGranted: boolean): void {
+    this.#loopDelay.reset();
     this.#snapshot = {};
     this.#measurementStartUs = undefined;
     this.#measurementEndUs = undefined;
@@ -153,6 +158,7 @@ export class RelayPresageBridge {
   async #stop(): Promise<VitalsResult> {
     this.#interruptIfStalled();
     this.#stopped = true;
+    this.#loopDelay.disable();
     await this.#disconnectVideo();
     await this.#restartTask;
     try {
@@ -177,18 +183,27 @@ export class RelayPresageBridge {
       this.#inputStarted = false;
     }).catch((error) => {
       this.#errors.push({ code: "presage_restart", message: error instanceof Error ? error.message : String(error) });
-      this.#interruptMeasurement();
+      this.#interruptMeasurement("presage_restart");
     });
     this.#restartTask = task;
     void task.then(() => { if (this.#restartTask === task) this.#restartTask = undefined; });
   }
 
-  #interruptIfStalled(): void {
-    if (this.#lastFrameWallMs !== undefined && this.quiet.status === "measuring" && this.#now() - this.#lastFrameWallMs > this.#maxFrameGapMs) this.#interruptMeasurement();
+  /** True while the quiet window can still give a reading: a camera that has gone quiet ends it (checked here, as well as when a frame arrives). */
+  measuring(): boolean {
+    if (!this.#stopped) this.#interruptIfStalled();
+    return this.quiet.status !== "interrupted";
   }
 
-  #interruptMeasurement(): void {
+  #interruptIfStalled(): void {
+    if (this.#lastFrameWallMs !== undefined && this.quiet.status === "measuring" && this.#now() - this.#lastFrameWallMs > this.#maxFrameGapMs) {
+      this.#interruptMeasurement("video_stalled", { gap_ms: this.#now() - this.#lastFrameWallMs });
+    }
+  }
+
+  #interruptMeasurement(reason: string, fields: Record<string, unknown> = {}): void {
     if (this.quiet.status !== "measuring") return;
+    this.#log("call_quiet_measurement_interrupted", { reason, ...fields, ...this.#telemetrySummary(this.#now()) });
     this.quiet.interrupt();
     this.#snapshot = {};
     this.#measurementStartUs = undefined;
@@ -199,7 +214,7 @@ export class RelayPresageBridge {
   #subscribe(track: RemoteVideoTrack): void {
     if (this.#stopped) return;
     if (this.#reader) {
-      this.#interruptMeasurement();
+      this.#interruptMeasurement("track_replaced");
       void this.#reader.cancel().catch(() => {});
     }
     this.#log("call_video_subscribed", { width: "unknown", format: "RGBA" });
@@ -208,13 +223,14 @@ export class RelayPresageBridge {
     const reader = stream.getReader();
     this.#reader = reader;
     this.#streamTask = this.#pump(reader).catch((error) => {
-      if (this.#reader === reader) this.#interruptMeasurement();
-      this.#errors.push({ code: "video_stream", message: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      if (this.#reader === reader) this.#interruptMeasurement("stream_error", { error: message });
+      this.#errors.push({ code: "video_stream", message });
     }).finally(async () => {
       await reader.cancel().catch(() => {});
       reader.releaseLock();
       if (this.#reader === reader) {
-        if (!this.#stopped) this.#interruptMeasurement();
+        if (!this.#stopped) this.#interruptMeasurement("stream_ended");
         this.#reader = undefined;
       }
     });
@@ -238,17 +254,13 @@ export class RelayPresageBridge {
       const nowMs = this.#now();
       const timestampUs = clock.next(event.timestampUs, nowMs);
       // A stalled camera must not count as a continuous quiet capture window.
-      if (this.#lastFrameWallMs !== undefined && (nowMs - this.#lastFrameWallMs > this.#maxFrameGapMs
-        || (this.#measurementEndUs !== undefined && timestampUs - this.#measurementEndUs > this.#maxFrameGapMs * 1000))) {
-        this.#log("call_quiet_measurement_interrupted", {
-          reason: "video_gap",
-          gap_ms: this.#lastFrameWallMs === undefined ? null : nowMs - this.#lastFrameWallMs,
-          media_gap_ms: this.#measurementEndUs === undefined ? null : Math.round((timestampUs - this.#measurementEndUs) / 1000),
-          ...this.#telemetrySummary(nowMs),
-        });
-        this.#interruptMeasurement();
+      const gapMs = this.#lastFrameWallMs === undefined ? 0 : nowMs - this.#lastFrameWallMs;
+      const mediaGapMs = this.#measurementEndUs === undefined ? 0 : Math.round((timestampUs - this.#measurementEndUs) / 1000);
+      if (this.#lastFrameWallMs !== undefined && (gapMs > this.#maxFrameGapMs || mediaGapMs > this.#maxFrameGapMs)) {
+        this.#interruptMeasurement("video_gap", { gap_ms: gapMs, media_gap_ms: mediaGapMs });
         continue;
       }
+      if (gapMs > 1_000 || mediaGapMs > 1_000) this.#log("call_video_pause", { gap_ms: gapMs, media_gap_ms: mediaGapMs, ...this.#telemetrySummary(nowMs) });
       const frame = event.frame;
       if (frame.type !== VideoBufferType.RGBA) {
         this.#log("call_video_frame_rejected", { reason: "unsupported_format", format: frame.type });
@@ -294,10 +306,22 @@ export class RelayPresageBridge {
     }
   }
 
+  /** Her video's counters from the transport (frames dropped, keyframes asked for): what a pause in the picture was. */
+  #receiverStats(): Record<string, unknown> {
+    const loop_lag_ms = Math.round(this.#loopDelay.max / 1e6);
+    try {
+      const rx = typeof this.#transport.videoStats === "function" ? this.#transport.videoStats().inbound : undefined;
+      return { loop_lag_ms, ...(rx ? { rx_dropped: rx.framesDropped, rx_decode_errors: rx.decodeErrors, rx_keyframe_requests: rx.keyframeRequests, rx_recent_frames: rx.recentFrames, rx_codec: rx.codec } : {}) };
+    } catch {
+      return { loop_lag_ms };
+    }
+  }
+
   #telemetrySummary(nowMs: number): Record<string, unknown> {
     const t = this.#telemetry;
-    if (!t) return { frames: 0, metrics_packets: this.#metricsPackets };
+    if (!t) return { frames: 0, metrics_packets: this.#metricsPackets, ...this.#receiverStats() };
     return {
+      ...this.#receiverStats(),
       since_start_ms: nowMs - t.startedMs,
       frames: t.frames,
       max_gap_ms: t.maxGapMs,

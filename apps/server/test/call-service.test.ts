@@ -67,6 +67,7 @@ class FakeBridge {
   readonly stop = vi.fn(async () => emptyCallVitals());
   readonly result = vi.fn(() => emptyCallVitals());
   readonly beginQuietMeasurement = vi.fn();
+  readonly measuring = vi.fn(() => this.quiet.status !== "interrupted");
 }
 
 class FakeStt {
@@ -521,6 +522,17 @@ describe("the camera reading is offered only while her video is on, and without 
     await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
     expect(tts.spoken.at(-1)).toBe(callClosing("Harriet", []));
     expect(bridge.beginQuietMeasurement).not.toHaveBeenCalled();
+  });
+
+  it("she hangs up as the call is being ended: ending a room that is gone is logged, not thrown", async () => {
+    const service = setup({ callTurn: endsTheCall });
+    transport.end.mockImplementation(() => { throw new Error("Relay Call room is not connected."); });
+    await start(service);
+    stt.emit(turn);
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(logs.find((entry) => entry.event === "call_end_failed")).toMatchObject({ error: "Error: Relay Call room is not connected." });
+    expect(logs.some((entry) => entry.event === "call_turn_failed")).toBe(false);
+    await service.end("call-1");
   });
 
   it("a call without Presage is never offered it, video or not", async () => {

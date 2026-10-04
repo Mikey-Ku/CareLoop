@@ -5,7 +5,7 @@ import { RelayPresageBridge, sampleAverageColor } from "../src/calls/video.ts";
 vi.mock("@smartspectra/node-sdk/messages", () => ({ decodeMetrics: (bytes: Uint8Array) => JSON.parse(Buffer.from(bytes).toString()) }));
 
 // What the quiet window logs so a bad reading can be told apart: a black or odd frame, a frozen feed, no face.
-function fixture(options: { maxFrameGapMs?: number } = {}) {
+function fixture(options: { maxFrameGapMs?: number } = {}, transportExtra: Record<string, unknown> = {}) {
   const handlers = new Map<string, (...args: any[]) => void>();
   const sessionHandlers = new Map<string, (...args: any[]) => void>();
   const logs: { event: string; fields: Record<string, unknown> | undefined }[] = [];
@@ -16,7 +16,7 @@ function fixture(options: { maxFrameGapMs?: number } = {}) {
     start: vi.fn(), stopAsync: vi.fn(async () => {}), destroy: vi.fn(async () => {}),
     sendFrame: () => true,
   };
-  const bridge = new RelayPresageBridge({ on: (name: string, fn: (...args: any[]) => void) => handlers.set(name, fn) } as never, {
+  const bridge = new RelayPresageBridge({ on: (name: string, fn: (...args: any[]) => void) => handlers.set(name, fn), ...transportExtra } as never, {
     apiKey: "test", now: () => now, sessionFactory: () => session as never, log: (event, fields) => logs.push({ event, fields }), ...options,
   });
   let consumer!: { push: (event: unknown) => void; end: () => void };
@@ -32,7 +32,7 @@ function fixture(options: { maxFrameGapMs?: number } = {}) {
   };
   const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
   const eventsOf = (name: string) => logs.filter((l) => l.event === name).map((l) => l.fields!);
-  return { bridge, frame, flush, logs, eventsOf, sessionHandlers };
+  return { bridge, frame, flush, logs, eventsOf, sessionHandlers, handlers, setNow: (wall: number) => { now = 1_791_094_000_000 + wall; } };
 }
 
 describe("sampleAverageColor", () => {
@@ -79,6 +79,31 @@ describe("the quiet window's telemetry", () => {
     f.frame(7_000_000, 6_100); await f.flush(); // 3.6 s: too long
     expect(f.bridge.quiet.status).toBe("interrupted");
     expect(f.eventsOf("call_quiet_measurement_interrupted")).toEqual([expect.objectContaining({ reason: "video_gap", gap_ms: 3_600 })]);
+    await f.bridge.stop();
+  });
+
+  it("logs a pause that is ridden out, with her video's own counters (frames dropped, keyframes asked for) and how long this process stalled", async () => {
+    const videoStats = () => ({ inbound: { framesDropped: 64, decodeErrors: 0, keyframeRequests: 2, recentFrames: 27, codec: "h264" } });
+    const f = fixture({ maxFrameGapMs: 3_000 }, { videoStats });
+    f.frame(1_000_000, 0); await f.flush();
+    f.frame(3_134_000, 2_134); await f.flush(); // the 2.13 s pause seen live
+    expect(f.bridge.quiet.status).toBe("measuring");
+    expect(f.eventsOf("call_video_pause")).toEqual([
+      expect.objectContaining({ gap_ms: 2_134, media_gap_ms: 2_134, rx_dropped: 64, rx_keyframe_requests: 2, rx_decode_errors: 0, rx_recent_frames: 27, rx_codec: "h264", loop_lag_ms: expect.any(Number) }),
+    ]);
+    await f.bridge.stop();
+  });
+
+  it("says why a reading ended, every time: a stream that ended, a track taken away, a camera that went quiet", async () => {
+    const f = fixture({ maxFrameGapMs: 3_000 });
+    f.frame(1_000_000, 0); await f.flush();
+    f.setNow(5_000); // no frame for 5 s: noticed when asked, not only when the next frame comes
+    expect(f.bridge.measuring()).toBe(false);
+    expect(f.eventsOf("call_quiet_measurement_interrupted")).toEqual([expect.objectContaining({ reason: "video_stalled", gap_ms: 5_000 })]);
+    f.bridge.beginQuietMeasurement(true);
+    f.frame(9_000_000, 9_000); await f.flush();
+    f.handlers.get("trackUnsubscribed")!();
+    expect(f.eventsOf("call_quiet_measurement_interrupted").at(-1)).toMatchObject({ reason: "track_unsubscribed" });
     await f.bridge.stop();
   });
 

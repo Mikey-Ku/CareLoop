@@ -317,6 +317,11 @@ export class ConversationOrchestrator {
     await this.#speak(`${FALLBACK_ACKNOWLEDGMENT} ${question}`);
   }
 
+  /** From a timer: nothing awaits it, so a failure (she hung up while the call was ending) is logged, never thrown. */
+  #endMeasurement(): void {
+    void this.#afterMeasurement().catch((error) => this.#log("call_turn_failed", { error: summary(error) }));
+  }
+
   async #afterMeasurement(): Promise<void> {
     clearInterval(this.#countdownTimer);
     if (this.#completed) return;
@@ -348,7 +353,7 @@ export class ConversationOrchestrator {
     this.#measurementDone = true;
     await this.#speak(quietMeasurementPrompt(Math.round(this.#options.quietMeasurementMs / 1000)));
     this.#options.beginQuietMeasurement();
-    this.#measurementTimer = setTimeout(() => void this.#afterMeasurement(), this.#options.quietMeasurementMs + 500);
+    this.#measurementTimer = setTimeout(() => this.#endMeasurement(), this.#options.quietMeasurementMs + 500);
     this.#measurementTimer.unref?.();
     this.#runCountdown();
   }
@@ -372,7 +377,7 @@ export class ConversationOrchestrator {
       if (this.#options.measurementActive && !this.#options.measurementActive()) {
         clearInterval(this.#countdownTimer);
         clearTimeout(this.#measurementTimer);
-        void this.#afterMeasurement().catch((error) => this.#log("call_turn_failed", { error: summary(error) }));
+        this.#endMeasurement();
         return;
       }
       const left = total - elapsed;

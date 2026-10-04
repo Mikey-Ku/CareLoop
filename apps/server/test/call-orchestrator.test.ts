@@ -961,6 +961,25 @@ describe("ConversationOrchestrator: the quiet window counts down", () => {
   });
 });
 
+describe("ConversationOrchestrator: she hangs up while the reading is being finished", () => {
+  it("a call that can no longer be ended is logged, and nothing is thrown out of the timer", async () => {
+    vi.useFakeTimers();
+    const logged: string[] = [];
+    const llm = new FakeLlmClient({ callTurn: () => plan() });
+    const f = buildFlow(llm, {
+      canMeasure: () => true,
+      getVitals: () => ({ ...emptyCallVitals(), heartRate: 72 }),
+      onComplete: () => { throw new Error("Relay Call room is not connected."); },
+      log: (event) => logged.push(event),
+    });
+    await f.say("I have had a bit of a cough.");
+    await f.say("Yes, please.");
+    await vi.advanceTimersByTimeAsync(30_500); // a rejection nobody awaits would fail the whole run here
+    await vi.waitFor(() => expect(logged).toContain("call_turn_failed"));
+    f.flow.close();
+  });
+});
+
 describe("ConversationOrchestrator: a reading with nothing usable is offered once more", () => {
   const NO_READING = "I couldn't get a clear camera reading this time. That's okay.";
   const DECLINE = "Of course. We can skip the camera measurement.";
