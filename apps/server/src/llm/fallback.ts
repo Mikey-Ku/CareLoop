@@ -149,16 +149,6 @@ export function isRetryable(status: AttemptStatus): boolean {
   return status === 408 || status === 429 || status >= 500;
 }
 
-/** Retry-After as milliseconds (seconds or an HTTP date), or undefined when absent or unreadable. */
-export function parseRetryAfter(value: string | null, nowMs = Date.now()): number | undefined {
-  if (!value) return undefined;
-  const trimmed = value.trim();
-  if (/^\d+(\.\d+)?$/.test(trimmed)) return Math.round(Number(trimmed) * 1000);
-  const date = Date.parse(trimmed);
-  if (Number.isNaN(date)) return undefined;
-  return Math.max(0, date - nowMs);
-}
-
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) return reject(signal.reason);

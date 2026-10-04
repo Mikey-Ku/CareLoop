@@ -12,6 +12,7 @@ import type {
   WebhookSubscriptionListResponse,
   WebSocketRunOptions,
 } from "@relaymessenger/sdk";
+import { DEFAULT_RELAY_API_URL, normalizeHandle, relayOrigin } from "../config.ts";
 
 // The narrow slice of @relaymessenger/sdk (0.5.0) this app uses. Everything in
 // src/relay takes a RelayClient, so tests pass a fake object and the real SDK
@@ -43,16 +44,9 @@ export const consoleLog: RelayLog = (event, fields) => {
   console.log(JSON.stringify({ event, ...fields }));
 };
 
-const isLoopback = (hostname: string) => hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
-
-/** The Relay API origin, checked the way the Relay docs ask (HTTPS, HTTP only on loopback, no path or credentials). */
+/** The Relay API origin (Relay's own when unset), checked by the config's relayOrigin. */
 export function relayApiOrigin(value?: string): string {
-  const url = new URL(value?.trim() || "https://api.relayapp.im");
-  if (url.username || url.password || url.pathname !== "/" || url.search || url.hash)
-    throw new Error("RELAY_API_URL must be an origin without credentials or a path");
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback(url.hostname)))
-    throw new Error("RELAY_API_URL must use HTTPS; HTTP is allowed only on localhost");
-  return url.origin;
+  return relayOrigin(value?.trim() || DEFAULT_RELAY_API_URL);
 }
 
 /** Build the real SDK client. The token is read by the caller from .env and never logged. */
@@ -86,14 +80,10 @@ function relayErrorHint(status: number | undefined, code: number | undefined): s
   return undefined;
 }
 
-/** Relay handles compare without a leading @ and without case. */
+/** Relay handles compare without leading @s and without case (normalizeHandle in src/config.ts). */
 export function sameHandle(a: string | null | undefined, b: string | null | undefined): boolean {
   if (!a || !b) return false;
   return normalizeHandle(a) === normalizeHandle(b);
-}
-
-export function normalizeHandle(handle: string): string {
-  return handle.trim().replace(/^@/u, "").toLowerCase();
 }
 
 export type RelayAccess = {

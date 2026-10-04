@@ -12,6 +12,7 @@ import { createCheckinEngine } from "./checkin/engine.ts";
 import type { CheckinEngine, Clock } from "./checkin/engine-types.ts";
 import { snapshotLoader } from "./cli/simulator.ts";
 import { ConfigError, loadConfig, type Config } from "./config.ts";
+import { errorSummary } from "./errors.ts";
 import { getCheckin, getCheckinPatient } from "./db/checkins.ts";
 import { familyMembers, syncFamilyMembers } from "./db/family.ts";
 import { openDatabase, upsertPatient, type Db } from "./db/index.ts";
@@ -475,11 +476,6 @@ export function parseFollowUpDelay(raw: string | undefined): number | undefined 
   if (raw === undefined || raw.trim() === "") return undefined;
   const minutes = Number(raw);
   return Number.isFinite(minutes) && minutes > 0 ? minutes : null;
-}
-
-function errorSummary(error: unknown): string {
-  if (error instanceof Error) return `${error.name}: ${error.message}`;
-  return "non-error thrown";
 }
 
 // ---- process entry point ----

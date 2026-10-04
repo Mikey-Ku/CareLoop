@@ -26,7 +26,8 @@ import {
   withTypingHint,
 } from "../src/checkin/copy.ts";
 import { painter, renderMessage, renderTable, useColor } from "../src/cli/sim-render.ts";
-import { SimClock, nextDay, parseScript, runSimulation } from "../src/cli/simulator.ts";
+import { SimClock, parseScript, runSimulation } from "../src/cli/simulator.ts";
+import { addDays } from "../src/days.ts";
 import { loadConfig } from "../src/config.ts";
 import { QUESTION_BANK } from "../src/context/questions.ts";
 import { REPO_ROOT } from "../src/finchnode/fixtures.ts";
@@ -544,7 +545,7 @@ describe("simulator pieces", () => {
     expect(new Date(clock.now()).getMinutes()).toBe(3);
     clock.jumpTo(new Date(2026, 8, 2, 10, 0).toISOString()); // never backwards
     expect(new Date(clock.now()).getHours()).toBe(12);
-    expect(nextDay("2026-09-30")).toBe("2026-10-01");
+    expect(addDays("2026-09-30", 1)).toBe("2026-10-01"); // the next day /next goes to
   });
 
   it("colors only on a TTY without NO_COLOR", () => {

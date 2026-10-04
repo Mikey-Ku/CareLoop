@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { callWithFallback, parseRetryAfter, type AttemptResult, type ChainDeps } from "./fallback.ts";
+import { retryAfterMs } from "../http.ts";
+import { softenDashes } from "../text.ts";
+import { callWithFallback, type AttemptResult, type ChainDeps } from "./fallback.ts";
 import {
   CARE_NO_REPLY,
   IMAGE_MIME_TYPES,
@@ -524,9 +526,9 @@ export class GeminiLlmClient implements LlmClient {
         signal,
       });
       if (!response.ok) {
-        const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
+        const retryAfter = retryAfterMs(response.headers.get("retry-after"));
         await response.body?.cancel().catch(() => {});
-        return { ok: false, status: response.status, retryAfterMs };
+        return { ok: false, status: response.status, retryAfterMs: retryAfter };
       }
       const text = candidateText(await response.text());
       return text === undefined ? { ok: false, status: "empty" } : { ok: true, value: text };
@@ -752,7 +754,7 @@ export function parseClassification(
     return { kind, answer: match, confidence, complaints, memories, symptoms };
   }
   if (kind === "family_message") {
-    const forFamily = cleanText(parsed.data.forFamily ?? "") || cleanText(context.message ?? "");
+    const forFamily = clip(parsed.data.forFamily ?? "", MAX_FOR_FAMILY_CHARS) || clip(context.message ?? "", MAX_FOR_FAMILY_CHARS);
     return forFamily ? { kind, confidence, complaints, memories, forFamily, symptoms } : { kind, confidence, complaints, memories, symptoms };
   }
   return { kind, confidence, complaints, memories, symptoms };
@@ -870,12 +872,7 @@ export function cleanList(items: readonly unknown[]): string[] {
   const seen = new Set<string>();
   for (const item of items) {
     if (typeof item !== "string") continue;
-    const cleaned = item
-      .replace(/\s*[\u2013\u2014]\s*/g, ", ")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, MAX_ITEM_CHARS)
-      .trim();
+    const cleaned = clip(item, MAX_ITEM_CHARS);
     const key = cleaned.toLowerCase();
     if (!cleaned || seen.has(key)) continue;
     seen.add(key);
@@ -964,8 +961,7 @@ function enumKey(value: string): string {
 
 /** Whitespace collapsed, long dashes softened, cut to `max`. */
 function clip(value: string, max: number): string {
-  return value
-    .replace(/\s*[\u2013\u2014]\s*/g, ", ")
+  return softenDashes(value)
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, max)
@@ -974,18 +970,8 @@ function clip(value: string, max: number): string {
 
 /** A known kind, forgiving case, spaces and hyphens ("Urgent Symptom" is urgent_symptom); undefined otherwise. */
 function toKind(value: string): MessageKind | undefined {
-  const key = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const key = enumKey(value);
   return MESSAGE_KINDS.find((kind) => kind === key);
-}
-
-/** Whitespace collapsed, long dashes softened, cut to MAX_FOR_FAMILY_CHARS. */
-function cleanText(value: string): string {
-  return value
-    .replace(/\s*[\u2013\u2014]\s*/g, ", ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, MAX_FOR_FAMILY_CHARS)
-    .trim();
 }
 
 function uniqueOptions(options: readonly string[]): string[] {

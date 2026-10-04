@@ -190,9 +190,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 }
 
 /**
- * A Relay handle as the API uses it: trimmed, without a leading "@" (the SDK
- * docs and payloads use bare handles such as `harriet`), lower case. Matches
- * normalizeHandle in src/relay/relay-client.ts, which compares handles this way.
+ * A Relay handle as the API uses it: trimmed, without leading "@"s (the SDK
+ * docs and payloads use bare handles such as `harriet`), lower case. The one
+ * normalizer: config, the database, the inbox and the call service all use it,
+ * and sameHandle in src/relay/relay-client.ts compares handles with it. A real
+ * handle never starts with "@" or a space, so "@@harriet" and "@ harriet"
+ * (typing slips) are still `harriet`.
  */
 export function normalizeHandle(handle: string): string {
   return handle.trim().replace(/^@+/, "").trim().toLowerCase();
@@ -225,8 +228,11 @@ export function validTimezone(timezone: string): string {
   }
 }
 
-/** RELAY_API_URL must be an origin; the SDK appends /v1 itself, so a path is a mistake. */
-function relayOrigin(value: string): string {
+/**
+ * RELAY_API_URL must be an origin; the SDK appends /v1 itself, so a path is a mistake. HTTPS, HTTP
+ * only on localhost, no credentials (the Relay docs' rules). createRelayClient checks with this too.
+ */
+export function relayOrigin(value: string): string {
   let url: URL;
   try {
     url = new URL(value.trim());

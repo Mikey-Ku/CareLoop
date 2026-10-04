@@ -1,6 +1,7 @@
 import { RelayAPIError, type AgentMe, type WebhookSubscription } from "@relaymessenger/sdk";
 import { describe, expect, it, vi } from "vitest";
-import { describeRelayError, relayApiOrigin, verifyRelayAccess, type RelayClient } from "../src/relay/relay-client.ts";
+import { normalizeHandle } from "../src/config.ts";
+import { describeRelayError, relayApiOrigin, sameHandle, verifyRelayAccess, type RelayClient } from "../src/relay/relay-client.ts";
 import { ACTIVITY_RENEW_MS, MAX_ACTIVITY_RENEWALS, RelayMessenger, toRelayParts, type Every } from "../src/relay/relay-messenger.ts";
 
 // Synthetic ids and handles only.
@@ -239,6 +240,20 @@ describe("relayApiOrigin", () => {
     expect(relayApiOrigin("http://localhost:8787")).toBe("http://localhost:8787");
     expect(() => relayApiOrigin("http://api.relayapp.im")).toThrow(/HTTPS/);
     expect(() => relayApiOrigin("https://api.relayapp.im/v1")).toThrow(/origin/);
+  });
+});
+
+describe("Relay handles: one normalizer everywhere", () => {
+  it("strips every leading @ and the space after it, where the old copies disagreed", () => {
+    // config.ts stripped all leading @s; relay-client.ts and calls/service.ts stripped one, so
+    // "@@harriet" became "@harriet" there and matched no one. A real handle never starts with "@".
+    expect(normalizeHandle("@@harriet")).toBe("harriet");
+    expect(normalizeHandle("@ harriet")).toBe("harriet");
+    expect(normalizeHandle(" @Harriet.Demo ")).toBe("harriet.demo");
+    expect(sameHandle("@@Harriet", "harriet")).toBe(true);
+    expect(sameHandle("@ harriet", "HARRIET")).toBe(true);
+    expect(sameHandle("harriet", "harriet2")).toBe(false);
+    expect(sameHandle(null, "harriet")).toBe(false);
   });
 });
 

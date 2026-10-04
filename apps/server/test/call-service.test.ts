@@ -151,6 +151,13 @@ describe("CallService", () => {
     expect(getCallSession(db, "call-x")).toBeUndefined();
   });
 
+  it("knows her handle however it is written (@, @@, case), with the same normalizer as the inbox", async () => {
+    const { service } = setup();
+    await answered(service, callFrom("@@Harriet"));
+    expect(getCallSession(db, "call-1")?.patientId).toBe(P);
+    await service.end("call-1");
+  });
+
   it("records an ElevenLabs connection failure without blocking the inbox caller", async () => {
     connect.mockImplementationOnce(async () => {
       throw new Error("ElevenLabs websocket unavailable");

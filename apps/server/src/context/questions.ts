@@ -1,6 +1,7 @@
 import { activeMedications, type Condition, type PatientRecord } from "../finchnode/normalize.ts";
 import type { Category } from "../finchnode/types.ts";
 import { medsInClass, type DrugClass } from "../rules/drug-classes.ts";
+import { dayNumber } from "../days.ts";
 
 // Daily question bank, keyed by condition or drug class (docs/DESIGN.md
 // "Daily questions and red flags"). At most 3 a day. Red-flag questions come up
@@ -207,11 +208,6 @@ export function eligibleQuestions(record: PatientRecord): Question[] {
 const BANK_BY_ID = new Map(QUESTION_BANK.map((e) => [e.id, e]));
 const norm = (s: string) => s.trim().toLowerCase();
 const isRedFlagQuestion = (e: BankEntry) => e.redFlagAnswers.length > 0;
-
-/** Days since 1970-01-01 for a YYYY-MM-DD date, or NaN. */
-function dayNumber(day: string): number {
-  return Math.floor(Date.parse(day) / 86_400_000);
-}
 
 /** A worrying answer: anything but one of the question's calm answers. */
 export function isWorryingAnswer(questionId: string, answer: string): boolean {

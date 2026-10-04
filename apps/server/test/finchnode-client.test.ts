@@ -7,8 +7,8 @@ import {
   RateLimitedError,
   SubjectNotFoundError,
   normalizeConnectSession,
-  retryAfterMs,
 } from "../src/finchnode/client.ts";
+import { retryAfterMs } from "../src/http.ts";
 import { loadRecorded, replayFetch, type RecordedResponse } from "../src/finchnode/fixtures.ts";
 
 // Offline only: every response comes from fixtures/finchnode via replayFetch.
@@ -48,6 +48,11 @@ describe("retryAfterMs", () => {
     expect(retryAfterMs("-5")).toBe(0);
     const now = Date.parse("2026-10-03T12:00:00Z");
     expect(retryAfterMs("Sat, 03 Oct 2026 11:59:00 GMT", now)).toBe(0);
+  });
+
+  it("reads fractional seconds to the millisecond, as the LLM chain did", () => {
+    expect(retryAfterMs(" 1.5 ")).toBe(1500);
+    expect(retryAfterMs("0.0004")).toBe(0);
   });
 
   it("returns undefined for missing, blank or unreadable headers", () => {

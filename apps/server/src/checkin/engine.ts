@@ -9,6 +9,7 @@ import {
   type Question,
 } from "../context/questions.ts";
 import { answerHistory } from "../db/answer-history.ts";
+import { addDays } from "../days.ts";
 import {
   getCheckin,
   getCheckinById,
@@ -671,11 +672,6 @@ function clarifyLabels(questionId: string): { a_little: string; a_lot: string } 
   return aLittle && aLot ? { a_little: aLittle, a_lot: aLot } : undefined;
 }
 
-/** The YYYY-MM-DD `days` days before `day`. */
-function daysBefore(day: string, days: number): string {
-  return new Date(Date.parse(day) - days * 86_400_000).toISOString().slice(0, 10);
-}
-
 export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {}): CheckinEngine {
   const { db, messenger, clock } = deps;
   const missedCheckinTime = options.missedCheckinTime ?? "12:00";
@@ -898,7 +894,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
 
   /** What the repetition rule needs: her observations on the last REPETITION.days check-in dates up to `day`. */
   function historyFor(patientId: string, day: string): SeverityHistory {
-    return { today: day, observations: observationsBetween(db, patientId, daysBefore(day, REPETITION.days - 1), day) };
+    return { today: day, observations: observationsBetween(db, patientId, addDays(day, -(REPETITION.days - 1)), day) };
   }
 
   function observe(
@@ -2294,7 +2290,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     const patient = requirePatient(patientId);
     const c = getCheckin(db, patientId, day) ?? (await openCallCheckin(patient, day));
     const open = c && c.finishedAt === null && c.step !== "done" ? c : undefined;
-    const before = daysBefore(day, 1);
+    const before = addDays(day, -1);
     const yesterday = observationsBetween(db, patientId, before, before)
       .filter((o) => o.level >= 1 && o.source !== "safety" && o.source !== "follow_up")
       .map((o) => topicWords(o.topic))

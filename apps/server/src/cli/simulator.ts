@@ -5,6 +5,7 @@ import { createCheckinEngine } from "../checkin/engine.ts";
 import type { CheckinEngine, Clock, EngineDeps } from "../checkin/engine-types.ts";
 import { SHARING_BUTTONS, SHARING_MENU_BUTTON } from "../checkin/copy.ts";
 import { loadConfig, normalizeHandle, resolveCheckinDate, type Config } from "../config.ts";
+import { addDays } from "../days.ts";
 import { familyChats, linkFamilyMember, syncFamilyMembers, type FamilyChat } from "../db/family.ts";
 import { nextFollowUp } from "../db/follow-ups.ts";
 import { nextNudge } from "../db/meds.ts";
@@ -81,11 +82,6 @@ export function isDay(value: string): boolean {
 
 export function isSharingLevel(value: string): value is SharingLevel {
   return (SHARING_LEVELS as readonly string[]).includes(value);
-}
-
-/** The day after a YYYY-MM-DD date. */
-export function nextDay(day: string): string {
-  return new Date(Date.parse(day) + 86_400_000).toISOString().slice(0, 10);
 }
 
 /** Pinned to a check-in date at 09:00 local time; moves a minute per input. */
@@ -568,7 +564,7 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
         return result === "failed" ? "error" : "ok";
       }
       case "/next":
-        return goToDay(nextDay(day));
+        return goToDay(addDays(day, 1));
       case "/day": {
         const target = args[0];
         if (!target || !isDay(target)) {

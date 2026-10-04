@@ -1,3 +1,6 @@
+import { DAY_MS, addDays } from "./days.ts";
+import { errorSummary } from "./errors.ts";
+
 // Daily jobs in the senior's time zone (docs/DESIGN.md "Dates", "Build order" 3).
 // Each job fires once per local day at its HH:MM wall-clock time, across DST
 // changes. The check-in date it gets is CLOCK_DATE when the demo clock is pinned,
@@ -5,7 +8,6 @@
 // Written with setTimeout and Intl only (no cron dependency).
 
 const TIME = /^([01]\d|2[0-3]):([0-5]\d)$/;
-const DAY_MS = 86_400_000;
 /** Longest single wait. Waking up at least this often keeps the schedule right after sleep or clock changes. */
 export const MAX_WAIT_MS = 5 * 60_000;
 
@@ -201,17 +203,6 @@ export function zonedInstant(day: string, time: string, timezone: string): numbe
   return wall - before;
 }
 
-/** YYYY-MM-DD plus n days (calendar arithmetic, no time zone). */
-export function addDays(day: string, n: number): string {
-  const [y, mo, d] = day.split("-").map(Number) as [number, number, number];
-  return new Date(Date.UTC(y, mo - 1, d) + n * DAY_MS).toISOString().slice(0, 10);
-}
-
 function pad(n: number): string {
   return String(n).padStart(2, "0");
-}
-
-function errorSummary(error: unknown): string {
-  if (error instanceof Error) return `${error.name}: ${error.message}`;
-  return "non-error thrown";
 }

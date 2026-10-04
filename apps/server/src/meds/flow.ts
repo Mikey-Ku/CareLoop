@@ -71,7 +71,8 @@ import type { InboundMessage, OutboundMessage } from "../relay/messenger.ts";
 import type { ExtractedPaper } from "../rules/paper-diff.ts";
 import { sameIngredient, sameStrength } from "../rules/paper-diff.ts";
 import { looksLikeInstructions } from "../safety/injection.ts";
-import { MAX_REFILL_REMINDERS_PER_DAY, longDay, plusDays, shortDay, type RefillDue } from "./refills.ts";
+import { MAX_REFILL_REMINDERS_PER_DAY, longDay, shortDay, type RefillDue } from "./refills.ts";
+import { addDays } from "../days.ts";
 import { paperChangeFor, unresolvedPaperChanges } from "./paper-notes.ts";
 import { labelInstructions, medicineWords, medsForSlot, memoryCandidates, plainName, strengthWords, type ScheduledMedication } from "./schedule.ts";
 
@@ -307,7 +308,7 @@ export function createMedsFlow(deps: { db: Db; clock: Clock; hooks: MedsHooks; o
         setRefillStatus(db, r.id, "asked", now);
         return [reply(patient, msg, refillAskedReply(name)), ...again()];
       case "tomorrow":
-        setRefillStatus(db, r.id, "snoozed", now, plusDays(r.lastRemindedDay ?? now.slice(0, 10), 1));
+        setRefillStatus(db, r.id, "snoozed", now, addDays(r.lastRemindedDay ?? now.slice(0, 10), 1));
         return [reply(patient, msg, refillTomorrowReply(name)), ...again()];
       case "tell": {
         const notice = familyRefillNotice(name, r.name, shortDay(r.runOut));

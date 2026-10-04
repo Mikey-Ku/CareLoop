@@ -1,4 +1,5 @@
 import { activeMedications, type Dispense, type Medication, type PatientRecord } from "../finchnode/normalize.ts";
+import { addDays, dayNumber } from "../days.ts";
 import { doseForm, plainName } from "./schedule.ts";
 
 // Refill reminders: guide, don't act (docs/BRIEF.md "Refills"). From her fill dates only:
@@ -25,17 +26,6 @@ export type RefillDue = {
   daysLeft: number;
 };
 
-const DAY_MS = 86_400_000;
-
-function dayNumber(day: string): number {
-  return Math.floor(Date.parse(`${day}T00:00:00Z`) / DAY_MS);
-}
-
-/** YYYY-MM-DD plus n days. */
-export function plusDays(day: string, n: number): string {
-  return new Date((dayNumber(day) + n) * DAY_MS).toISOString().slice(0, 10);
-}
-
 /** Her latest fill of one medication (by fill date) with a days supply, if any. */
 export function latestFill(dispenses: readonly Dispense[], medicationKey: string): (Dispense & { date: string; daysSupply: number }) | undefined {
   const fills = dispenses.filter(
@@ -55,7 +45,7 @@ export function refillsDue(record: PatientRecord, day: string, remindDays = DEFA
   for (const med of activeMedications(record)) {
     const fill = latestFill(record.dispenses, med.key);
     if (!fill) continue;
-    const runOut = plusDays(fill.date, fill.daysSupply);
+    const runOut = addDays(fill.date, fill.daysSupply);
     const daysLeft = dayNumber(runOut) - today;
     if (daysLeft < 0 || daysLeft > remindDays) continue;
     due.push({ med, medicationKey: med.key, plain: plainName(med), form: doseForm(med), fillDate: fill.date, daysSupply: fill.daysSupply, runOut, daysLeft });

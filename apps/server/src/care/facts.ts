@@ -10,7 +10,8 @@ import type { RxNavCache } from "../finchnode/rxnav.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import { plainName } from "../meds/schedule.ts";
 import { DEFAULT_TIMEZONE } from "../config.ts";
-import { addDays, localDate } from "../scheduler.ts";
+import { addDays } from "../days.ts";
+import { localDate } from "../scheduler.ts";
 import type { Evidence, RuleId, Severity } from "../rules/index.ts";
 
 // The facts behind one care summary: what she said in the day's check-in (and, once

@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import express from "express";
 import type { ErrorRequestHandler, Express, RequestHandler } from "express";
 import type { Config } from "./config.ts";
+import { errorSummary } from "./errors.ts";
 
 // The HTTP app. Kept separate from src/server.ts so tests can start it on port 0.
 
@@ -162,10 +163,4 @@ function statusOf(err: unknown): number {
     if (typeof s === "number" && s >= 400 && s <= 599) return s;
   }
   return 500;
-}
-
-/** Error name and message only: no stack, no request data. */
-function errorSummary(err: unknown): string {
-  if (err instanceof Error) return `${err.name}: ${err.message}`;
-  return "non-error thrown";
 }

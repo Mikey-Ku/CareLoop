@@ -1,13 +1,13 @@
 import type { CallWebhookEvent, MessageWebhookData, RelayWebhookEvent, WebSocketFullSyncContext } from "@relaymessenger/sdk";
 import { familyWelcome, photoCouldNotOpen, photoNotYet, photoRejected } from "../checkin/copy.ts";
 import type { CheckinEngine } from "../checkin/engine-types.ts";
-import { normalizeHandle as familyHandle } from "../config.ts";
+import { normalizeHandle } from "../config.ts";
 import { getCheckinPatient, patientForChat } from "../db/checkins.ts";
 import { familyMembersForChat, linkFamilyMember } from "../db/family.ts";
 import type { Db } from "../db/index.ts";
 import { MAX_IMAGE_BYTES } from "../llm/types.ts";
 import type { InboundMessage, Messenger } from "./messenger.ts";
-import { consoleLog, describeRelayError, normalizeHandle, sameHandle, type RelayClient, type RelayLog } from "./relay-client.ts";
+import { consoleLog, describeRelayError, sameHandle, type RelayClient, type RelayLog } from "./relay-client.ts";
 import { RelayMessenger } from "./relay-messenger.ts";
 import type { CallEventHandler } from "../calls/service.ts";
 import { passOnFamilyMessage } from "./family-inbound.ts";
@@ -151,7 +151,7 @@ type FamilyLink = { patientIds: string[]; changed: boolean; firstLinked: string[
  */
 function linkFamily(db: Db, handle: string, chatId: string, displayName: string | null, now: string): FamilyLink | undefined {
   const unlinked = new Set(
-    (db.prepare(`SELECT patient_id AS patientId FROM family_members WHERE handle = ? AND chat_id IS NULL`).all(familyHandle(handle)) as { patientId: string }[]).map(
+    (db.prepare(`SELECT patient_id AS patientId FROM family_members WHERE handle = ? AND chat_id IS NULL`).all(normalizeHandle(handle)) as { patientId: string }[]).map(
       (r) => r.patientId,
     ),
   );
@@ -164,7 +164,7 @@ function linkFamily(db: Db, handle: string, chatId: string, displayName: string 
 async function welcomeFamily(deps: InboxDeps, log: RelayLog, handle: string, chatId: string, patientIds: string[], fields: Record<string, unknown> = {}): Promise<void> {
   if (patientIds.length === 0) return;
   const messenger = deps.messenger ?? new RelayMessenger(deps.relay);
-  const normalized = familyHandle(handle);
+  const normalized = normalizeHandle(handle);
   for (const patientId of patientIds) {
     const patient = getCheckinPatient(deps.db, patientId);
     if (!patient) continue;

@@ -1,4 +1,5 @@
 import { screenMessage } from "../safety/screen.ts";
+import { softenDashes } from "../text.ts";
 import type { CareAudience, CareContact, CareContacts } from "./contacts.ts";
 import {
   displayPhone,
@@ -134,10 +135,7 @@ const DOSING_ADVICE = [
  * not be sent (empty, too long, or reads as dosing advice), so the template answer goes instead.
  */
 export function guardReply(text: string, audience: CareAudience): string | undefined {
-  let cleaned = text
-    .trim()
-    .replace(/\s*[\u2014\u2013]\s*/g, ", ")
-    .replace(/\*\*|__|^#+\s*/gm, "");
+  let cleaned = softenDashes(text.trim()).replace(/\*\*|__|^#+\s*/gm, "");
   if (audience === "family") cleaned = cleaned.replace(/!+/g, ".");
   if (!cleaned) return undefined;
   if (cleaned.length > MAX_REPLY_CHARS[audience]) return undefined;

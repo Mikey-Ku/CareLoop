@@ -6,7 +6,8 @@ import { loadRxNavCache } from "../finchnode/fixtures.ts";
 import { activeMedications, ageOn, asOf, normalizeHealthRecord, type Measurement, type PatientRecord } from "../finchnode/normalize.ts";
 import type { RxNavCache } from "../finchnode/rxnav.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
-import { latestFill, plusDays } from "../meds/refills.ts";
+import { addDays } from "../days.ts";
+import { latestFill } from "../meds/refills.ts";
 import { plainName } from "../meds/schedule.ts";
 import type { Evidence, RuleId, Severity } from "../rules/index.ts";
 import type { Discrepancy } from "../rules/paper-diff.ts";
@@ -151,7 +152,7 @@ export type BuildDoctorReportOptions = {
 
 /** The first day of a report week ending on `day`. */
 export function weekStart(day: string): string {
-  return plusDays(day, -(REPORT_DAYS - 1));
+  return addDays(day, -(REPORT_DAYS - 1));
 }
 
 /** YYYY-MM-DD of an instant in a time zone. */
@@ -169,7 +170,7 @@ export function localClock(iso: string, timezone: string): string {
 /** Every day from `from` to `to`, both included. */
 export function daysBetween(from: string, to: string): string[] {
   const out: string[] = [];
-  for (let d = from; d <= to && out.length < 366; d = plusDays(d, 1)) out.push(d);
+  for (let d = from; d <= to && out.length < 366; d = addDays(d, 1)) out.push(d);
   return out;
 }
 
@@ -280,7 +281,7 @@ export function buildDoctorReport(db: Db, patientId: string, options: BuildDocto
           sig: m.sig ?? null,
           lastFill: fill?.date ?? null,
           daysSupply: fill?.daysSupply ?? null,
-          runsOut: fill ? plusDays(fill.date, fill.daysSupply) : null,
+          runsOut: fill ? addDays(fill.date, fill.daysSupply) : null,
         };
       })
     : [];

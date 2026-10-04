@@ -9,7 +9,7 @@ import { getCheckinPatient } from "../db/checkins.ts";
 import { familyChats } from "../db/family.ts";
 import { addVisitQuestion } from "../db/notes.ts";
 import { addVitalsReading } from "../db/vitals.ts";
-import { type Config } from "../config.ts";
+import { normalizeHandle, type Config } from "../config.ts";
 import type { Db } from "../db/index.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import type { VitalsResult } from "../vitals/types.ts";
@@ -470,7 +470,7 @@ export class CallService implements CallEventHandler {
 
   /** Only her own Relay handle gets the call. */
   #patientForCall(call: Call): { id: string; finchnodePatientId: string; preferredName: string } | undefined {
-    const caller = normalize(call.from.handle);
+    const caller = normalizeHandle(call.from.handle);
     if (!caller) return undefined;
     const rows = this.#options.db.prepare(`SELECT id, finchnode_patient_id AS finchnodePatientId, preferred_name AS preferredName, relay_handle AS relayHandle FROM patients`).all() as {
       id: string;
@@ -478,7 +478,7 @@ export class CallService implements CallEventHandler {
       preferredName: string;
       relayHandle: string | null;
     }[];
-    return rows.find((row) => row.relayHandle !== null && normalize(row.relayHandle) === caller);
+    return rows.find((row) => row.relayHandle !== null && normalizeHandle(row.relayHandle) === caller);
   }
 
   /** Anyone else: the call is ended with a short polite message in their chat. Nothing from her record is read. Never throws. */
@@ -496,8 +496,6 @@ export class CallService implements CallEventHandler {
     }
   }
 }
-
-const normalize = (handle: string) => handle.trim().replace(/^@/, "").toLowerCase();
 
 /**
  * The ElevenLabs Agents server events the call reads, with only the fields used here (read as unknown: the
