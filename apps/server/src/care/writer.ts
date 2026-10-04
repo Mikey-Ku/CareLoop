@@ -12,6 +12,7 @@ import {
   localTime,
 } from "./copy.ts";
 import { LEVEL_WORDS, type CareFacts } from "./facts.ts";
+import type { SharingLevel } from "../db/index.ts";
 import { guardReply, type ReplyRequest, type ReplyWriter } from "./replies.ts";
 
 // The care texts' wording through the shared LlmClient (Gemini; one provider for the app). The model
@@ -22,8 +23,9 @@ import { guardReply, type ReplyRequest, type ReplyWriter } from "./replies.ts";
 //     the fixed paragraph about anything urgent, and the fixed closing.
 //   Replies to their texts: worded from the facts, the summary as sent and the thread.
 // So a model can't drop or soften what is urgent. Every written text is checked (checkWritten:
-// length, dashes, markdown, dosing advice, diagnosis words, 911, numbers not in the facts); on any
-// failure the fixed template (src/care/copy.ts) goes out instead.
+// length, dashes, markdown, dosing advice, diagnosis words, 911, numbers not in the facts, and for
+// the family below the "all" sharing level any claim that nothing was wrong); on any failure the
+// fixed template (src/care/copy.ts) goes out instead.
 
 /** Longest written body or reply, in characters, per reader. */
 export const MAX_WRITTEN_CHARS: Record<CareAudience, number> = { doctor: 1200, family: 900 };
@@ -38,15 +40,26 @@ export const DOSING_ADVICE = [
 export const DIAGNOSIS = /\bdiagnos\w*|\b(likely|probably|could be|might be|sounds like|suggests?|consistent with)\s+(a |an )?(heart failure|infection|stroke|heart attack|pneumonia|fluid|kidney|bleed)/i;
 
 /**
+ * "She had no symptoms", "nothing to report", "doing well": claims that nothing was wrong. Below the "all"
+ * sharing level her answers are withheld from the family, so the model has no basis for them, and a
+ * family member reads them as reassurance. ("Nothing urgent" is fine: whether something was urgent is
+ * shown to them.)
+ */
+const NOTHING_WRONG =
+  /\b(?:no|any|without)\s+(?:new\s+|other\s+|further\s+)?(?:symptoms?|health\s+concerns?|concerns?|problems?|issues?|complaints?)\b|\bdid(?:\s+not|n't)\s+(?:report|mention|share|say|describe|have)\b|\bnothing\s+(?:to\s+report|unusual|new|wrong|concerning)\b|\b(?:all|everything)\s+(?:is\s+|was\s+|seems?\s+|looks?\s+)?(?:good|fine|well|normal|okay)\b|\b(?:doing|feeling|going)\s+(?:well|fine|great|good)\b/i;
+
+/**
  * A written text fit to send, or undefined. Cleans markdown and (for the family) exclamation marks, then
  * rejects: empty or too long, long dashes, dosing advice, diagnosis words, 911 (only fixed copy says
- * 911), and any number above 20 that isn't in the facts it was written from (no invented values).
+ * 911), any number above 20 that isn't in the facts it was written from (no invented values), and, for the
+ * family below the "all" sharing level, a claim that nothing was wrong.
  */
-export function checkWritten(text: string, audience: CareAudience, facts: unknown): string | undefined {
+export function checkWritten(text: string, audience: CareAudience, facts: unknown, sharing: SharingLevel = "all"): string | undefined {
   const cleaned = guardReply(text, audience);
   if (!cleaned || cleaned.length > MAX_WRITTEN_CHARS[audience]) return undefined;
   if (/[–—]/.test(text)) return undefined;
   if (DOSING_ADVICE.some((re) => re.test(cleaned)) || DIAGNOSIS.test(cleaned) || /\b911\b/.test(cleaned)) return undefined;
+  if (audience === "family" && sharing !== "all" && NOTHING_WRONG.test(cleaned)) return undefined;
   const known = JSON.stringify(facts);
   for (const n of cleaned.match(/\d+(?:\.\d+)?/g) ?? []) {
     if (Number(n) <= 20 && !n.includes(".")) continue; // counts and levels
@@ -156,7 +169,7 @@ export class GeminiCareWriter implements ReplyWriter {
     const view = viewFor(audience, facts, contacts);
     const recipientName = audience === "doctor" ? contacts.doctor.name : contacts.emergencyContact.name;
     const text = await this.llm.writeCareMessage({ audience, recipientName, seniorName: facts.patient.preferredName, facts: view });
-    const checked = checkWritten(text, audience, view);
+    const checked = checkWritten(text, audience, view, facts.patient.sharing);
     if (!checked || (audience === "doctor" && checked.length > MAX_DOCTOR_OVERVIEW_CHARS)) throw new Error("written summary failed the checks");
     return checked;
   }
@@ -175,7 +188,7 @@ export class GeminiCareWriter implements ReplyWriter {
       thread: request.thread,
     });
     if (text.trim() === CARE_NO_REPLY) return null;
-    const checked = checkWritten(text, audience, { view, summary: request.summaryText });
+    const checked = checkWritten(text, audience, { view, summary: request.summaryText }, request.facts.patient.sharing);
     if (!checked) throw new Error("written reply failed the checks");
     return checked;
   }
