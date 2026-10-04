@@ -87,3 +87,17 @@ export function callTranscript(db: Db, callId: string): { speaker: TranscriptSpe
     .prepare(`SELECT speaker, text, created_at AS createdAt FROM call_transcript_turns WHERE call_id = ? ORDER BY sequence`)
     .all(callId) as { speaker: TranscriptSpeaker; text: string; createdAt: string }[];
 }
+
+/**
+ * The call whose post-call message ("Here's what I noted from our call") is `messageId`: the call's
+ * result (screening_json) keeps the message id and the check-in date, so her tap finds them.
+ */
+export function callForSummaryMessage(db: Db, messageId: string): { callId: string; patientId: string; day: string; startedAt: string } | undefined {
+  return db
+    .prepare(
+      `SELECT call_id AS callId, patient_id AS patientId, json_extract(screening_json, '$.day') AS day, started_at AS startedAt
+       FROM call_sessions WHERE screening_json IS NOT NULL AND json_valid(screening_json)
+         AND json_extract(screening_json, '$.summaryMessageId') = ?`,
+    )
+    .get(messageId) as { callId: string; patientId: string; day: string; startedAt: string } | undefined;
+}

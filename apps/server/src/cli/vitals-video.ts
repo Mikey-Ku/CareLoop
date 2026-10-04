@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { hasUsableVitals, runPresageVideo } from "../vitals/presage-file.ts";
 
-const USAGE = "usage: npm run vitals:video -- <video.mp4> [--metrics pulse-breathing|all] [--timeout-ms milliseconds] [--interframe-delay-ms milliseconds]";
+const USAGE = "usage: npm run vitals:video -- <video.mp4> [--metrics pulse-breathing] [--timeout-ms milliseconds] [--interframe-delay-ms milliseconds]";
 
 export async function main(argv: string[], env: Record<string, string | undefined> = process.env): Promise<number> {
   let parsed;
@@ -43,8 +43,8 @@ export async function main(argv: string[], env: Record<string, string | undefine
     return 2;
   }
   const metricProfile = parsed.values.metrics === undefined ? undefined : parsed.values.metrics;
-  if (metricProfile !== undefined && metricProfile !== "pulse-breathing" && metricProfile !== "all") {
-    console.error("error: --metrics must be pulse-breathing or all");
+  if (metricProfile !== undefined && metricProfile !== "pulse-breathing") {
+    console.error("error: --metrics must be pulse-breathing (blood pressure and HRV are never requested)");
     return 2;
   }
 

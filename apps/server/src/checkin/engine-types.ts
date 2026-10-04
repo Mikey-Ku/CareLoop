@@ -3,6 +3,8 @@ import type { HealthRecord } from "../finchnode/types.ts";
 import type { LlmClient } from "../llm/types.ts";
 import type { InboundMessage, Messenger } from "../relay/messenger.ts";
 import type { ExtractedPaper } from "../rules/paper-diff.ts";
+import type { SafetyKind } from "../safety/screen.ts";
+import type { UnderstoodItem } from "./copy.ts";
 
 // Contract for the check-in engine (src/checkin/engine.ts). The terminal
 // simulator and, in run 2, the Relay webhook server both drive it through this.
@@ -31,9 +33,38 @@ export type EngineDeps = {
  * Extra fields on a stored answer (checkins.answers_json) when what she typed was mapped to a
  * button: how it came in and her words. "free_text": her words were read as that answer.
  * "confirmed": her words suggested it on a red-flag question and she tapped "Yes, that's right".
+ * "voice": she said it on a video check-in call (recordSpokenCheckin); `freeText` is what she said.
  * A tap, or typing the label itself, stores neither.
  */
-export type FreeTextAnswer = { via: "free_text" | "confirmed"; freeText: string };
+export type FreeTextAnswer = { via: "free_text" | "confirmed" | "voice"; freeText: string };
+
+/** One thing she said on a call: `id` is stable for the turn (it dedupes the safety path), `text` her words. */
+export type SpokenTurn = { id: string; text: string };
+
+/** What the call's voice may know before it starts: no record details beyond what the check-in uses. */
+export type CallCheckinContext = {
+  firstName: string;
+  /** Today's check-in questions she hasn't answered yet (none when the day's check-in is done). */
+  questions: { id: string; text: string }[];
+  /** Yesterday's level 1+ topics in plain words ("ankle swelling", "knee pain"). */
+  yesterday: string[];
+  /** Up to 3 recent memories ("granddaughter visiting Sunday"). */
+  memories: string[];
+  /** Family members with a linked chat (display name, else handle). */
+  familyNames: string[];
+};
+
+/** The severity ladder's reading of what she said on a call. */
+export type SpokenCheckinResult = {
+  /** The highest level, safety included. */
+  level: number;
+  /** Set when the safety screen or the model read a crisis or an urgent symptom. */
+  safety?: SafetyKind;
+  /** What was understood (answers recorded, symptoms by topic), for the fixed read-back lines. */
+  items: UnderstoodItem[];
+  /** The post-call message sent to her chat (record mode only). */
+  summaryMessageId?: string;
+};
 
 export type DayResult =
   | { kind: "sent"; questionIds: string[] }
@@ -82,6 +113,36 @@ export interface CheckinEngine {
    * Idempotent per Relay attachment id. Not a check-in.
    */
   startPaperCheck(patientId: string, paper: ExtractedPaper, attachmentId?: string): Promise<{ scanId: number }>;
+
+  // Video check-in calls (src/calls, docs/CALLS.md): what she says goes through the same safety screen,
+  // understanding pass and severity ladder as what she types.
+
+  /**
+   * Before a call is answered: her first name, today's unanswered questions (the day's check-in is
+   * created without a greeting when there is none yet), yesterday's level 1+ topics, up to 3 memories,
+   * family names. Never throws for a missing record: no questions then.
+   */
+  callCheckinContext(patientId: string, day: string): Promise<CallCheckinContext>;
+  /**
+   * One of her turns as it arrives: the safety screen, and on a hit the same safety path as a typed
+   * message (crisis or urgent reply in her chat, every family chat alerted at every sharing level, an
+   * observation at 4 or 5, a follow-up). Once per turn id.
+   */
+  screenSpokenTurn(patientId: string, turn: SpokenTurn): Promise<{ kind: SafetyKind; level: number } | undefined>;
+  /**
+   * Her call's turns through the understanding pass: the safety screen per turn (as screenSpokenTurn),
+   * extraction against today's unanswered questions with the classifier alongside, fixed rules level
+   * everything. `assessOnly`: the level and what was understood, nothing recorded (safety still acts).
+   * Otherwise answers are recorded via "voice", observations and notes as for typed words, memories
+   * saved, a follow-up at 2, the family alert at 3, and with `callId` ONE message to her chat ("Here's
+   * what I noted from our call: ...", "That's right" / "Something's wrong").
+   */
+  recordSpokenCheckin(
+    patientId: string,
+    day: string,
+    turns: readonly SpokenTurn[],
+    options?: { callId?: string; assessOnly?: boolean; reading?: { heartRate: number | null; breathingRate: number | null } },
+  ): Promise<SpokenCheckinResult>;
   /**
    * Follow-up job (the agent runs it every minute; the simulator on /later): sends every follow-up
    * check-in due by `now` (ISO), "Checking in again, Harriet. How is your breathing now?" with

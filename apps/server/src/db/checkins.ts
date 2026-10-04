@@ -19,7 +19,7 @@ export type StoredAnswer = {
   answer: string;
   at: string;
   level?: number;
-  via?: "free_text" | "confirmed";
+  via?: "free_text" | "confirmed" | "voice";
   freeText?: string;
 };
 

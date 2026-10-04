@@ -1,5 +1,5 @@
 import { VideoBufferType, VideoStream, type RelayAudioFrame, type RelayCallTransport, type RemoteVideoTrack } from "@relaymessenger/sdk/calls";
-import { breathingMetrics, cardioMetrics, MetricType, ProcessingStatus, SmartSpectraSDK } from "@smartspectra/node-sdk";
+import { MetricType, ProcessingStatus, SmartSpectraSDK } from "@smartspectra/node-sdk";
 import { decodeMetrics } from "@smartspectra/node-sdk/messages";
 import { createRelayVideoFrameAdapter, type FrameSink } from "../vitals/relay-frame-adapter.ts";
 import { mergeMetricSnapshots, normalizePresageMetrics, resultFromSnapshot, type MetricSnapshot } from "../vitals/normalize.ts";
@@ -12,6 +12,8 @@ export type RelayVideoLogger = (event: string, fields?: Record<string, unknown>)
 export type RelayPresageBridgeOptions = {
   apiKey: string;
   quietDurationMs?: number;
+  /** VITALS_MIN_CONFIDENCE (0 to 100). */
+  minConfidence?: number;
   sessionFactory?: (options: { apiKey: string; requestedMetrics: number[] }) => PresageCustomSession;
   now?: () => number;
   log?: RelayVideoLogger;
@@ -22,7 +24,11 @@ type PresageCustomSession = PresageSession & {
   sendFrame(buffer: Uint8Array | Buffer, width: number, height: number, stride: number, pixelFormat: number, timestampUs: number): boolean;
 };
 
-const requestedMetrics = [MetricType.BREATHING_RATE, MetricType.PULSE_RATE, ...breathingMetrics, ...cardioMetrics];
+/**
+ * Pulse rate and breathing rate only: what Presage's clearance covers (docs/BRIEF.md constraints). Never
+ * blood pressure or HRV, so neither can be shown or said.
+ */
+export const REQUESTED_METRICS: readonly number[] = Object.freeze([MetricType.PULSE_RATE, MetricType.BREATHING_RATE]);
 
 /** Relay VideoStream to SmartSpectra. It computes speech activity from samples but never stores audio. */
 export class RelayPresageBridge {
@@ -45,7 +51,7 @@ export class RelayPresageBridge {
     this.#log = options.log ?? (() => {});
     this.#now = options.now ?? (() => Date.now());
     this.quiet = new QuietMeasurement(options.quietDurationMs ?? 30_000);
-    this.#session = (options.sessionFactory ?? ((input) => new SmartSpectraSDK(input)))({ apiKey: options.apiKey, requestedMetrics });
+    this.#session = (options.sessionFactory ?? ((input) => new SmartSpectraSDK(input)))({ apiKey: options.apiKey, requestedMetrics: [...REQUESTED_METRICS] });
     this.#session.on("metrics", (buffer, timestampUs) => {
       try {
         this.#snapshot = mergeMetricSnapshots(this.#snapshot, normalizePresageMetrics(decodeMetrics(buffer), timestampUs));
@@ -80,7 +86,7 @@ export class RelayPresageBridge {
 
   result(): VitalsResult {
     const raw = resultFromSnapshot("relay_video", this.#snapshot, this.#validation, this.#errors, { timestampOriginMs: this.#now() });
-    return this.quiet.finish(raw);
+    return this.quiet.finish(raw, this.#options.minConfidence);
   }
 
   async stop(): Promise<VitalsResult> {

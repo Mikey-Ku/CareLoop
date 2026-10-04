@@ -53,6 +53,10 @@ const ConfigSchema = z.object({
   ELEVENLABS_AGENT_ID: z.string().optional(),
   ELEVENLABS_TOOL_SECRET: z.string().optional(),
   CALL_QUIET_MEASUREMENT_MS: z.coerce.number().int().min(30_000).max(45_000).default(30_000),
+  /** Longest call; the server ends the ElevenLabs session after it (Relay's 32 s is only the time to answer). */
+  CALL_MAX_MINUTES: z.coerce.number().positive().max(30).default(4),
+  /** Lowest SmartSpectra confidence (0 to 100) a camera reading needs to be used. 1 keeps out warm-up zeros; the team tunes it. */
+  VITALS_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(1),
 });
 
 export type RelayConfig = {
@@ -98,6 +102,10 @@ export type CallsConfig = {
   presageApiKey: string | undefined;
   /** SmartSpectra's minimum quiet window for breathing. */
   quietMeasurementMs: number;
+  /** CALL_MAX_MINUTES: the server ends the call after this long. */
+  maxMinutes: number;
+  /** VITALS_MIN_CONFIDENCE: lowest SmartSpectra confidence (0 to 100) a reading needs. */
+  vitalsMinConfidence: number;
 };
 
 export type Config = {
@@ -149,6 +157,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     elevenLabsToolSecret: undefined,
     presageApiKey: undefined,
     quietMeasurementMs: c.CALL_QUIET_MEASUREMENT_MS,
+    maxMinutes: c.CALL_MAX_MINUTES,
+    vitalsMinConfidence: c.VITALS_MIN_CONFIDENCE,
   };
   Object.defineProperty(calls, "elevenLabsApiKey", { value: ELEVENLABS_API_KEY?.trim() || undefined, enumerable: false });
   Object.defineProperty(calls, "elevenLabsToolSecret", { value: ELEVENLABS_TOOL_SECRET?.trim() || undefined, enumerable: false });
