@@ -378,6 +378,23 @@ describe("reminder answers and the check-in", () => {
     expect(await engine.runMedsNudges(now)).toBe(0);
   });
 
+  it("a re-reminder that couldn't go out near its time is dropped, never sent the next morning", async () => {
+    now = `${DAY}T20:00:00.000Z`;
+    await engine.sendMedsReminder(P, DAY, "evening");
+    await say(MEDS_BUTTONS.notYet, lastMine());
+    later(90); // due at 21:00, the agent comes back at 21:30: still goes
+    expect(await engine.runMedsNudges(now)).toBe(1);
+
+    setup();
+    now = `${DAY}T20:00:00.000Z`;
+    await engine.sendMedsReminder(P, DAY, "evening");
+    await say(MEDS_BUTTONS.notYet, lastMine());
+    now = "2026-07-29T08:00:00.000Z"; // the agent was down all night
+    await engine.sendMedsReminder(P, "2026-07-29", "morning");
+    expect(await engine.runMedsNudges(now)).toBe(0);
+    expect(messenger.sent.filter((m) => m.text.includes("gentle reminder"))).toEqual([]);
+  });
+
   it("Taken answers the check-in's morning-medicines question, so it isn't asked", async () => {
     await engine.sendMedsReminder(P, DAY, "morning");
     const reminder = lastMine();
