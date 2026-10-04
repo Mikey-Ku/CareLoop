@@ -148,26 +148,38 @@ describe("camera transport lifecycle", () => {
     expect(f.destroy).toHaveBeenCalledOnce();
   });
 
-  it("invalidates a measurement if the camera stalls", async () => {
+  it("invalidates a measurement if the camera goes silent", async () => {
     const f = fixture(); const track = f.track();
     f.handlers.get("trackSubscribed")!(track.result);
     f.bridge.beginQuietMeasurement(true);
     track.frame(1, 0); await f.flush();
-    track.frame(30_000_001, 30_000); await f.flush();
+    f.setNow(30_000); // no frame for 30 s: noticed when asked
+    expect(f.bridge.measuring()).toBe(false);
     expect(f.bridge.quiet.status).toBe("interrupted");
     expect(f.bridge.result().heartRate).toBeNull();
     expect(f.sent).toEqual([f.epoch(1)]);
     await f.bridge.stop();
   });
 
-  it("releases the producer on a frame processing failure and destroys after a stop failure", async () => {
+  it("survives a frame processing failure (the session restarts once, the next frames are accepted) and destroys after a stop failure", async () => {
     const f = fixture(); const track = f.track();
     f.handlers.get("trackSubscribed")!(track.result);
     f.bridge.beginQuietMeasurement(true);
-    f.session.sendFrame = () => { throw new Error("bad frame"); };
-    track.frame(1, 0); await f.flush();
-    expect(track.unsubscribe).toHaveBeenCalledOnce();
-    expect(f.bridge.quiet.status).toBe("interrupted");
+    const accept = f.session.sendFrame;
+    let fail = true;
+    f.session.sendFrame = (...args: Parameters<typeof accept>) => {
+      if (fail) { fail = false; throw Object.assign(new Error("bad frame"), { code: 11 }); }
+      return accept(...args);
+    };
+    track.frame(10_000_000, 0); await f.flush();
+    expect(track.unsubscribe).not.toHaveBeenCalled();
+    expect(f.bridge.quiet.status).toBe("measuring");
+    expect(f.stopAsync).toHaveBeenCalledOnce();
+    expect(f.session.start).toHaveBeenCalledTimes(2);
+    track.frame(11_000_000, 1_000); await f.flush();
+    track.frame(12_000_000, 2_000); await f.flush();
+    expect(f.sent).toEqual([f.epoch(11_000_000), f.epoch(12_000_000)]);
+    expect(f.stopAsync).toHaveBeenCalledOnce();
     f.stopAsync.mockRejectedValue(new Error("failed drain"));
     await f.bridge.stop();
     expect(f.destroy).toHaveBeenCalledOnce();
