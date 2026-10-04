@@ -1,6 +1,6 @@
 import { inspect } from "node:util";
 import { describe, expect, it } from "vitest";
-import { ConfigError, DEFAULT_GEMINI_MODELS, loadConfig, normalizeHandle, parseHandles, resolveCheckinDate } from "../src/config.ts";
+import { ConfigError, DEFAULT_GEMINI_CALL_MODELS, DEFAULT_GEMINI_MODELS, loadConfig, normalizeHandle, parseHandles, resolveCheckinDate } from "../src/config.ts";
 
 const TOKEN = "relay_agent_tok_SECRET_123";
 
@@ -140,7 +140,8 @@ describe("LLM settings", () => {
 
   it("defaults to gemini, the two measured models and a 12 s budget, with no key", () => {
     const c = loadConfig({});
-    expect(c.llm).toEqual({ provider: "gemini", geminiModels: [...DEFAULT_GEMINI_MODELS], timeoutMs: 12_000, attemptTimeoutMs: 4_000 });
+    expect(c.llm).toEqual({ provider: "gemini", geminiModels: [...DEFAULT_GEMINI_MODELS], geminiCallModels: [...DEFAULT_GEMINI_CALL_MODELS], timeoutMs: 12_000, attemptTimeoutMs: 4_000 });
+    expect(c.llm.geminiCallModels[0]).toMatch(/lite/); // calls start on a fast model
     expect(c.llm.geminiApiKey).toBeUndefined();
     expect(loadConfig({ GEMINI_API_KEY: "  " }).llm.geminiApiKey).toBeUndefined();
   });

@@ -6,21 +6,24 @@ import type { CheckinEngine, Clock, EngineDeps } from "../checkin/engine-types.t
 import { SHARING_BUTTONS, SHARING_MENU_BUTTON } from "../checkin/copy.ts";
 import { loadConfig, normalizeHandle, resolveCheckinDate, type Config } from "../config.ts";
 import { addDays } from "../days.ts";
-import { familyChats, linkFamilyMember, syncFamilyMembers, type FamilyChat } from "../db/family.ts";
+import { familyChats, familyMembersForChat, linkFamilyMember, syncFamilyMembers, type FamilyChat } from "../db/family.ts";
 import { nextFollowUp } from "../db/follow-ups.ts";
 import { nextNudge } from "../db/meds.ts";
 import { getSharing, openDatabase, upsertPatient, type Db, type SharingLevel } from "../db/index.ts";
 import { latestPaperScan, type PaperScanRow } from "../db/paper-scans.ts";
+import { addVitalsReading } from "../db/vitals.ts";
 import { ConsentInactiveError, FinchNodeClient } from "../finchnode/client.ts";
 import { FIXTURES_DIR, REPO_ROOT, hasRecordedSnapshot, loadRecorded, loadRxNavCache, replayFetch } from "../finchnode/fixtures.ts";
 import { normalizeHealthRecord, type PatientRecord } from "../finchnode/normalize.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import {
+  HISTORY_TOPICS,
   LlmUnavailableError,
   MESSAGE_KINDS,
   type Amount,
   type Change,
   type CheckinExtraction,
+  type HistoryTopic,
   type ImageReading,
   type LlmClient,
   type MessageClassification,
@@ -29,6 +32,7 @@ import {
 } from "../llm/types.ts";
 import { BUTTON_LEVELS, TYPED_LEVELS } from "../checkin/severity.ts";
 import { patientIdFor } from "../patient-id.ts";
+import { passOnFamilyMessage } from "../relay/family-inbound.ts";
 import { FakeMessenger } from "../relay/fake-messenger.ts";
 import type { InboundMessage, SentMessage } from "../relay/messenger.ts";
 import type { ExtractedPaper } from "../rules/paper-diff.ts";
@@ -307,6 +311,7 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
   let inboundCount = 0;
   let paperCount = 0;
   let photoCount = 0;
+  let familyCount = 0;
 
   const latestInSeniorChat = (): SentMessage | undefined => messenger.lastIn(seniorChat);
   const latestWithButtons = (): SentMessage | undefined => {
@@ -354,7 +359,7 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     const [head = "", ...parts] = args.join(" ").split("|").map((p) => p.trim());
     const [kind, ...rest] = head.split(/\s+/).filter(Boolean);
     const usage = () => {
-      note(`usage: /as <${MESSAGE_KINDS.join("|")}> [answer] [| topic, ${Object.keys(TYPED_LEVELS).join("|")}, new|worse|same|better|unknown]`, "red");
+      note(`usage: /as <${MESSAGE_KINDS.join("|")}> [answer, or a history topic] [| topic, ${Object.keys(TYPED_LEVELS).join("|")}, new|worse|same|better|unknown]`, "red");
       note("   or: /as extract [questionId=answer; ...] [| topic, amount, change]... (her next typed message in the check-in)", "red");
       return "error" as const;
     };
@@ -381,6 +386,17 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
       return "ok";
     }
     const answer = rest.join(" ");
+    if (kind === "history_question") {
+      // /as history_question <topic>: what she asks about; the answer is built from the digest as in the agent.
+      const historyTopic = (answer || "other") as HistoryTopic;
+      if (!HISTORY_TOPICS.includes(historyTopic)) {
+        note(`usage: /as history_question <${HISTORY_TOPICS.join("|")}>`, "red");
+        return "error";
+      }
+      scripted.push({ kind: "history_question", confidence: "high", complaints: [], memories: [], symptoms, historyTopic });
+      note(`Her next typed message is read as a history question about ${historyTopic}${said ? `, mentioning ${said}` : ""} (a stand-in for the LLM).`);
+      return "ok";
+    }
     scripted.push({ kind: kind as MessageKind, confidence: "high", complaints: [], memories: [], ...(answer ? { answer } : {}), symptoms });
     note(`Her next typed message is read as ${kind}${answer ? ` "${answer}"` : ""}${said ? `, mentioning ${said}` : ""} (a stand-in for the LLM).`);
     return "ok";
@@ -610,6 +626,34 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
         return photoCommand(args);
       case "/as":
         return asCommand(args);
+      case "/reading": {
+        // A camera heart rate estimate, as a video call would save it (for the history questions' demo).
+        const bpm = Number(args[0]);
+        if (!Number.isFinite(bpm) || bpm < 30 || bpm > 220) {
+          note("usage: /reading <heart rate, 30 to 220>", "red");
+          return "error";
+        }
+        addVitalsReading(db, { patientId, takenAt: clock.now(), heartRate: bpm, breathingRate: null, method: "scan_screen", confidence: null });
+        note(`Camera heart rate estimate saved: about ${Math.round(bpm)} (a stand-in for a call's reading).`);
+        return "ok";
+      }
+      case "/from": {
+        // A family member's message to her, passed on as in the agent (src/relay/family-inbound.ts).
+        const [handle = "", ...words] = args;
+        const member = family.find((f) => f.handle === normalizeHandle(handle));
+        if (!member || words.length === 0) {
+          note(`usage: /from <${family.map((f) => f.handle).join("|") || "no family linked"}> <what they write>`, "red");
+          return "error";
+        }
+        clock.tick();
+        familyCount += 1;
+        await passOnFamilyMessage({ db, messenger, now: () => clock.now() }, familyMembersForChat(db, member.chatId), {
+          chatId: member.chatId,
+          messageId: `sim-${runId}-family-${familyCount}`,
+          text: words.join(" "),
+        });
+        return "ok";
+      }
       case "/db":
         dbCommand();
         return "ok";

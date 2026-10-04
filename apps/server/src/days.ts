@@ -18,3 +18,8 @@ export function addDays(day: string, n: number): string {
   const [y, mo, d] = day.split("-").map(Number) as [number, number, number];
   return new Date(Date.UTC(y, mo - 1, d) + n * DAY_MS).toISOString().slice(0, 10);
 }
+
+/** "Mon" for a YYYY-MM-DD date. */
+export function weekdayShort(day: string): string {
+  return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date(`${day}T00:00:00Z`).getUTCDay()] ?? "";
+}

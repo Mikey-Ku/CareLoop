@@ -277,7 +277,7 @@ describe("2. the LLM reads it; when it can't", () => {
     setup({ classifyMessage: () => as("more_detail") });
     await atBreathing();
     await say("it was odd");
-    expect(llm?.classifyCalls[0]).toEqual({ seniorName: "Harriet", message: "it was odd", pending: { question: breathing.text, options: breathing.buttons } });
+    expect(llm?.classifyCalls[0]).toEqual({ seniorName: "Harriet", message: "it was odd", pending: { question: breathing.text, options: breathing.buttons }, context: expect.any(String) });
   });
 
   it("her open reply goes to the extraction with today's questions, and to the classifier with nothing pending", async () => {
@@ -289,9 +289,10 @@ describe("2. the LLM reads it; when it can't", () => {
         seniorName: "Harriet",
         message: "slept fine",
         questions: [breathing, bleeding, dizzy].map((q) => ({ id: q.id, question: q.text, options: q.buttons })),
+        context: expect.any(String),
       },
     ]);
-    expect(llm?.classifyCalls).toEqual([{ seniorName: "Harriet", message: "slept fine", pending: undefined }]);
+    expect(llm?.classifyCalls).toEqual([{ seniorName: "Harriet", message: "slept fine", pending: undefined, context: expect.any(String) }]);
   });
 });
 

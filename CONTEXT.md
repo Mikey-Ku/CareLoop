@@ -56,6 +56,16 @@ _Avoid_: Alert, warning, issue
 An answer she gives during a check-in that a fixed rule treats as urgent, such as trouble breathing with heart failure; it tells her to call her doctor and alerts the family.
 _Avoid_: Emergency, alarm, flag (alone)
 
+### Chat
+
+**Context digest**:
+The compact text rebuilt from the database and her stored record on every message (who she is, today, the last 7 days, what stands). Gemini reads it as reference facts to understand what she means, and the fixed history answers are worded from it; it never decides a level, a flag or an alert.
+_Avoid_: Context packet (the voice call's, built from one snapshot), memory, prompt, summary
+
+**History question**:
+A typed message in which she asks about her own recent history (did I take my pills, what did Sarah say). The model only picks its topic; the answer is a fixed template filled from the context digest.
+_Avoid_: Memory question, lookup
+
 ### Permissions
 
 **Record consent**:

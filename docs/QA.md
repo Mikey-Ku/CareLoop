@@ -74,8 +74,8 @@ npm run simulate -- --reset --db :memory: --day 2026-09-01 --sharing all --famil
 ```
 
 - Options: `--day`, `--reset` (deletes `data/simulator.db` first), `--db path` (`:memory:` keeps nothing), `--script file`, `--sharing status|status_vitals|all`, `--family sarah,tom`, `--llm` (reads typed text with Gemini from `.env`; without it, buttons only), `--photon` (fake Photon care texts), `--live` (live FinchNode instead of fixtures).
-- Commands: `/next`, `/day YYYY-MM-DD`, `/noon` (missed job), `/later` (jump to the next follow-up or medicines re-reminder), `/meds`, `/evening`, `/refills`, `/photo <file> [--as label:<name>,<strength>,<instructions> | papers | unreadable | other]`, `/paper`, `/flags`, `/sharing <level>`, `/summary`, `/doctor <text>`, `/family <text>`, `/as <kind> ...` (stands in for Gemini on the next message), `/db`, `/help`, `/quit`.
-- Demo scripts in `scripts/demo/`: `harriet-day1`, `harriet-open`, `harriet-two-days`, `harriet-ladder`, `harriet-red-flag`, `harriet-red-flag-typed`, `harriet-crisis`, `harriet-not-today`, `harriet-sharing`, `harriet-paper`, `harriet-meds` (use `--day 2026-07-28`), `harriet-care-summary` (use `--photon`), `harriet-week` (use `--day 2026-08-26`, then `npm run report`).
+- Commands: `/next`, `/day YYYY-MM-DD`, `/noon` (missed job), `/later` (jump to the next follow-up or medicines re-reminder), `/meds`, `/evening`, `/refills`, `/photo <file> [--as label:<name>,<strength>,<instructions> | papers | unreadable | other]`, `/paper`, `/flags`, `/sharing <level>`, `/summary`, `/doctor <text>`, `/family <text>`, `/as <kind> ...` (stands in for Gemini on the next message; `/as history_question <topic>` for a history question), `/reading <bpm>` (a camera heart rate estimate), `/from <handle> <text>` (a family member's message to her), `/db`, `/help`, `/quit`.
+- Demo scripts in `scripts/demo/`: `harriet-day1`, `harriet-open`, `harriet-two-days`, `harriet-ladder`, `harriet-red-flag`, `harriet-red-flag-typed`, `harriet-crisis`, `harriet-not-today`, `harriet-sharing`, `harriet-paper`, `harriet-meds` (use `--day 2026-07-28`), `harriet-care-summary` (use `--photon`), `harriet-week` (use `--day 2026-08-26`, then `npm run report`), `harriet-history`.
 - The simulator has no way for a family member to write back in Relay ("Sarah says"). Test that on phones.
 
 ---
@@ -151,6 +151,10 @@ Before each: agent running with a fresh `CLOCK_DATE` (or fresh database), `FOLLO
 - Expect: answered within 10 seconds; first sentence says it is an AI; asks today's questions; quiet prompt; heart rate as a camera estimate with no usual-range words; a medicine question gets a pointer to her doctor or pharmacist, never advice (this is Gemini's wording on a call, so check it); goodbye naming Sarah; ends by about 3 minutes (cut at 4). Then one "Here's what I noted from our call: ..." message with [That's right] [Something's wrong].
 4. Second call: say "I have chest pain". Expect the 911 reply and Sarah alerted during the call.
 5. Write down the heart rate next to Presage's own app, same person, same minute.
+
+**S13. Ask about her own history**
+1. After the medicines reminder and a check-in, type "did I take my pills today?", then "what did Sarah say?" (Sarah must have sent something), then "when does my refill run out?".
+- Expect: short fixed answers from her records, such as "I have you down as taking your morning medicines at 9:06." No advice and no interpretation. A question it can't answer gets a line listing what it can tell her.
 
 ---
 

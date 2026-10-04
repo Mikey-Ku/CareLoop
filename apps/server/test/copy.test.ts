@@ -76,6 +76,8 @@ import { MAX_ACTIVITY_LABEL, assertValidActivityLabel } from "../src/relay/messe
 import { loadRxNavCache, loadSnapshot } from "../src/finchnode/fixtures.ts";
 import { normalizeHealthRecord } from "../src/finchnode/normalize.ts";
 import { runRules } from "../src/rules/index.ts";
+import { HISTORY_TOPICS } from "../src/llm/types.ts";
+import { sampleDigest } from "./digest-samples.ts";
 import { MEDS_COPY_FUNCTIONS, medsOutputs } from "./meds-samples.ts";
 
 const NAME = "Harriet";
@@ -139,6 +141,8 @@ function allOutputs(): string[] {
   out.push(complaintReply(NAME), smallTalkFallback(NAME));
   out.push(...levelZeroToTwoOutputs());
   out.push(...medsOutputs());
+  // History answers, from a full digest and from an empty one: no 911, no long dashes, no diagnosis words.
+  for (const topic of HISTORY_TOPICS) out.push(copy.historyNothing(topic), copy.historyAnswer(topic, sampleDigest()), copy.historyAnswer(topic, undefined));
   for (const words of HER_WORDS) for (const q of QUESTION_BANK) out.push(freeTextConfirm(words, q.text));
   out.push(copy.PAPER_REJECTED_REPLY, copy.PAPER_LATER_REPLY, copy.PAPER_NOTHING_TO_COMPARE, copy.PAPER_NO_RECORD_REPLY);
   for (const level of LEVELS) {
@@ -230,7 +234,7 @@ describe("copy: style rules across every output", () => {
       "medicineQuestionReply", "noteSaved", "notedForDoctor", "notTodayReply", "openReplyThanks", "openReplyUnavailable", "photoNotYet",
       "recordLinkEndedFamily", "recordLinkEndedSenior", "redFlagAdvice", "sharingChangedFamily", "sharingChangedSenior", "sharingLevelFromButton",
       "sharingMenu", "smallTalkFallback", "sorryNotGreat", "symptomNotedReply", "topicWords", "typedReplyUnavailable", "urgentReply", "withLead",
-      "withTypingHint", "answerPhrase", "suggestedConfirm", "understoodLine",
+      "withTypingHint", "answerPhrase", "suggestedConfirm", "understoodLine", "historyAnswer", "historyNothing",
       "familySays", "familyPassedOn", "familyCantPassOn", "familyEmergencyAbout", "familyCrisisAbout",
       ...MEDS_COPY_FUNCTIONS,
     ].sort();

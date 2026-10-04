@@ -1,3 +1,5 @@
+import { buildDigest, renderDigest, storedRecord, type Digest } from "../context/digest.ts";
+import { guardSmallTalk } from "../context/guard.ts";
 import {
   LET_ME_EXPLAIN,
   QUESTION_BANK,
@@ -121,6 +123,7 @@ import {
   followUpQuestion,
   followUpReply,
   freeTextConfirm,
+  historyAnswer,
   keepAnEye,
   keepAnEyeReply,
   labelNoRecord,
@@ -330,7 +333,10 @@ import {
 //      - medicine_question: fixed reply, saved for her next visit (visit_questions).
 //      - feeling_low: fixed warm reply, saved as a memory, no alert.
 //      - family_message: her message passed on to every linked family chat (or kept until one links).
-//      Symptoms in any of these three (or after "I have a question") get their level's reply first, as in chat.
+//      - history_question: a fixed answer from the context digest (copy.ts historyAnswer), never model words, then the
+//        pending step again. The model only picks the topic (medicines today, last reading, symptoms this week, her
+//        list for the doctor, family messages, refill, other).
+//      Symptoms in any of these (or after "I have a question") get their level's reply first, as in chat.
 //      - chat: the model's small talk. Symptoms she mentions get a fixed reply by level instead (1:
 //        symptomNotedReply, 2: keepAnEyeReply and a follow-up, 3: the red-flag reply and alert); a
 //        complaint with no symptom read gets complaintReply (level-1 wording). While a check-in
@@ -338,6 +344,11 @@ import {
 //      Each reaction while a check-in step waits re-sends that step after it.
 //   Memories and complaints the model picked out are saved as memories (never on a crisis or
 //   urgent symptom), never acted on.
+// Context digest (src/context/digest.ts, docs/DESIGN.md "Context digest"): every reading of her words (classify,
+// the understanding pass, small talk; her open reply; what she says on a call) gets a digest of what the app
+// knows about her, rebuilt from SQLite and her stored record on each message (digestFor, no LLM, no cache), so
+// "same as yesterday" and "the pills" can be understood. It changes no level, flag or alert: fixed rules decide
+// those, and the model's small talk goes out only after the reply guard (src/context/guard.ts).
 // The LLM call is async and planning is a synchronous transaction, so planning runs twice: the
 // first pass stops at typed text and asks for the LLM's reading without writing anything (the
 // message stays unhandled); the second pass plans with it. A message already handled never
@@ -440,6 +451,8 @@ type FreeTextResult = {
   smallTalk: SmallTalkReply | undefined;
   /** The understanding pass's reading (a question was waiting); undefined when not asked for or it failed. */
   extraction?: CheckinExtraction | undefined;
+  /** The context digest small talk was written from: its reply may only state what this and her message say (checkedSmallTalk). */
+  facts?: string | undefined;
 };
 
 /** Her open reply (typed while the greeting waits), which needs the LLM's extraction first. */
@@ -494,11 +507,16 @@ export const MAX_SMALL_TALK_REPLY = 500;
 /** Longest family message passed on, in characters. */
 export const MAX_FAMILY_RELAY = 500;
 
-/** The model's small-talk text if it is fit to send as is, else undefined (the caller sends a template). */
-export function checkedSmallTalk(text: string): string | undefined {
+/**
+ * The model's small-talk text if it is fit to send as is, else undefined (the caller sends a template). With `known`
+ * (the digest it was written from, and her message) it must also pass guardSmallTalk: no dosing words, nothing
+ * medical she should do, no number, medicine or condition name that is in neither. Without it, no such name or
+ * number may appear at all.
+ */
+export function checkedSmallTalk(text: string, known: { digest?: string | undefined; message: string } = { message: "" }): string | undefined {
   const one = text.replace(/[ \t]+/g, " ").trim();
   if (!one || one.length > MAX_SMALL_TALK_REPLY || /[\u2013\u2014]/.test(one)) return undefined;
-  return one;
+  return guardSmallTalk(one, known);
 }
 
 /** Only high and medium confidence answers are recorded. */
@@ -813,16 +831,18 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       classification = { ...classification, kind: "chat", answer: undefined, confidence: "low" };
     const reads = extraction !== undefined && extract !== undefined && extractionReads(extraction, extract.questions);
     let smallTalk: SmallTalkReply | undefined;
+    let facts: string | undefined;
     const wantsSmallTalk =
       !steering && !need.noSmallTalk && !reads && reactionFor(classification, need.at) === "small_talk" && chatBasis(classification) === "talk";
     if (wantsSmallTalk) {
       try {
         smallTalk = await llm.smallTalk(need.smallTalk);
+        facts = need.smallTalk.context;
       } catch {
         smallTalk = undefined; // the fixed fallback reply
       }
     }
-    return { kind: "classify", context: need.context, about: need.about, classification, smallTalk, extraction };
+    return { kind: "classify", context: need.context, about: need.about, classification, smallTalk, extraction, facts };
   }
 
   function requirePatient(patientId: string): CheckinPatient {
@@ -893,6 +913,26 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
   /** The check-in date an observation belongs to: its check-in's, else the latest check-in's, else the clock's. */
   function dayFor(patientId: string, c?: CheckinRow): string {
     return c?.date ?? latestCheckin(db, patientId)?.date ?? clock.now().slice(0, 10);
+  }
+
+  /**
+   * The context digest (src/context/digest.ts) for her next message: rebuilt from the database and her stored
+   * record every time, with no LLM and no cache. Gemini reads it as reference facts, and the history answers are
+   * worded from it. Undefined when it can't be built: the call then goes out without context, as before.
+   */
+  function digestFor(patient: CheckinPatient, day: string): Digest | undefined {
+    try {
+      return buildDigest({ db, patientId: patient.id, day, record: storedRecord(db, patient.id, rxnavCache()), now: clock.now() });
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** The digest as the `context` of an LLM input: `{}` when there is none, so the input has no key at all. */
+  function contextFor(patient: CheckinPatient, day: string): { context?: string } {
+    const digest = digestFor(patient, day);
+    const text = digest ? renderDigest(digest) : "";
+    return text ? { context: text } : {};
   }
 
   /** What the repetition rule needs: her observations on the last REPETITION.days check-in dates up to `day`. */
@@ -1429,6 +1469,8 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     const context = contextKey(ctx);
     const here: NoteTarget | undefined = ctx.at === "question" ? { checkinId: ctx.c.id, questionId: ctx.q.id } : undefined;
     if (deps.llm && understood === undefined) {
+      // The context digest goes to all three readings (classify, small talk, the understanding pass).
+      const digest = contextFor(patient, dayFor(patient.id, ctx.at === "question" || ctx.at === "step" ? ctx.c : pendingCheckin(patient.id)));
       return {
         needs: {
           kind: "classify",
@@ -1437,11 +1479,11 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
           about: here,
           // An explicit yes on a red-flag question, or her medicine question: the reply is fixed.
           noSmallTalk: redFlagYes !== undefined || ctx.at === "meds_question",
-          classify: { seniorName: name, message: text, pending: pendingFor(ctx, name) },
-          smallTalk: { seniorName: name, message: text, memories: recentMemories(db, patient.id, SMALL_TALK_MEMORIES) },
+          classify: { seniorName: name, message: text, pending: pendingFor(ctx, name), ...digest },
+          smallTalk: { seniorName: name, message: text, memories: recentMemories(db, patient.id, SMALL_TALK_MEMORIES), ...digest },
           // The understanding pass, while a question waits (an explicit yes on a red-flag question needs none).
           ...(ctx.at === "question" && redFlagYes === undefined
-            ? { extract: { seniorName: name, message: text, questions: unansweredForExtraction(ctx.c), answeringNow: ctx.c.questionIds[ctx.c.questionIndex] } }
+            ? { extract: { seniorName: name, message: text, questions: unansweredForExtraction(ctx.c), answeringNow: ctx.c.questionIds[ctx.c.questionIndex], ...digest } }
             : {}),
         },
       };
@@ -1520,6 +1562,9 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         return { sends: [...levelled(), reply(feelingLowReply(name)), ...again(patient, ctx, msg)] };
       case "family_message":
         return { sends: [...levelled(), ...planFamilyRelay(patient, msg, text), ...again(patient, ctx, msg)] };
+      case "history_answer":
+        // A symptom in the same message gets its fixed reply by level first, then the answer from her records.
+        return { sends: [...levelled(), reply(historyText(patient, cls)), ...again(patient, ctx, msg)] };
       case "small_talk": {
         const talk = understood?.smallTalk;
         if (talk) addMemories(db, patient.id, [...talk.memories, ...talk.complaints], clock.now());
@@ -1532,7 +1577,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         if (explaining) return { sends: noted() };
         const complaints = basis === "complaint" ? cls.complaints : (talk?.complaints ?? []);
         if (complaints.length > 0) noteComplaints(patient, ctx, complaints);
-        const said = complaints.length > 0 ? complaintReply(name) : talk ? checkedSmallTalk(talk.text) : undefined;
+        const said = complaints.length > 0 ? complaintReply(name) : talk ? checkedSmallTalk(talk.text, { digest: understood?.facts, message: text }) : undefined;
         if (said === undefined && ctx.at !== "none")
           return { sends: [withButtons(patient, ctx, msg, typedReplyUnavailable(answersOf(ctx)), "typed-unavailable")] };
         return { sends: [reply(said ?? smallTalkFallback(name)), ...again(patient, ctx, msg)] };
@@ -1589,7 +1634,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
   function planMedsQuestion(patient: CheckinPatient, msg: InboundMessage, text: string, cls: MessageClassification | undefined): Send[] {
     closeWaitingPrompts(db, patient.id, clock.now(), "meds_question");
     const again = reprompt(patient, msg.chatId, msg.messageId);
-    if (cls?.kind === "feeling_low" || cls?.kind === "family_message") return [...kindReply(patient, msg, cls, text), ...again];
+    if (cls?.kind === "feeling_low" || cls?.kind === "family_message" || cls?.kind === "history_question") return [...kindReply(patient, msg, cls, text), ...again];
     if (!looksLikeInstructions(text)) addVisitQuestion(db, { patientId: patient.id, text, createdAt: clock.now() });
     return [{ chatId: msg.chatId, message: { text: medicineQuestionReply(patient.preferredName) }, key: `${patient.id}:reply:${msg.messageId}` }, ...again];
   }
@@ -1754,12 +1799,13 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       return { sends: p ? [withButtons(patient, { at: "step", c, prompt: p }, msg, didntUnderstand(p.buttons), "didnt-understand")] : [] };
     }
     if (deps.llm && reading === undefined) {
+      const digest = contextFor(patient, c.date);
       return {
         needs: {
           kind: "extract",
           context: openContext(c),
-          extract: { seniorName: name, message: text, questions: unansweredForExtraction(c) },
-          classify: { seniorName: name, message: text, pending: undefined },
+          extract: { seniorName: name, message: text, questions: unansweredForExtraction(c), ...digest },
+          classify: { seniorName: name, message: text, pending: undefined, ...digest },
         },
       };
     }
@@ -1884,7 +1930,9 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
    */
   function applyUnderstanding(patient: CheckinPatient, msg: InboundMessage, c: CheckinRow, u: Understanding, text: string, cls: MessageClassification | undefined): Send[] {
     const now = clock.now();
-    const sends: Send[] = [...kindReply(patient, msg, cls, text)];
+    // A history question in the same message is answered after what she reported (that reply comes first).
+    const asksHistory = cls?.kind === "history_question";
+    const sends: Send[] = asksHistory ? [] : [...kindReply(patient, msg, cls, text)];
     for (const n of u.notes) saveTopicNote(patient, c, n);
     const answers: StoredAnswer[] = [...c.answers];
     const suggestions: Record<string, Suggestion> = { ...c.suggestions };
@@ -1921,9 +1969,10 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       const detail = top.q && top.answer !== undefined ? { questionText: top.q.text, answer: top.answer, words: text } : { words: top.words || text };
       const three = levelThree(patient, updated, top.topic, msg.chatId, `${patient.id}:${c.date}:red-flag:${top.topic}`, detail, unansweredCount(updated));
       updated = { ...updated, concernAt: three.concernAt };
-      sends.push(...three.sends);
+      sends.push(...three.sends, ...(asksHistory ? kindReply(patient, msg, cls, text) : []));
     } else {
       lead = understoodLine(told);
+      if (asksHistory) lead = [lead, historyText(patient, cls!)].filter(Boolean).join(" ");
     }
     sends.push(...nextStep(patient, updated, msg.chatId, lead, msg.messageId));
     return sends;
@@ -1934,7 +1983,12 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     return answerQuestion(patient, c, q, s.answer, chatId, { via: "confirmed", freeText: s.words });
   }
 
-  /** The fixed reply for her kind of message, if it has one: a medicine question, a message for her family, feeling low. */
+  /** The answer to a history question, from the digest alone (copy.ts historyAnswer): fixed templates, no model words. */
+  function historyText(patient: CheckinPatient, cls: MessageClassification): string {
+    return historyAnswer(cls.historyTopic ?? "other", digestFor(patient, dayFor(patient.id, pendingCheckin(patient.id))));
+  }
+
+  /** The fixed reply for her kind of message, if it has one: a medicine question, a message for her family, feeling low, a history question. */
   function kindReply(patient: CheckinPatient, msg: InboundMessage, cls: MessageClassification | undefined, text: string): Send[] {
     const kind: MessageKind | undefined = cls?.kind;
     const reply = (t: string): Send => ({ chatId: msg.chatId, message: { text: t }, key: `${patient.id}:reply:${msg.messageId}` });
@@ -1947,6 +2001,8 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         return [reply(feelingLowReply(patient.preferredName))];
       case "family_message":
         return planFamilyRelay(patient, msg, text);
+      case "history_question":
+        return [reply(historyText(patient, cls!))];
       default:
         return [];
     }
@@ -2265,11 +2321,12 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     let reading: SpokenReading | undefined;
     if (words && deps.llm) {
       const open = openOn(patientId, day);
+      const digest = contextFor(patient, day);
       const read = await readOpenReply({
         kind: "extract",
         context: open ? openContext(open) : `call:${day}`,
-        extract: { seniorName: patient.preferredName, message: words, questions: open ? unansweredForExtraction(open) : [] },
-        classify: { seniorName: patient.preferredName, message: words, pending: undefined },
+        extract: { seniorName: patient.preferredName, message: words, questions: open ? unansweredForExtraction(open) : [], ...digest },
+        classify: { seniorName: patient.preferredName, message: words, pending: undefined, ...digest },
       });
       if (read.safety) {
         // The model read a crisis or an urgent symptom the screen missed: it wins, nothing else is recorded.

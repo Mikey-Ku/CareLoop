@@ -7,7 +7,7 @@ import { QUESTION_BANK } from "../context/questions.ts";
 import { FIXTURES_DIR, REPO_ROOT } from "../finchnode/fixtures.ts";
 import type { AttemptLogEntry } from "../llm/fallback.ts";
 import { createLlmClient, describeLlm, type CreateLlmDeps } from "../llm/index.ts";
-import { MESSAGE_KINDS, type ClassifyInput, type MessageClassification, type MessageKind } from "../llm/types.ts";
+import { HISTORY_TOPICS, MESSAGE_KINDS, type ClassifyInput, type HistoryTopic, type MessageClassification, type MessageKind } from "../llm/types.ts";
 import { screenMessage, type SafetyHit } from "../safety/screen.ts";
 import { missingSetup } from "./llm-check.ts";
 
@@ -51,6 +51,10 @@ const CaseSchema = z
     expectKind: z.enum(MESSAGE_KINDS),
     /** One of the pending question's buttons, or "unclear". */
     expectAnswer: z.string().optional(),
+    /** kind history_question only: the topic the model should pick. */
+    expectTopic: z.enum(HISTORY_TOPICS).optional(),
+    /** A key of the catalogue's `digests`: the context digest (src/context/digest.ts) the message is read with, as in the agent. */
+    digest: z.string().optional(),
     /** The fixed phrase screen must catch it as this kind. */
     mustScreen: z.enum(SAFETY_KINDS).optional(),
     /** The fixed phrase screen must leave it alone (idioms, negations). */
@@ -60,13 +64,24 @@ const CaseSchema = z
   })
   .strict();
 
-const CatalogueSchema = z.object({ description: z.string(), seniorName: z.string().min(1), cases: z.array(CaseSchema) }).strict();
+const CatalogueSchema = z
+  .object({
+    description: z.string(),
+    seniorName: z.string().min(1),
+    /** Rendered context digests (synthetic) that cases refer to by name. */
+    digests: z.record(z.string(), z.string()).optional(),
+    cases: z.array(CaseSchema),
+  })
+  .strict();
 
 export type Catalogue = z.infer<typeof CatalogueSchema>;
 export type ContentCase = Catalogue["cases"][number];
 
 export function loadCatalogue(path = CATALOGUE_PATH): Catalogue {
-  return CatalogueSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+  const catalogue = CatalogueSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+  for (const c of catalogue.cases)
+    if (c.digest !== undefined && catalogue.digests?.[c.digest] === undefined) throw new Error(`content eval: case ${c.id} names unknown digest "${c.digest}"`);
+  return catalogue;
 }
 
 export function isSafetyKind(kind: string): kind is (typeof SAFETY_KINDS)[number] {
@@ -138,7 +153,8 @@ export async function evaluate(catalogue: Catalogue, deps: EvalDeps): Promise<Ca
   };
 
   const callModel = async (c: ContentCase): Promise<ModelOutcome> => {
-    const input: ClassifyInput = { seniorName: catalogue.seniorName, message: c.text, pending: pendingFor(c) };
+    const context = c.digest === undefined ? undefined : catalogue.digests?.[c.digest];
+    const input: ClassifyInput = { seniorName: catalogue.seniorName, message: c.text, pending: pendingFor(c), ...(context ? { context } : {}) };
     const started = now();
     let lastError = "unknown error";
     for (let tries = 1; tries <= retryDelays.length + 1; tries++) {
@@ -191,8 +207,14 @@ export function answerOf(r: CaseResult): string | undefined {
   return r.model.status === "ok" && r.model.value.kind === "answer" ? (r.model.value.answer ?? "unclear") : undefined;
 }
 
+/** The topic the model picked, when it called the message a history question. */
+export function topicOf(r: CaseResult): HistoryTopic | undefined {
+  return r.model.status === "ok" && r.model.value.kind === "history_question" ? (r.model.value.historyTopic ?? "other") : undefined;
+}
+
 export function isMismatch(r: CaseResult): boolean {
   if (r.final !== r.c.expectKind) return true;
+  if (r.c.expectTopic !== undefined && topicOf(r) !== r.c.expectTopic) return true;
   return r.c.expectAnswer !== undefined && answerOf(r) !== r.c.expectAnswer;
 }
 
@@ -215,6 +237,10 @@ export type Summary = {
   /** got kind counts per expected kind, "error" included. */
   confusion: Map<MessageKind, Map<MessageKind | "error", number>>;
   answers: { cases: number; right: number; byQuestion: Map<string, { cases: number; right: number }> };
+  /** History questions with an expected topic. */
+  topics: { cases: number; right: number };
+  /** Cases read with a context digest, and how many of them are fully right. */
+  withDigest: { cases: number; right: number };
   safety: { cases: CaseResult[]; screenCaught: number; modelCalls: number; modelCaught: number; neither: CaseResult[] };
   /** Non-safety messages that got a safety kind from the screen or the model. */
   falseAlarms: CaseResult[];
@@ -238,6 +264,8 @@ export function summarize(results: readonly CaseResult[]): Summary {
   let answerRight = 0;
   let hardCases = 0;
   let hardRight = 0;
+  const topics = { cases: 0, right: 0 };
+  const withDigest = { cases: 0, right: 0 };
 
   for (const r of results) {
     const score = byKind.get(r.c.expectKind)!;
@@ -274,6 +302,14 @@ export function summarize(results: readonly CaseResult[]): Summary {
       hardCases += 1;
       if (!isMismatch(r)) hardRight += 1;
     }
+    if (r.c.expectTopic !== undefined) {
+      topics.cases += 1;
+      if (r.final === "history_question" && topicOf(r) === r.c.expectTopic) topics.right += 1;
+    }
+    if (r.c.digest !== undefined) {
+      withDigest.cases += 1;
+      if (!isMismatch(r)) withDigest.right += 1;
+    }
   }
 
   const safetyCases = results.filter((r) => isSafetyKind(r.c.expectKind));
@@ -287,6 +323,8 @@ export function summarize(results: readonly CaseResult[]): Summary {
     byKind,
     confusion,
     answers: { cases: answerCases, right: answerRight, byQuestion },
+    topics,
+    withDigest,
     safety: {
       cases: safetyCases,
       screenCaught: safetyCases.filter((r) => r.screen !== undefined).length,
@@ -325,6 +363,7 @@ function cell(text: string, max = 160): string {
 }
 
 function expectedLabel(c: ContentCase): string {
+  if (c.expectTopic !== undefined) return `${c.expectKind}: ${c.expectTopic}`;
   return c.expectAnswer !== undefined ? `answer: ${c.expectAnswer}` : c.expectKind;
 }
 
@@ -340,6 +379,7 @@ function modelLabel(r: CaseResult): string {
       return `no answer (${r.model.error})`;
     case "ok": {
       const v = r.model.value;
+      if (v.kind === "history_question") return `history_question: ${v.historyTopic ?? "other"} (${v.confidence})`;
       return v.kind === "answer" ? `answer: ${v.answer ?? "unclear"} (${v.confidence})` : `${v.kind} (${v.confidence})`;
     }
   }
@@ -374,7 +414,7 @@ export function renderReport(results: readonly CaseResult[], meta: ReportMeta): 
     "",
     `Written by \`npm run content:eval\` (apps/server/src/cli/content-eval.ts) on ${meta.generatedAt.slice(0, 16).replace("T", " ")} UTC from \`${meta.cataloguePath ?? "fixtures/content/messages.json"}\`. Rerun to refresh; do not edit by hand.`,
     "",
-    "Each message goes through the fixed phrase screen (src/safety/screen.ts), then the live classifyMessage when the screen lets it through, and always for crisis and urgent cases (to measure the model as the backup). \"Final\" is what the engine acts on: a screen hit wins, else the model's kind.",
+    "Each message goes through the fixed phrase screen (src/safety/screen.ts), then the live classifyMessage when the screen lets it through, and always for crisis and urgent cases (to measure the model as the backup). \"Final\" is what the engine acts on: a screen hit wins, else the model's kind. A case with a digest is read with that context digest (src/context/digest.ts), as in the agent.",
     "",
     `- Cases: ${s.total} (${kindCounts}); hard cases ${s.hard.cases}`,
     `- Models configured: ${meta.chain.join(", ") || "none"}`,
@@ -382,6 +422,7 @@ export function renderReport(results: readonly CaseResult[], meta: ReportMeta): 
     `- Model calls: ${s.modelCalls} classifyMessage calls, ${s.modelAnswered} answered, ${s.modelErrors.length} got no answer; ${attempts.length} HTTP attempts, ${busy} of them busy or failed`,
     `- Final kind right: ${pct(s.finalRight, s.total)}; model alone right: ${pct(s.modelRight, s.modelAnswered)}`,
     `- Answers mapped to the right button: ${pct(s.answers.right, s.answers.cases)}`,
+    `- History topic picked right: ${pct(s.topics.right, s.topics.cases)}; cases read with a context digest fully right: ${pct(s.withDigest.right, s.withDigest.cases)}`,
     `- Hard cases fully right: ${pct(s.hard.right, s.hard.cases)}`,
     "",
   );
@@ -508,7 +549,7 @@ export function summaryLines(results: readonly CaseResult[]): string[] {
     `Safety: ${s.safety.cases.length} cases; screen caught ${s.safety.screenCaught}, model caught ${s.safety.modelCaught} of ${s.safety.modelCalls}, caught by neither ${s.safety.neither.length}${s.safety.neither.length > 0 ? ` (${s.safety.neither.map((r) => r.c.id).join(", ")})` : ""}`,
     `Screen contract: ${s.screenMisses.length} mustScreen missed, ${s.screenFalseHits.length} mustNotScreen caught; false alarms ${s.falseAlarms.length}`,
     `Kinds: final right ${pct(s.finalRight, s.total)}, model alone ${pct(s.modelRight, s.modelAnswered)}`,
-    `Answers: ${pct(s.answers.right, s.answers.cases)} mapped right`,
+    `Answers: ${pct(s.answers.right, s.answers.cases)} mapped right; history topics ${pct(s.topics.right, s.topics.cases)}; with a digest ${pct(s.withDigest.right, s.withDigest.cases)}`,
     `Mismatches: ${s.mismatches.length}; calls with no answer: ${s.modelErrors.length}`,
   ];
 }
