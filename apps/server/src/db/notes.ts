@@ -1,12 +1,14 @@
 import type { Db } from "./index.ts";
 
-// What she typed that is worth keeping for her doctor (migration 6). The check-in
+// What she typed that is worth keeping for her doctor (migrations 6 and 9). The check-in
 // engine writes these; the visit-prep sheet (lane C) reads them.
 //
-// checkin_notes: her own words about one question of one check-in, such as "Yes but it
-// was weirder, I don't know how to explain it" on the breathing question. Saved when she
-// adds detail while a question waits, and with any typed answer to a red-flag question.
-// Family sees them only at sharing "all", in the daily status.
+// checkin_notes: her own words about one thing, in one check-in, such as "Yes but it was
+// weirder, I don't know how to explain it" on the breathing question, or "a little bit of
+// pain in the back" while she answered about her ankles. `topic` is what it is about: a
+// question id, or her own topic words ("back pain"); `questionId` is set only when the topic
+// is one of that check-in's questions. Family sees notes only at sharing "all", in the
+// daily status.
 //
 // visit_questions: questions about her medicines she typed ("can I stop the water pill?").
 // Never answered by the app; kept for her next visit.
@@ -20,20 +22,35 @@ function clean(text: string): string {
   return one.length > MAX_NOTE_LENGTH ? one.slice(0, MAX_NOTE_LENGTH).trimEnd() : one;
 }
 
-export type CheckinNote = { id: number; patientId: string; checkinId: number; questionId: string; text: string; createdAt: string };
+export type CheckinNote = {
+  id: number;
+  patientId: string;
+  checkinId: number;
+  /** The check-in question it is about, or null when it is about something else. */
+  questionId: string | null;
+  /** What it is about: the question id, or her own topic words. */
+  topic: string;
+  text: string;
+  createdAt: string;
+};
 
-const NOTE_COLUMNS = `id, patient_id AS patientId, checkin_id AS checkinId, question_id AS questionId, text, created_at AS createdAt`;
+const NOTE_COLUMNS = `id, patient_id AS patientId, checkin_id AS checkinId, question_id AS questionId, topic, text, created_at AS createdAt`;
 
-/** Save her words as a note on one question of a check-in. A blank note is not saved (returns undefined). */
+/**
+ * Save her words as a note in a check-in: on one of its questions (`questionId`, the topic too), or on
+ * another topic (`topic`, `questionId` null). A blank note is not saved (returns undefined).
+ */
 export function addCheckinNote(
   db: Db,
-  note: { patientId: string; checkinId: number; questionId: string; text: string; createdAt: string },
+  note: { patientId: string; checkinId: number; questionId?: string | null; topic?: string; text: string; createdAt: string },
 ): number | undefined {
   const text = clean(note.text);
   if (!text) return undefined;
+  const questionId = note.questionId ?? null;
+  const topic = (note.topic ?? questionId ?? "").trim() || "other";
   const info = db
-    .prepare(`INSERT INTO checkin_notes (patient_id, checkin_id, question_id, text, created_at) VALUES (?, ?, ?, ?, ?)`)
-    .run(note.patientId, note.checkinId, note.questionId, text, note.createdAt);
+    .prepare(`INSERT INTO checkin_notes (patient_id, checkin_id, question_id, topic, text, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(note.patientId, note.checkinId, questionId, topic, text, note.createdAt);
   return Number(info.lastInsertRowid);
 }
 

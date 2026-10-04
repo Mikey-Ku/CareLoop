@@ -109,6 +109,8 @@ export type ExtractCheckinInput = {
   message: string;
   /** Today's questions, each with its button labels. */
   questions: { id: string; question: string; options: string[] }[];
+  /** The question she is replying to right now, when it isn't the opening "How are you feeling today?". */
+  answeringNow?: string | undefined;
 };
 
 export type CheckinExtraction = {

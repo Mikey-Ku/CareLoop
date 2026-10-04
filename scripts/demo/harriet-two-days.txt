@@ -2,7 +2,8 @@
 # both red-flag questions and hears the first flag, and says she'll ask her doctor.
 # Day 2 (/next) skips the red-flag questions (answered yesterday, due every other day)
 # and asks the other three. She answers all three in one message to the greeting, so
-# no question is asked: the next flag is offered (not the same one) and the day closes.
+# no question is asked: "Got it: ankles feeling fine, medicines taken and feeling good.",
+# then the next flag is offered (not the same one) and the day closes.
 # Offline, the /as extract line stands in for the LLM's reading of her open reply. With
 # --llm, delete it to let Gemini read her words.
 # npm run simulate -- --reset --script ../../scripts/demo/harriet-two-days.txt

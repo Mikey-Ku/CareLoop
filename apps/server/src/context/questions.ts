@@ -129,6 +129,26 @@ export function promptButtons(q: Pick<Question, "id" | "buttons">): string[] {
 }
 
 /**
+ * The first button of a suggested confirm on a red-flag question ("It sounds like ... Is that right?"):
+ * her tap records the suggested answer (src/checkin/engine.ts).
+ */
+export const SUGGESTION_YES = "Yes, that's right";
+
+/** Buttons on a suggested confirm, at most this many. */
+export const MAX_SUGGESTION_BUTTONS = 4;
+
+/**
+ * The buttons of a suggested confirm: "Yes, that's right", the question's other answers, then "Let me
+ * explain" when it offers it and there is room (at most MAX_SUGGESTION_BUTTONS).
+ */
+export function suggestionButtons(q: Pick<Question, "id" | "buttons">, suggested: string): string[] {
+  const others = q.buttons.filter((b) => b.trim().toLowerCase() !== suggested.trim().toLowerCase());
+  const buttons = [SUGGESTION_YES, ...others];
+  if (offersExplain(q.id) && buttons.length < MAX_SUGGESTION_BUTTONS) buttons.push(LET_ME_EXPLAIN);
+  return buttons.slice(0, MAX_SUGGESTION_BUTTONS);
+}
+
+/**
  * How often red-flag questions come up. These are product cadence values the team can
  * change (FEEDBACK.md), not clinical thresholds.
  */

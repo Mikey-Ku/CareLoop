@@ -104,7 +104,8 @@ export const SYMPTOM_RULES = [
 ].join(" ");
 
 export const EXTRACT_SYSTEM_PROMPT = [
-  'An older adult answered her daily check-in\'s opening question, "How are you feeling today?", in her own words. You read her reply and pull out what she said.',
+  'An older adult answered her daily check-in in her own words: either the opening question, "How are you feeling today?", or, when answeringNow names one of today\'s questions, that question. You read her reply and pull out what she said.',
+  "When answeringNow is given, read her words as an answer to that question first: \"It has been feeling very good\" while answeringNow is the ankle question means her ankles are fine, not her mood.",
   "You only extract. You never reply to her and never give advice of any kind, medical or otherwise.",
   "symptoms: every symptom or bodily complaint she mentions, one entry each, including ones no question asks about (a sore knee, a cough, tiredness). questionId is the id of today's question it belongs to, or other.",
   SYMPTOM_RULES,
@@ -286,7 +287,8 @@ export class GeminiLlmClient implements LlmClient {
     };
     const order = Object.keys(properties);
     const schema = { type: "OBJECT", properties, required: order, propertyOrdering: order };
-    const user = { herName: input.seniorName, message, questions };
+    const answeringNow = input.answeringNow ? questions.find((q) => q.id === input.answeringNow) : undefined;
+    const user = { herName: input.seniorName, message, questions, ...(answeringNow ? { answeringNow: { id: answeringNow.id, question: answeringNow.question } } : {}) };
     const text = await this.#generate("extractCheckin", EXTRACT_SYSTEM_PROMPT, user, schema, 0, EXTRACT_MAX_TOKENS, options);
     return parseExtraction(text, questions);
   }

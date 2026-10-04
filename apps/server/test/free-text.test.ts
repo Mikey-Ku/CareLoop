@@ -284,7 +284,7 @@ describe("typed answer to an ordinary question", () => {
     checkinId = getCheckin(db, P, DAY2)!.id;
     expect(brief(await say("bit puffy"))).toEqual([msg(ME, didntUnderstand(medicines.buttons), medicines.buttons)]);
     expect(getCheckin(db, P, DAY2)?.answers).toEqual([]);
-    expect(llm?.calls).toHaveLength(1);
+    expect(llm?.classifyCalls).toHaveLength(1);
   });
 
   it("a replayed message id never calls the LLM again or sends twice", async () => {

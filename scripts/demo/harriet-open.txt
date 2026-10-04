@@ -6,7 +6,8 @@
 # dizziness.
 # Day 2: one message, "ankles a bit puffy, slept ok, little dizzy getting up this morning".
 #   ankles -> "A little" (level 1), dizziness -> "Sometimes" (level 1), both recorded with
-#   her words; one folded line, "Thanks, I've made a note of that for your doctor.", and
+#   her words; one line says back what was understood ("Got it: ankles a little swollen and
+#   a little dizzy at times. I've noted the ankles and the dizziness for your doctor."), and
 #   only the breathing question is asked (a red-flag question is never answered calm from
 #   her words). "Fine", then a calm finish.
 # Offline, the /as extract line stands in for the LLM's reading of her open reply. With

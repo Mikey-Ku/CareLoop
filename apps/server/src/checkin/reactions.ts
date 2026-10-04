@@ -62,6 +62,17 @@ export function isExplicitYes(text: string): boolean {
 }
 
 /**
+ * A plain yes and nothing else ("yes", "Yep, that's right", "correct", "yes it was"): her answer to a
+ * suggested confirm ("It sounds like ... Is that right?"), the same as tapping "Yes, that's right".
+ * Anything more ("yes, it was really hard") is not plain and is read as usual.
+ */
+export function isPlainYes(text: string): boolean {
+  const yes = String.raw`(?:yes|yeah|yep|yup|yea|correct|right|exactly|that'?s right|that is right|that'?s correct)`;
+  const more = String.raw`(?:that'?s right|that is right|that'?s correct|correct|right|it is|it was|thanks|thank you)`;
+  return new RegExp(String.raw`^\s*(?:(?:oh|well|um+|uh+)[\s,.]+)?${yes}(?:[\s,.!]+${more})*[\s,.!]*$`, "i").test(text.replace(/’/g, "'"));
+}
+
+/**
  * The button an explicit yes stands for on a red-flag question: its level-3 answer ("Yes, it was hard",
  * "Yes, bleeding"), if it has one. Ordinary questions have none, so a typed yes there goes to the LLM.
  */
