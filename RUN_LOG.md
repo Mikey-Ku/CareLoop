@@ -274,3 +274,8 @@ Re-record a well-lit face-and-chest clip longer than 30 seconds, set `PRESAGE_AP
 **Migrations:** 10 medication helper, 11 care summaries, 12 call sessions, 13 waiting prompts. Anyone who ran `photon/care-summaries` or `lane3/presage-spike` has those tables under other numbers: delete `data/*.db` and `apps/server/data/*.db` once (synthetic data only).
 
 **Verification:** `tsc --noEmit` clean; full suite passes; all 13 `scripts/demo/*.txt` exit 0 with the flags in their headers. Not verified live: the call (needs the ElevenLabs agent and an HTTPS tunnel), label photos, a second phone as Sarah.
+
+**QA pass and library scout (same day, same branch):**
+- `docs/QA.md` added (every capability, 12 phone scripts, edge cases, feedback template). Fixed from that pass: the family's heart-rate line at "status_vitals"/"all" (never passed in before); plain wording on the R6 papers message; doc contradictions (tool secret required, no "Call me" button, two-page report, no prescriber on refills).
+- Library scout (`@relaymessenger/sdk` helpers, `Intl.ListFormat`, one module per duplicated helper, dead code removed; no new dependencies). One real bug fixed: ElevenLabs call events are read by their exact types (the bridge forwards the raw Agents WebSocket messages). Only a final `user_transcript` is stored as her turn and safety-screened; a correction rewrites the voice's last turn instead of adding one; tentative and partial events are ignored. Skipped as not worth it this close to the demo: `@google/genai`, Vercel AI SDK, XState, croner, Kysely/Drizzle. Worth doing next: RxNav brand-to-generic lookup, so a real "Eliquis" label matches "apixaban".
+- Verification: `tsc` clean, 1519 tests in 48 files, all 13 demo scripts exit 0.
