@@ -74,7 +74,7 @@ Each person runs their own agent: two programs on the same agent token take each
    ```sh
    CLOCK_DATE=2026-09-01 FOLLOW_UP_DELAY_MINUTES=2 npm run agent -- --checkin-now
    ```
-   The check-in arrives on your phone. Type naturally ("ankles a bit puffy, slept ok") or tap. `CLOCK_DATE` pins the demo day (use a new date for each fresh check-in); `FOLLOW_UP_DELAY_MINUTES=2` makes the same-day follow-up arrive in 2 minutes instead of 3 hours. Stop with Ctrl-C.
+   The check-in arrives on your phone. Type naturally ("ankles a bit puffy, slept ok") or tap. `CLOCK_DATE` only pins the demo day's data stamping; a fresh database on the same date no longer collides with Relay's memory of earlier messages. `FOLLOW_UP_DELAY_MINUTES=2` makes the same-day follow-up arrive in 2 minutes instead of 3 hours. Stop with Ctrl-C.
 
 The commands above are for macOS (`sed -i ''`, zsh `read`). Your conversation is stored in `apps/server/data/app.db` (not in git).
 

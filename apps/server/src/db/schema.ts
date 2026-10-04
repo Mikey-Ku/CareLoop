@@ -484,6 +484,15 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE family_messages ADD COLUMN text TEXT;
   `,
+  // 15: facts about this database itself (src/db/app-meta.ts). Today one: its random instance id, which the
+  // Relay adapter folds into every message idempotency key, so a fresh database never reuses a key an
+  // earlier one sent (Relay remembers keys for hours).
+  `
+  CREATE TABLE app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
