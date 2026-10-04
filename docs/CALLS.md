@@ -110,6 +110,8 @@ Never say heart rate, breathing, blood pressure or any other number unless it co
 * Language: English.
 * System tools: End call on (the goodbye ends the call).
 * First message: leave empty or anything; the server overrides it with the AI disclosure.
+* Security tab: enable the override for the first message. ElevenLabs only accepts overrides that are enabled there, and the server sends one on every call.
+* Keep the agent private (authentication on): the server gets a signed URL for it with `ELEVENLABS_API_KEY`, so the API key alone is not enough; `ELEVENLABS_AGENT_ID` is required too.
 
 ### Server tools
 
