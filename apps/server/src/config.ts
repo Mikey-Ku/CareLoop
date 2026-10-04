@@ -4,6 +4,9 @@ import { isCalendarDay } from "./days.ts";
 // App configuration from the environment. Secrets live only in .env and never
 // appear in an error message, a log line or a printed config.
 
+/** SmartSpectra refuses a frame more than 2000 ms after the last one it took, then every frame after it until it is restarted. */
+export const MAX_FRAME_GAP_LIMIT_MS = 1_900;
+
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 export const DEFAULT_RELAY_API_URL = "https://api.relayapp.im";
@@ -74,8 +77,11 @@ const ConfigSchema = z.object({
   CALL_MAX_MINUTES: z.coerce.number().positive().max(30).default(4),
   /** Lowest SmartSpectra confidence (0 to 100) a camera reading needs to be used. 1 keeps out warm-up zeros; the team tunes it. */
   VITALS_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(1),
-  /** Longest pause in her video (ms) a camera reading rides out. A phone's first frames often come in a burst and then a pause of 2 s or so. */
-  VITALS_MAX_FRAME_GAP_MS: z.coerce.number().int().min(1_000).max(10_000).default(3_000),
+  /**
+   * Longest pause in her video (ms) before the reading restarts inside the same window. SmartSpectra refuses any frame
+   * more than 2000 ms after the last one it took, so this is clamped to MAX_FRAME_GAP_LIMIT_MS (1900) whatever is set.
+   */
+  VITALS_MAX_FRAME_GAP_MS: z.coerce.number().int().min(1_000).max(10_000).default(MAX_FRAME_GAP_LIMIT_MS).transform((ms) => Math.min(ms, MAX_FRAME_GAP_LIMIT_MS)),
 });
 
 /**
@@ -147,7 +153,7 @@ export type CallsConfig = {
   maxMinutes: number;
   /** VITALS_MIN_CONFIDENCE: lowest SmartSpectra confidence (0 to 100) a reading needs. */
   vitalsMinConfidence: number;
-  /** VITALS_MAX_FRAME_GAP_MS: a longer pause in her video cuts the quiet reading short. */
+  /** VITALS_MAX_FRAME_GAP_MS: a longer pause in her video restarts the reading inside the same quiet window (at most 1900). */
   maxFrameGapMs: number;
 };
 

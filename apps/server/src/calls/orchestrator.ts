@@ -4,7 +4,7 @@ import type { CallCheckinContext } from "../checkin/engine-types.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import type { CallScreeningLlmOutput, CallTurnLlmOutput, LlmClient } from "../llm/types.ts";
 import type { VitalsResult } from "../vitals/types.ts";
-import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, QUIET_COUNTDOWN_SECONDS, QUIET_RETRY_OFFER, callClosing, callFirstMessage, quietCountdown, quietMeasurementPrompt } from "./copy.ts";
+import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, QUIET_COUNTDOWN_SECONDS, QUIET_RETRY_OFFER, callClosing, callFirstMessage, quietCountdown, quietMeasurementRetryPrompt, quietMeasurementPrompt } from "./copy.ts";
 import { emergencyDecision } from "./emergency.ts";
 import type { TranscriptTurn } from "./types.ts";
 
@@ -193,7 +193,7 @@ export class ConversationOrchestrator {
     if (this.#waitingForRetry) {
       this.#waitingForRetry = false;
       if (!negative(text) && (affirmative(text) || /\btry again\b/i.test(text)) && this.#options.canMeasure()) {
-        await this.#startMeasurement(); // her camera is still on and she said yes
+        await this.#startMeasurement(true); // her camera is still on and she said yes
         return;
       }
       await this.#speak("Of course. We can skip the camera measurement.");
@@ -353,10 +353,11 @@ export class ConversationOrchestrator {
   }
 
   /** She said yes (or ready) to the quiet reading: the prompt, the window, and the readback when it ends. */
-  async #startMeasurement(): Promise<void> {
+  async #startMeasurement(retry = false): Promise<void> {
     this.#phase = "quiet_measurement";
     this.#measurementDone = true;
-    await this.#speak(quietMeasurementPrompt(Math.round(this.#options.quietMeasurementMs / 1000)));
+    const seconds = Math.round(this.#options.quietMeasurementMs / 1000);
+    await this.#speak(retry ? quietMeasurementRetryPrompt(seconds) : quietMeasurementPrompt(seconds));
     this.#options.beginQuietMeasurement();
     this.#measurementTimer = setTimeout(() => this.#endMeasurement(), this.#options.quietMeasurementMs + 500);
     this.#measurementTimer.unref?.();

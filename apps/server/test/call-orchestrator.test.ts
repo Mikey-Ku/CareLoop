@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, QUIET_RETRY_OFFER, callClosing, callFirstMessage, quietCountdown } from "../src/calls/copy.ts";
+import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, QUIET_RETRY_OFFER, callClosing, callFirstMessage, quietCountdown, quietMeasurementRetryPrompt } from "../src/calls/copy.ts";
 import { emptyCallVitals } from "../src/calls/screening.ts";
 import { ConversationOrchestrator, type ConversationOrchestratorOptions } from "../src/calls/orchestrator.ts";
 import { crisisReply, urgentReply } from "../src/checkin/copy.ts";
@@ -1078,7 +1078,8 @@ describe("ConversationOrchestrator: a reading with nothing usable is offered onc
     await firstTryFails(f);
     await f.say("Yes.");
     expect(f.beginQuietMeasurement).toHaveBeenCalledTimes(2);
-    expect(f.spoken.at(-1)).toMatch(/face and upper chest.*30 seconds/i);
+    expect(f.spoken.at(-1)).toBe(quietMeasurementRetryPrompt(30)); // short: she has heard the full prompt once
+    expect(f.spoken.at(-1)!.split(/\s+/).length).toBeLessThan(25);
     f.state.vitals = { ...emptyCallVitals(), heartRate: 72, breathingRate: 14 };
     await vi.advanceTimersByTimeAsync(30_500);
     await vi.waitFor(() => expect(f.onComplete).toHaveBeenCalledOnce());

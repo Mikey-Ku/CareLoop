@@ -33,7 +33,7 @@ Do "Try it on your phone" in the [README](../README.md#try-it-on-your-phone-abou
 | `PRESAGE_API_KEY` | Pulse and breathing estimates from Relay video frames | Optional; without it the call skips the camera reading |
 | `CALL_QUIET_MEASUREMENT_MS` | Length of the quiet reading, 30000 to 45000 | Optional |
 | `CALL_MAX_MINUTES`, `VITALS_MIN_CONFIDENCE` | Server ends the call after N minutes (default 4); lowest camera confidence used (default 1) | Optional |
-| `VITALS_MAX_FRAME_GAP_MS` | Longest pause in her video a camera reading rides out, 1000 to 10000 (default 3000) | Optional |
+| `VITALS_MAX_FRAME_GAP_MS` | Longest pause in her video before the reading restarts inside the same window, 1000 to 1900 (default 1900; a larger value is clamped, since Presage refuses a gap over 2 s) | Optional |
 | `SPECTRUM_PROJECT_ID`, `SPECTRUM_PROJECT_SECRET` plus `care-contacts.json` | Photon (iMessage) care summaries to the doctor and the emergency contact. Off unless set; not part of the MVP | Optional |
 | `FINCHNODE_BASE_URL`, `FINCHNODE_API_KEY` | The FinchNode demo API needs no key | Leave as is |
 | `CLOCK_DATE`, `FOLLOW_UP_DELAY_MINUTES`, `MEDS_NUDGE_MINUTES`, `CHECKIN_TIME`, `MISSED_CHECKIN_TIME`, `MEDS_MORNING_TIME`, `MEDS_EVENING_TIME`, `REFILL_REMIND_DAYS`, `PATIENT_TIMEZONE`, `DATABASE_PATH`, `PORT` | Demo knobs (see "Run the agent"). Easiest to set inline on the command line | Optional |

@@ -35,6 +35,13 @@ describe("loadConfig defaults", () => {
     });
   });
 
+  it("keeps the longest video pause under SmartSpectra's own 2 s limit, whatever VITALS_MAX_FRAME_GAP_MS says", () => {
+    expect(loadConfig({}).calls.maxFrameGapMs).toBe(1_900);
+    expect(loadConfig({ VITALS_MAX_FRAME_GAP_MS: "1500" }).calls.maxFrameGapMs).toBe(1_500);
+    expect(loadConfig({ VITALS_MAX_FRAME_GAP_MS: "3000" }).calls.maxFrameGapMs).toBe(1_900);
+    expect(loadConfig({ VITALS_MAX_FRAME_GAP_MS: "10000" }).calls.maxFrameGapMs).toBe(1_900);
+  });
+
   it("treats empty strings as unset, like a fresh .env", () => {
     const c = loadConfig({ RELAY_AGENT_TOKEN: "", PATIENT_RELAY_HANDLE: "", FAMILY_RELAY_HANDLES: "", CLOCK_DATE: "", PATIENT_TIMEZONE: "" });
     expect(c.relay.agentToken).toBeUndefined();
