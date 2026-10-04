@@ -13,6 +13,7 @@ import type { CheckinEngine, Clock } from "./checkin/engine-types.ts";
 import { snapshotLoader } from "./cli/simulator.ts";
 import { ConfigError, loadConfig, type Config } from "./config.ts";
 import { errorSummary } from "./errors.ts";
+import { getInstanceId } from "./db/app-meta.ts";
 import { getCheckin, getCheckinPatient } from "./db/checkins.ts";
 import { familyMembers, syncFamilyMembers } from "./db/family.ts";
 import { openDatabase, upsertPatient, type Db } from "./db/index.ts";
@@ -199,7 +200,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   // 3. Engine over Relay, with free text when an LLM is configured.
   const relayLog: RelayLog = (event, fields) => log(`[relay] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`);
   const clock: Clock = { now: () => dataNow().toISOString() };
-  const messenger = deps.messenger ?? new RelayMessenger(relay, { log: relayLog });
+  const messenger = deps.messenger ?? new RelayMessenger(relay, { log: relayLog, instanceId: getInstanceId(db) });
   log(`[agent] ${llmStatus(config, deps.llm)}`);
   // 3a. Care summaries to her doctor and emergency contact over Photon, when configured.
   let care: CareRuntime | undefined;
@@ -242,7 +243,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
 
   // 5. Inbox: holds the socket until stop().
   const abort = new AbortController();
-  const inboxDone = ops.runRelayInbox({ relay, db, engine, patientHandle: relayHandle, signal: abort.signal, log: relayLog, ...(calls ? { callHandler: calls } : {}) });
+  const inboxDone = ops.runRelayInbox({ relay, db, engine, messenger, patientHandle: relayHandle, signal: abort.signal, log: relayLog, ...(calls ? { callHandler: calls } : {}) });
   inboxDone.then(
     () => log("[agent] Relay inbox closed"),
     (error: unknown) => log(`[agent] Relay inbox stopped: ${errorSummary(error)}`),

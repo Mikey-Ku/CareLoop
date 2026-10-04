@@ -677,6 +677,18 @@ describe("runRelayInbox", () => {
     expect(engine.handleInbound).toHaveBeenCalledWith(expect.objectContaining({ text: "Not today", chatId: HARRIET_CHAT }));
   });
 
+  it("sends the family welcome through the messenger it is given, not one of its own", async () => {
+    const { db, engine } = setup();
+    const messenger = new FakeMessenger({ now: () => T });
+    const relay = fakeRelay();
+    relay.websocket.run.mockImplementation(async (options: WebSocketRunOptions) => {
+      await options.onEvent(contactAdded("sarah.demo", SARAH_CHAT), { sequence: "1" });
+      await vi.waitFor(() => expect(messenger.inChat(SARAH_CHAT).map((m) => m.text)).toEqual([familyWelcome("Harriet")]));
+    });
+    await runRelayInbox({ relay, db, engine, messenger, patientHandle: "harriet.demo", log: () => {} });
+    expect(relay.chats.messages.send).not.toHaveBeenCalled();
+  });
+
   it("first processes events a previous run committed but never processed", async () => {
     const { db, engine } = setup();
     acceptEvent(db, textMessage({ chatId: HARRIET_CHAT, text: "left over" }), "9", T);

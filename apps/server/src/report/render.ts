@@ -5,10 +5,11 @@ import type { Discrepancy } from "../rules/paper-diff.ts";
 import type { DoctorReport, ReportDose, ReportSymptom } from "./build.ts";
 import { andList } from "../text.ts";
 
-// One printable page (US letter) for her doctor, from a DoctorReport, laid out like a clinical
-// summary for a visit: identifiers, problem list, Subjective (what she reported), Objective (camera
-// wellness estimates and labs from her record), a reconciliation-style medication table, items for
-// clinician review (never an assessment: we make none), her questions, and the footer.
+// Two printable pages (US letter) for her doctor, from a DoctorReport. Page 1 stands alone: what was
+// collected this week (counts and where each came from), a plain "in brief", the day-by-day table, the
+// rule flags for review (never an assessment: we make none), what she reported and her questions.
+// Page 2 is the reference detail: camera vitals, labs from her record, a reconciliation-style medication
+// table, the problem list with codes, the evidence behind each flag and where the data comes from.
 //
 // Documentation conventions: two patient identifiers (name, date of birth) plus the record id;
 // dates as "Oct 3, 2026"; 24-hour times with her time zone; medications as generic name,
@@ -149,6 +150,10 @@ export function levelText(level: number): string {
   return `Level ${level} (${LEVEL_WORDS[level] ?? (level === 0 ? "fine" : "unrated")})`;
 }
 
+function levelShort(level: number): string {
+  return `<span class="lv lv${Math.min(Math.max(level, 0), 5)}">Level ${level}</span>`;
+}
+
 function levelBadge(level: number): string {
   return `<span class="lv lv${Math.min(Math.max(level, 0), 5)}">${esc(levelText(level))}</span>`;
 }
@@ -184,59 +189,111 @@ function discrepancyLine(d: Discrepancy): string {
   }
 }
 
-function symptomRow(s: ReportSymptom): string {
-  // A label photo's row keeps the assistant's own sentence, not hers: say where it came from instead.
-  const words = s.source === "photo" ? "a label photo that didn't match her list (see Items for clinician review)" : s.words ? `her words ${quoted(s.words)}` : "";
-  const said = [s.answer ? `Answer ${quoted(s.answer)}` : "", words].filter(Boolean).join("; ");
-  return `<tr><td class="nw">${levelBadge(s.level)}</td><td class="nw">${esc(reportDate(s.day))}</td><td>${esc(s.about)}</td><td>${said || '<span class="muted">no words kept</span>'}</td><td class="nw">${esc(SOURCE_WORDS[s.source] ?? s.source)}</td></tr>`;
+/** "2026-08-30" -> "Aug 30" for the short lists on page 1 (the year is in the header). */
+function shortDate(day: string): string {
+  return reportDate(day).replace(/, \d{4}$/, "");
+}
+
+/** One row per topic: its highest level, when each level was reported, and her answers and words with their dates. */
+function symptomTable(symptoms: ReportSymptom[]): string {
+  const groups = new Map<string, ReportSymptom[]>();
+  for (const s of symptoms) {
+    const key = s.source === "photo" ? "photo" : s.about;
+    groups.set(key, [...(groups.get(key) ?? []), s]);
+  }
+  const rows = [...groups.values()]
+    .map((entries) => [...entries].sort((a, b) => b.level - a.level || (a.day < b.day ? -1 : a.day > b.day ? 1 : 0)))
+    .sort((a, b) => b[0]!.level - a[0]!.level || (a[0]!.day < b[0]!.day ? -1 : 1))
+    .map((entries) => {
+      const top = entries[0]!;
+      const photo = top.source === "photo";
+      const levels = [...new Set(entries.map((e) => e.level))];
+      const when =
+        entries.length === 1
+          ? esc(reportDate(top.day))
+          : levels.map((lv) => `Level ${lv}: ${esc(andList(entries.filter((e) => e.level === lv).map((e) => shortDate(e.day))))}`).join("; ");
+      const said = photo
+        ? "didn't match her list (see Medications)"
+        : entries
+            .map((e) => {
+              const bits = [e.answer ? `Answer ${quoted(e.answer)}` : "", e.words ? `her words ${quoted(e.words)}` : ""].filter(Boolean).join("; ");
+              return bits && entries.length > 1 ? `${esc(shortDate(e.day))}: ${bits}` : bits;
+            })
+            .filter(Boolean)
+            .join(" | ");
+      const via = [...new Set(entries.map((e) => SOURCE_WORDS[e.source] ?? e.source))].join(", ");
+      return `<tr><td class="nw">${levelShort(top.level)}</td><td>${esc(photo ? "label photo" : top.about)}</td><td>${when}</td><td>${said || '<span class="muted">no words kept</span>'}</td><td>${esc(via)}</td></tr>`;
+    });
+  return `<div class="wrap"><table class="said"><tr><th>Level</th><th>About</th><th>When</th><th>Her answer or her own words</th><th>How reported</th></tr>${rows.join("")}</table></div>`;
 }
 
 const CSS = `
-  @page { size: letter portrait; margin: 0.3in 0.35in 0.38in 0.35in; }
+  @page { size: letter portrait; margin: 0.36in 0.45in 0.46in 0.45in; }
   :root { color-scheme: light; }
   * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; background: #ffffff; color: #111111; }
-  body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 7.8pt; line-height: 1.18; }
-  .page { max-width: 7.8in; margin: 0 auto; }
-  @media screen { html, body { background: #eef0f2; } .page { background: #ffffff; padding: 0.3in 0.35in; margin: 16px auto; box-shadow: 0 1px 4px rgba(0,0,0,0.15); } }
-  @media screen and (max-width: 640px) { body { font-size: 9pt; } .page { padding: 16px; margin: 0; } .cols, .ids { grid-template-columns: 1fr !important; } .wrap { overflow-x: auto; } }
-  .banner { border: 2px solid #111111; background: #ffe600; text-align: center; font-weight: 700; font-size: 8pt; letter-spacing: 0.04em; padding: 0 6px; margin-bottom: 3px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  header { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; border-bottom: 2px solid #111111; padding-bottom: 2px; }
-  h1 { font-size: 11.5pt; margin: 0; }
-  .meta { text-align: right; font-size: 7.6pt; color: #222222; }
-  .ids { display: grid; grid-template-columns: 1.2fr 0.8fr 1.6fr; gap: 0 10px; margin: 2px 0 1px 0; font-size: 8.2pt; }
-  .source, .problems { font-size: 7.4pt; margin: 1px 0; }
-  h2 { break-after: avoid; font-size: 8.4pt; margin: 4px 0 1px 0; padding: 0 4px; background: #e6e9ed; text-transform: uppercase; letter-spacing: 0.03em; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  h2 small { text-transform: none; font-weight: 400; letter-spacing: 0; color: #444444; }
-  h3 { font-size: 7.8pt; margin: 2px 0 0 0; }
-  .cols { display: grid; grid-template-columns: 1fr 1.15fr; gap: 0 10px; }
+  html, body { margin: 0; padding: 0; background: #ffffff; color: #14181d; }
+  body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 8.6pt; line-height: 1.28; }
+  .page { max-width: 7.6in; margin: 0 auto; }
+  @media screen { html, body { background: #eef0f2; } .page { background: #ffffff; padding: 0.35in 0.4in; margin: 16px auto; box-shadow: 0 1px 4px rgba(0,0,0,0.15); } }
+  @media screen and (max-width: 640px) { body { font-size: 10pt; } .page { padding: 16px; margin: 0; } .tiles { grid-template-columns: 1fr 1fr !important; } .flag { grid-template-columns: 1fr !important; } .cols { grid-template-columns: 1fr !important; } .wrap { overflow-x: auto; } }
+  .banner { border: 2px solid #14181d; background: #ffe600; text-align: center; font-weight: 700; font-size: 8pt; letter-spacing: 0.04em; padding: 0 6px; margin-bottom: 5px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  header { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; border-bottom: 2px solid #14181d; padding-bottom: 4px; }
+  h1 { font-size: 16pt; margin: 0; letter-spacing: -0.01em; line-height: 1.1; }
+  .who { font-size: 9.6pt; margin-top: 2px; }
+  .meta { text-align: right; font-size: 7.8pt; color: #2a3038; }
+  h2 { break-after: avoid; font-size: 8.8pt; margin: 6px 0 3px 0; text-transform: uppercase; letter-spacing: 0.06em; color: #2a3038; border-bottom: 1px solid #b9c0c8; padding-bottom: 1px; }
+  h2 small { text-transform: none; font-weight: 400; letter-spacing: 0; color: #4a5560; font-size: 7.8pt; }
+  h3 { font-size: 8.6pt; margin: 6px 0 2px 0; }
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+  .tile { border: 1px solid #c3cbd3; border-radius: 4px; padding: 4px 7px 4px 7px; background: #f6f8fa; break-inside: avoid; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .tile.watch { border-color: #b08900; background: #fff7dc; }
+  .tile .label { font-size: 6.8pt; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: #46515e; }
+  .tile .big { font-size: 17pt; font-weight: 700; line-height: 1.08; }
+  .tile .big small { font-size: 8.8pt; font-weight: 600; color: #46515e; }
+  .tile .line { font-size: 7.9pt; }
+  .tile .src { font-size: 6.6pt; color: #5b6672; margin-top: 1px; }
+  ul { margin: 0; padding-left: 13px; }
+  li { margin: 0 0 1.5px 0; }
+  p { margin: 0 0 3px 0; }
   table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; vertical-align: top; padding: 0.5px 3px; border-bottom: 1px solid #e0e0e0; }
-  th { font-size: 7pt; color: #444444; font-weight: 600; border-bottom: 1px solid #999999; }
+  th, td { text-align: left; vertical-align: top; padding: 1.5px 4px; border-bottom: 1px solid #e0e4e8; }
+  th { font-size: 7pt; color: #46515e; font-weight: 600; border-bottom: 1px solid #98a2ad; }
   tr { break-inside: avoid; }
   table.one td { white-space: nowrap; }
   table.one td:first-child, table.one td:nth-child(2) { white-space: normal; }
   tr.has-note td { border-bottom: none; }
-  tr.note td { white-space: normal; font-size: 7.2pt; color: #333333; padding-left: 14px; }
-  .week th, .week td { text-align: center; font-size: 7.4pt; }
-  .week th:first-child, .week td:first-child { text-align: left; white-space: nowrap; }
+  tr.note td { white-space: normal; font-size: 7.4pt; color: #333a42; padding-left: 14px; }
+  .week th, .week td { text-align: center; font-size: 8pt; }
+  .week th:first-child, .week td:first-child { text-align: left; white-space: nowrap; font-weight: 600; }
+  table.said { table-layout: fixed; }
+  table.said th:nth-child(1) { width: 0.62in; } table.said th:nth-child(2) { width: 1.15in; } table.said th:nth-child(3) { width: 1.2in; } table.said th:nth-child(5) { width: 0.8in; }
+  .legend { font-size: 7pt; color: #4a5560; margin-top: 2px; }
   .nw { white-space: nowrap; }
-  ul { margin: 0; padding-left: 11px; }
-  li { margin: 0; }
-  p { margin: 0; }
-  .muted { color: #666666; }
+  .muted { color: #5b6672; }
   .id { font-family: Menlo, Consolas, monospace; font-size: 6.4pt; color: #555555; }
   .code { font-family: Menlo, Consolas, monospace; font-size: 6.6pt; color: #444444; white-space: nowrap; }
-  .lv { display: inline-block; font-weight: 700; font-size: 7pt; border-radius: 2px; padding: 0 2px; border: 1px solid #888888; white-space: nowrap; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .lv { display: inline-block; font-weight: 700; font-size: 7.4pt; border-radius: 2px; padding: 0 3px; border: 1px solid #888888; white-space: nowrap; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .lv0 { background: #ffffff; color: #444444; }
   .lv1 { background: #eef1f4; }
   .lv2 { background: #ffe8a3; border-color: #b08900; }
   .lv3, .lv4, .lv5 { background: #c62828; color: #ffffff; border-color: #8e0000; }
   .bad { font-weight: 700; }
-  .flags td:first-child { font-weight: 700; white-space: nowrap; }
-  .keep { break-inside: avoid; }
+  .flag { display: grid; grid-template-columns: 2.1em 1fr 1.55in; gap: 6px; align-items: start; border-left: 3px solid #b08900; background: #fffbea; padding: 3px 6px; margin-bottom: 3px; break-inside: avoid; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .flag .rule { font-weight: 700; }
+  .flag .what { font-size: 8pt; color: #2a3038; }
+  .flag .chip { font-size: 7.4pt; text-align: right; color: #2a3038; }
   .reference { break-before: page; }
-  footer { margin-top: 4px; border-top: 2px solid #111111; padding-top: 2px; font-size: 7.6pt; display: flex; justify-content: space-between; gap: 12px; }
+  .reference ~ section, .reference { font-size: 7.5pt; }
+  .reference ~ section th, .reference th { font-size: 6.8pt; }
+  .reference ~ section td, .reference td, .reference ~ section th, .reference th { padding-top: 0.5px; padding-bottom: 0.5px; }
+  .reference ~ section h2, .reference h2 { margin-top: 4px; }
+  .reference ~ section li { margin-bottom: 0.5px; }
+  .reference ~ section td, .reference td { padding-top: 0.2px; padding-bottom: 0.2px; }
+  ul.two { columns: 2; column-gap: 14px; }
+  ul.two li { break-inside: avoid; }
+  .about { border: 1px solid #c3cbd3; border-radius: 4px; padding: 3px 7px; background: #f6f8fa; font-size: 7.4pt; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+  footer { margin-top: 4px; border-top: 2px solid #14181d; padding-top: 2px; font-size: 7.6pt; display: flex; justify-content: space-between; gap: 12px; }
   footer .claim { font-weight: 700; }
 `;
 
@@ -257,7 +314,151 @@ function pageBoxes(r: DoctorReport): string {
   }`;
 }
 
-/** The doctor report as a printable HTML page (US letter). */
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+type Tile = { label: string; big: string; small?: string; lines: string[]; source: string; watch?: boolean };
+
+function tileHtml(t: Tile): string {
+  return `<div class="tile${t.watch ? " watch" : ""}"><div class="label">${esc(t.label)}</div><div class="big">${esc(t.big)}${t.small ? ` <small>${esc(t.small)}</small>` : ""}</div>${t.lines.map((l) => `<div class="line">${l}</div>`).join("")}<div class="src">${esc(t.source)}</div></div>`;
+}
+
+/** The six tiles of "What was collected this week": a number, a line of detail and where it came from, all counts of the data. */
+function collectedTiles(r: DoctorReport): Tile[] {
+  const c = r.checkins;
+  const reported = r.symptoms.filter((s) => s.source !== "photo");
+  const topics = new Set(reported.map((s) => s.about));
+  const top = r.highest && r.highest.source !== "photo" ? r.highest : (reported[0] ?? null);
+  const slots = r.medicines.adherence.flatMap((a) => [a.morning, a.evening]);
+  const sent = slots.filter((s) => s !== "no reminder").length;
+  const taken = slots.filter((s) => s === "taken").length;
+  const photos = r.medicines.labelChecks;
+  const differing = r.medicines.labelMismatches.length;
+  const rates = r.vitals.readings.flatMap((v) => (v.heartRate !== null ? [Math.round(v.heartRate)] : []));
+  const checkinBits = [
+    c.notToday > 0 ? `${c.notToday} &ldquo;Not today&rdquo;` : "",
+    c.missed > 0 ? `${c.missed} missed` : "",
+    c.inProgress > 0 ? `${c.inProgress} started, not finished` : "",
+    c.none > 0 ? `${c.none} with no check-in sent` : "",
+  ].filter(Boolean);
+  const ruleIds = [...new Set(r.flags.map((f) => f.ruleId))];
+  const labsLine = r.patient.record === "ok" ? `${plural(r.labs.length, "lab test")} &middot; ${plural(r.patient.conditions.length, "active problem")}` : "No record copy stored";
+  return [
+    { label: "Check-ins", big: String(c.answered), small: `of ${r.days.length} days answered`, lines: [checkinBits.length > 0 ? checkinBits.join(" &middot; ") : "No day missed"], source: "From her daily check-ins" },
+    {
+      label: "What she reported",
+      big: String(reported.length),
+      small: reported.length === 1 ? "symptom report" : "symptom reports",
+      lines: [top ? `${plural(topics.size, "topic")} &middot; highest ${levelBadge(top.level)}` : "Nothing above Level 0"],
+      source: "Her answers and words; levels set by fixed rules",
+      watch: Boolean(top && top.level >= 3),
+    },
+    {
+      label: "Medicines",
+      big: String(taken),
+      small: sent > 0 ? `of ${sent} reminders confirmed` : "reminders confirmed",
+      lines: [
+        photos.total > 0 ? `${plural(photos.total, "label photo")} checked${differing > 0 ? `, ${differing} differ${differing === 1 ? "s" : ""} from her list` : ""}` : "No label photos",
+        r.medicines.refills.length > 0 ? plural(r.medicines.refills.length, "refill reminder") : "",
+      ].filter(Boolean),
+      source: "From the reminders and photos in her chat",
+    },
+    {
+      label: "Camera vitals",
+      big: String(r.vitals.readings.length),
+      small: r.vitals.readings.length === 1 ? "reading" : "readings",
+      lines: [rates.length > 0 ? `heart rate ${num(Math.min(...rates))}${Math.min(...rates) === Math.max(...rates) ? "" : ` to ${num(Math.max(...rates))}`} beats/min` : "None taken this week"],
+      source: "Presage camera estimate, not a medical measurement",
+    },
+    {
+      label: "Record flags",
+      big: String(r.flags.length),
+      small: r.flags.length === 1 ? "for your review" : "for your review",
+      lines: [ruleIds.length > 0 ? esc(ruleIds.join(", ")) : "No open rule flags"],
+      source: "Fixed rules on her FinchNode record",
+      watch: r.flags.length > 0,
+    },
+    {
+      label: "Her record",
+      big: String(r.medicines.active.length),
+      small: r.medicines.active.length === 1 ? "medicine" : "medicines",
+      lines: [labsLine],
+      source: r.patient.record === "ok" ? `FinchNode, data as of ${reportDate(r.patient.dataAsOf ?? "unknown")}` : "FinchNode",
+    },
+  ];
+}
+
+/** "In brief": what the week's data says, in plain words and in the data's own terms. No assessment, no advice. */
+function briefLines(r: DoctorReport): string[] {
+  const c = r.checkins;
+  const datesOf = (o: CheckinOutcome) => c.perDay.filter((d) => d.outcome === o).map((d) => shortDate(d.day));
+  const out: string[] = [];
+  const checkin = [`Answered ${c.answered} of ${r.days.length} check-ins.`];
+  if (c.notToday > 0) checkin.push(`&ldquo;Not today&rdquo; on ${esc(andList(datesOf("not_today")))}.`);
+  if (c.missed > 0) checkin.push(`Missed ${esc(andList(datesOf("missed")))}.`);
+  out.push(checkin.join(" "));
+
+  const reported = r.symptoms.filter((s) => s.source !== "photo");
+  const top = reported[0];
+  if (!top) {
+    out.push("No symptoms above Level 0 were reported.");
+  } else {
+    const followUp = r.followUps.find((f) => f.day === top.day && f.about === top.about && f.answer);
+    out.push(
+      `Highest level: ${levelBadge(top.level)} ${esc(top.about)}, ${esc(shortDate(top.day))}.${top.words ? ` Her words: ${quoted(top.words)}` : ""}${followUp ? ` Her follow-up that day: ${quoted(followUp.answer!)}.` : ""}`,
+    );
+  }
+
+  const t = r.medicines.totals;
+  const days = r.medicines.adherence.length;
+  const m = r.medicines.labelMismatches[0];
+  out.push(
+    `Medicine reminders confirmed: morning ${t.morning.taken} of ${days} days, evening ${t.evening.taken} of ${days}.${
+      m ? ` Label photo ${esc(shortDate(m.day))} read ${esc(strengthText(m.label))}${m.onHerList ? `; her list has ${esc(strengthText(m.onHerList))}` : ""}; she was told to check with her pharmacist.` : ""
+    }`,
+  );
+
+  const rates = r.vitals.readings.flatMap((v) => (v.heartRate !== null ? [Math.round(v.heartRate)] : []));
+  if (r.vitals.readings.length > 0) {
+    out.push(`Camera vitals: ${plural(r.vitals.readings.length, "estimate")}${rates.length > 0 ? `, heart rate ${num(Math.min(...rates))}${Math.min(...rates) === Math.max(...rates) ? "" : ` to ${num(Math.max(...rates))}`} beats/min` : ""}.`);
+  }
+  return out;
+}
+
+/** What an item of evidence says, short: medicines by name, each lab as its latest value and date with the one before it. The record source and id are on page 2. */
+function evidenceBrief(evidence: Evidence[]): string {
+  const seen = new Set<string>();
+  const items = evidence.filter((e) => {
+    const key = `${e.value}|${e.date}`;
+    return seen.has(key) ? false : (seen.add(key), true);
+  });
+  const medicines: string[] = [];
+  const labsByName = new Map<string, { value: string; date: string }[]>();
+  const papers: string[] = [];
+  for (const e of items) {
+    if (e.resourceId.startsWith("paper:")) {
+      papers.push(evidenceLine(e));
+      continue;
+    }
+    const colon = e.value.indexOf(": ");
+    if (colon < 0) {
+      medicines.push(esc(medicationName(e.value).replace(/\s+(?:extended-release |delayed-release )?(?:oral )?(?:tablet|capsule)(?: \(\d+ hour\))?$/i, "")));
+      continue;
+    }
+    const name = labName(e.value.slice(0, colon));
+    labsByName.set(name, [...(labsByName.get(name) ?? []), { value: unitText(e.value.slice(colon + 2)), date: e.date ?? "" }]);
+  }
+  const parts: string[] = [];
+  if (medicines.length > 0) parts.push(`Medicines: ${medicines.join(", ")}`);
+  for (const [name, list] of labsByName) {
+    const byNewest = [...list].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+    const [latest, ...earlier] = byNewest as [{ value: string; date: string }, ...{ value: string; date: string }[]];
+    parts.push(`${esc(name)} ${esc(latest.value)}${latest.date ? ` (${esc(reportDate(latest.date))})` : ""}${earlier.length > 0 ? `, earlier ${earlier.map((x) => `${esc(x.value.split(" ")[0])}${x.date ? ` (${esc(reportDate(x.date))})` : ""}`).join(", ")}` : ""}`);
+  }
+  parts.push(...papers);
+  return parts.join(". ");
+}
+
+/** The doctor report as a printable HTML page (US letter): page 1 the summary, page 2 the reference detail. */
 export function renderDoctorReportHtml(r: DoctorReport): string {
   const p = r.patient;
   const tz = p.timezone;
@@ -266,44 +467,14 @@ export function renderDoctorReportHtml(r: DoctorReport): string {
   const clock = (hhmm: string | null) => (hhmm ? `${esc(hhmm)} ${esc(zone)}` : "");
   const generated = `${reportDate(r.generatedOn)}, ${new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(r.generatedAt))} ${zone} (${tz})`;
   const sources = p.sources.length > 0 ? andList(p.sources) : "her health record";
+  const sex = p.gender ? p.gender.charAt(0).toUpperCase() + p.gender.slice(1).toLowerCase() : "sex not in record";
+  const who = `${esc(name)} &middot; born ${p.birthDate ? esc(reportDate(p.birthDate)) : "not in record"} &middot; ${p.age !== null ? `${esc(p.age)} years` : "age not in record"} &middot; ${esc(sex)}`;
 
-  // Identifiers and problem list.
-  const ids = `
-    <div class="ids">
-      <div><b>Name:</b> ${esc(name)}<br><b>Date of birth:</b> ${p.birthDate ? esc(reportDate(p.birthDate)) : "not in record"}</div>
-      <div><b>Sex:</b> ${esc(p.gender ? p.gender.charAt(0).toUpperCase() + p.gender.slice(1) : "not in record")}<br><b>Age:</b> ${p.age !== null ? `${esc(p.age)} years` : "not in record"}</div>
-      <div><b>Record ID (FinchNode):</b> <span class="code">${esc(p.recordId ?? "none")}</span><br><b>Record data as of:</b> ${p.record === "ok" ? esc(reportDate(p.dataAsOf ?? "unknown")) : "no record copy stored"}</div>
-    </div>
-    <div class="source"><b>Source:</b> Patient-generated health data from daily check-ins, plus records from ${esc(sources)} via FinchNode. Synthetic demo data.</div>`;
-  const problems = `<div class="problems"><b>Active problems (from her record):</b> ${
-    p.conditions.length === 0
-      ? "none listed"
-      : p.conditions.map((c) => `${esc(c.name)}${c.code ? ` <span class="code">${esc(SYSTEM_NAMES[c.system ?? ""] ?? c.system ?? "")} ${esc(c.code)}</span>` : ""}`).join("; ")
-  }</div>`;
-
-  // The week at a glance.
   const c = r.checkins;
-  const datesOf = (o: CheckinOutcome) => c.perDay.filter((d) => d.outcome === o).map((d) => reportDate(d.day));
-  const checkinParts = [`${c.answered} answered`];
-  if (c.notToday > 0) checkinParts.push(`${c.notToday} &ldquo;Not today&rdquo; (${esc(andList(datesOf("not_today")))})`);
-  if (c.missed > 0) checkinParts.push(`${c.missed} missed (${esc(andList(datesOf("missed")))})`);
-  if (c.inProgress > 0) checkinParts.push(`${c.inProgress} started, not finished`);
-  if (c.none > 0) checkinParts.push(`${c.none} with no check-in sent`);
-  const top = r.highest;
-  const highestLine = top ? `${levelBadge(top.level)} ${esc(top.about)}, ${esc(reportDate(top.day))}` : "Nothing above Level 0 this week.";
-  const followUpLines = r.followUps.map((f) => {
-    const how = f.answer ? `${quoted(f.answer)}${f.answeredAt ? ` at ${clock(f.answeredAt)}` : ""}` : f.sentAt ? `sent ${clock(f.sentAt)}, no answer` : "not sent yet";
-    return `<li>${esc(reportDate(f.day))}, ${esc(f.about)}${f.level !== null ? ` (${esc(levelText(f.level))})` : ""}: ${how}</li>`;
-  });
-  const t = r.medicines.totals;
-  const reviewCount = r.flags.length + r.medicines.labelMismatches.length;
-  const glance = `
-    <ul>
-      <li><b>Check-ins:</b> ${checkinParts.join(", ")}, over ${r.days.length} days.</li>
-      <li><b>Highest level:</b> ${highestLine}.</li>
-      <li><b>Follow-ups (${r.followUps.length}):</b> ${r.followUps.length === 0 ? "none this week." : `<ul>${followUpLines.join("")}</ul>`}</li>
-      <li><b>Medicine reminders:</b> morning ${t.morning.taken} taken, ${t.morning.notConfirmed} not confirmed; evening ${t.evening.taken} taken, ${t.evening.notConfirmed} not confirmed. <b>Items for review:</b> ${reviewCount}.</li>
-    </ul>`;
+  const tiles = collectedTiles(r).map(tileHtml).join("");
+  const brief = briefLines(r).map((l) => `<li>${l}</li>`).join("");
+
+  // Day by day.
   const levelOfDay = (day: string) => r.symptoms.filter((s) => s.day === day).reduce((m, s) => Math.max(m, s.level), -1);
   const head = r.days.map((d) => `<th>${esc(weekday(d))}<br>${esc(reportDate(d).replace(/, \d{4}$/, ""))}</th>`).join("");
   const outcomeRow = c.perDay.map((d) => `<td class="${d.outcome === "missed" ? "bad" : ""}">${esc(OUTCOME_WORDS[d.outcome])}</td>`).join("");
@@ -316,6 +487,7 @@ export function renderDoctorReportHtml(r: DoctorReport): string {
     .join("");
   const doseRow = (slot: "morning" | "evening") =>
     r.medicines.adherence.map((a) => `<td class="${a[slot] === "not confirmed" ? "bad" : a[slot] === "no reminder" ? "muted" : ""}">${esc(DOSE_WORDS[a[slot]])}</td>`).join("");
+  const legend = [0, 1, 2, 3, 4, 5].map((l) => `${l} ${esc(l === 0 ? "fine" : LEVEL_WORDS[l] ?? "")}`).join(" &middot; ");
   const week = `
     <div class="wrap"><table class="week">
       <tr><th>${esc(r.to.slice(0, 4))}</th>${head}</tr>
@@ -323,21 +495,28 @@ export function renderDoctorReportHtml(r: DoctorReport): string {
       <tr><td>Highest level</td>${levelRow}</tr>
       <tr><td>Morning medicines</td>${doseRow("morning")}</tr>
       <tr><td>Evening medicines</td>${doseRow("evening")}</tr>
-    </table></div>`;
+    </table></div>
+    <div class="legend">Levels, set by fixed rules: ${legend}.</div>`;
 
-  // S: what she reported.
-  const symptoms =
-    r.symptoms.length === 0
-      ? `<p class="muted">Nothing above Level 0 this week.</p>`
-      : `<div class="wrap"><table><tr><th>Severity level</th><th>Date</th><th>About</th><th>Her answer or her own words</th><th>How reported</th></tr>${r.symptoms.map(symptomRow).join("")}</table></div>`;
+  // For your review: one card per rule flag, the label photos and the hospital papers.
+  const flagCards = r.flags.map(
+    (f) => `<div class="flag"><div class="rule">${esc(f.ruleId)}</div><div><b>${esc(DOCTOR_RULE_LABELS[f.ruleId])}</b><div class="what">${evidenceBrief(f.evidence)}</div></div><div class="chip">${esc(FLAG_STATUS[f.status])}</div></div>`,
+  );
+  const m = r.medicines;
+  const review = r.flags.length === 0 ? `<p class="muted">No open rule flags.</p>` : flagCards.join("");
+
+  // What she reported.
+  const symptoms = r.symptoms.length === 0 ? `<p class="muted">Nothing above Level 0 this week.</p>` : symptomTable(r.symptoms);
   const shown = new Set(r.symptoms.map((x) => `${x.day}|${x.words}`));
   const extraNotes = r.notes.filter((n) => !shown.has(`${n.day}|${n.text}`));
   const notes =
-    extraNotes.length === 0
-      ? ""
-      : `<h3>Her other notes for you</h3><ul>${extraNotes.map((n) => `<li>${esc(reportDate(n.day))}, ${esc(n.about)}: ${quoted(n.text)}</li>`).join("")}</ul>`;
+    extraNotes.length === 0 ? "" : `<h3>Her other notes for you</h3><ul>${extraNotes.map((n) => `<li>${esc(reportDate(n.day))}, ${esc(n.about)}: ${quoted(n.text)}</li>`).join("")}</ul>`;
+  const questions =
+    r.visitQuestions.length === 0
+      ? `<p class="muted">None this week.</p>`
+      : `<ul>${r.visitQuestions.map((q) => `<li>${esc(reportDate(q.day))}: ${quoted(q.text)}</li>`).join("")}</ul>`;
 
-  // O: camera wellness estimates and labs from her record.
+  // Page 2: camera vitals, labs, medications, problem list, the evidence behind each flag, and where it all comes from.
   const range = r.vitals.usualRange;
   const afib = /atrial fibrillation/i.test(range?.note ?? "");
   const rangeLine = afib
@@ -369,9 +548,6 @@ export function renderDoctorReportHtml(r: DoctorReport): string {
               `<tr><td>${esc(labName(l.name))}</td><td class="code">${esc(l.loinc ?? "")}</td><td><b>${esc(num(l.value))}</b> ${esc(unitText(l.unit))}</td><td>${refText(l)} ${esc(unitText(l.unit))}</td><td class="${refFlag(l).startsWith("within") ? "muted" : "bad"}">${esc(refFlag(l))}</td><td>${esc(reportDate(l.date))}</td><td class="muted">${l.previous ? `${esc(num(l.previous.value))}, ${esc(reportDate(l.previous.date))}` : "none"}</td></tr>`,
           )
           .join("")}</table></div>`;
-
-  // Medications, reconciliation-style.
-  const m = r.medicines;
   const medNotes = (a: DoctorReport["medicines"]["active"][number]): string[] => [
     ...m.labelMismatches
       .filter((l) => l.onHerList === a.plain)
@@ -399,34 +575,20 @@ export function renderDoctorReportHtml(r: DoctorReport): string {
             return notes.length > 0 ? `${row}<tr class="note"><td colspan="4">This week: ${notes.join(" ")}</td></tr>` : row;
           })
           .join("")}</table></div>${offList.length > 0 ? `<ul>${offList.join("")}</ul>` : ""}`;
-
-  // Items for clinician review: rule flags with evidence, label photos and hospital papers.
-  const flagRows = r.flags.map((f) => {
+  const problems =
+    p.conditions.length === 0
+      ? `<p class="muted">None listed.</p>`
+      : `<ul class="two">${p.conditions.map((cd) => `<li>${esc(cd.name)}${cd.code ? ` <span class="code">${esc(SYSTEM_NAMES[cd.system ?? ""] ?? cd.system ?? "")} ${esc(cd.code)}</span>` : ""}</li>`).join("")}</ul>`;
+  const evidenceRows = r.flags.map((f) => {
     const seen = new Set<string>();
     const evidence = f.evidence.filter((e) => {
       const key = `${e.value}|${e.date}`;
       return seen.has(key) ? false : (seen.add(key), true);
     });
     const status = `${esc(FLAG_STATUS[f.status])}; <span class="muted">stored ${esc(reportDate(f.createdOn))}${f.toldOn ? `, told ${esc(reportDate(f.toldOn))}` : ""}${f.notedOn ? `, noted ${esc(reportDate(f.notedOn))}` : ""}</span>`;
-    return `<tr><td>${esc(f.ruleId)}${f.severity ? ` <span class="muted">${esc(f.severity)}</span>` : ""}</td><td><b>${esc(DOCTOR_RULE_LABELS[f.ruleId])}.</b> ${evidence.map(evidenceLine).join("; ")}.</td><td>${status}</td></tr>`;
+    return `<li><b>${esc(f.ruleId)}${f.severity ? ` <span class="muted">${esc(f.severity)}</span>` : ""}.</b> ${evidence.map(evidenceLine).join("; ")}. ${status}</li>`;
   });
-  const otherItems = [
-    ...m.labelMismatches.map(
-      (l) =>
-        `<li>Label photo ${esc(reportDate(l.day))}: read <b>${esc(strengthText(l.label))}</b>; ${l.outcome === "strength_differs" ? `her medication list has ${esc(strengthText(l.onHerList ?? "another strength"))} (strength differs)` : "not on her medication list"}. She was told to check with her pharmacist.</li>`,
-    ),
-    ...m.paperChecks
-      .filter((pc) => pc.outcome === "flag")
-      .map((pc) => `<li>Hospital papers${pc.organization ? ` from ${esc(pc.organization)}` : ""}${pc.paperDate ? `, dated ${esc(reportDate(pc.paperDate))}` : ""}, checked ${esc(reportDate(pc.day))}: ${pc.discrepancies.map(discrepancyLine).join("; ")} (R6).</li>`),
-  ];
-  const review = `
-    ${r.flags.length === 0 ? `<p class="muted">No open rule flags.</p>` : `<div class="wrap"><table class="flags"><tr><th>Rule, priority</th><th>What the rule found; evidence: value, date, record source and id</th><th>Status with her</th></tr>${flagRows.join("")}</table></div>`}
-    ${otherItems.length > 0 ? `<ul style="margin-top:2px">${otherItems.join("")}</ul>` : ""}`;
-
-  const questions =
-    r.visitQuestions.length === 0
-      ? `<p class="muted">None this week.</p>`
-      : `<ul>${r.visitQuestions.map((q) => `<li>${esc(reportDate(q.day))}: ${quoted(q.text)}</li>`).join("")}</ul>`;
+  const about = `<div class="about"><b>Made from:</b> her check-ins, reminders and photos in Relay (what she tapped or typed), Presage camera estimates from video calls, and her FinchNode record (${esc(sources)}; record ID <span class="code">${esc(p.recordId ?? "none")}</span>; ${p.record === "ok" ? `data as of ${esc(reportDate(p.dataAsOf ?? "unknown"))}` : "no record copy stored"}). Levels and flags come from fixed rules. <b>Not included:</b> medical conclusions, dosing advice, or anything she did not report and her record does not show.</div>`;
 
   const title = `Check-in summary: ${name}, ${reportDate(r.from)} to ${reportDate(r.to)}`;
   return `<!doctype html>
@@ -441,27 +603,32 @@ export function renderDoctorReportHtml(r: DoctorReport): string {
 <div class="page">
   <div class="banner">${SYNTHETIC_BANNER}</div>
   <header>
-    <h1>Check-in summary for clinician review</h1>
-    <div class="meta"><b>Report period:</b> ${esc(reportDate(r.from))} to ${esc(reportDate(r.to))} (${r.days.length} days)<br><b>Generated:</b> ${esc(generated)}</div>
+    <div><h1>Weekly check-in summary</h1><div class="who">${who}</div></div>
+    <div class="meta"><b>${esc(reportDate(r.from))} to ${esc(reportDate(r.to))}</b> (${r.days.length} days)<br>Generated ${esc(generated)}</div>
   </header>
-  ${ids}
-  ${problems}
 
-  <div class="cols">
-    <section><h2>The week at a glance</h2>${glance}</section>
-    <section><h2>Day by day <small>(severity level 0 to 5)</small></h2>${week}</section>
-  </div>
+  <section><h2>What was collected this week</h2><div class="tiles">${tiles}</div></section>
 
-  <section><h2>Items for clinician review <small>(flags from fixed rules; no assessment is made)</small></h2>${review}</section>
+  <section><h2>In brief</h2><ul>${brief}</ul></section>
 
-  <section><h2>Subjective <small>(patient-reported, severity levels set by fixed rules)</small></h2>${symptoms}${notes}</section>
+  <section><h2>Day by day</h2>${week}</section>
+
+  <section><h2>For your review <small>(flags from fixed rules; no assessment is made)</small></h2>${review}</section>
+
+  <section><h2>What she reported <small>(her words; levels set by fixed rules)</small></h2>${symptoms}${notes}</section>
 
   <section><h2>Her questions for the visit</h2>${questions}</section>
 
-  <!-- Page 1 above stands alone (what needs attention and what she said); the reference tables follow. -->
-  <section class="reference"><h2>Objective <small>(camera estimates and her record)</small></h2>${vitals}${labs}</section>
+  <!-- Page 1 above stands alone; the reference detail follows. -->
+  <section class="reference"><h2>Camera vitals and labs <small>(estimates and her record)</small></h2>${vitals}${labs}</section>
 
-  <section class="keep"><h2>Medications <small>(her active list from the record as of ${esc(reportDate(r.to))}, with this week's events)</small></h2>${meds}</section>
+  <section><h2>Medications <small>(her active list from the record as of ${esc(reportDate(r.to))}, with this week's events)</small></h2>${meds}</section>
+
+  <section><h2>Problem list <small>(from her record)</small></h2>${problems}</section>
+
+  <section><h2>Evidence behind each flag <small>(value, date, record source and id)</small></h2>${evidenceRows.length === 0 ? `<p class="muted">No open rule flags.</p>` : `<ul>${evidenceRows.join("")}</ul>`}</section>
+
+  <section><h2>About this report</h2>${about}</section>
 
   <footer><span class="claim">${REPORT_FOOTER}</span><span>${SYNTHETIC_BANNER}</span></footer>
 </div>

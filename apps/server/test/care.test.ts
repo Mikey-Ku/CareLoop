@@ -756,6 +756,26 @@ describe("GeminiCareWriter (the shared LlmClient words the care texts)", () => {
     expect(checkWritten("**CHECK-IN** done", "doctor", view)).toBe("CHECK-IN done");
   });
 
+  it("checkWritten keeps the family from reading 'nothing was wrong' when her answers are withheld from them", () => {
+    const view = { seniorName: "Harriet" };
+    const claims = [
+      "Harriet completed her check-in for the day. She did not report any symptoms.",
+      "Harriet checked in. There are no new health concerns.",
+      "Nothing to report today.",
+      "Harriet is doing well today.",
+      "Everything was fine on her check-in.",
+    ];
+    for (const claim of claims) {
+      expect(checkWritten(claim, "family", view, "status"), claim).toBeUndefined();
+      expect(checkWritten(claim, "family", view, "status_vitals"), claim).toBeUndefined();
+    }
+    // With everything shared the model has the answers, so a plain statement of them stands; the doctor always sees everything.
+    expect(checkWritten(claims[0]!, "family", view, "all")).toBe(claims[0]);
+    expect(checkWritten(claims[0]!, "doctor", view, "status")).toBe(claims[0]);
+    // What the family may be told at the lowest level is still fine, including that nothing urgent came up.
+    expect(checkWritten("Harriet completed her check-in today. Nothing urgent came up.", "family", view, "status")).toBe("Harriet completed her check-in today. Nothing urgent came up.");
+  });
+
   it("the prompts differ by reader and kind, and carry the grounding rules", async () => {
     setup();
     await checkIn();

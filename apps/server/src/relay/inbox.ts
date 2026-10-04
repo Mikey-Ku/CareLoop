@@ -531,6 +531,8 @@ export type RunRelayInboxOptions = {
   engine: InboxEngine;
   /** Downloads her photos. Defaults to the global fetch. */
   fetch?: typeof fetch;
+  /** Sends the family welcome and the replies to her photos. Defaults to a RelayMessenger over `relay`. */
+  messenger?: Messenger;
   patientHandle: string;
   signal?: AbortSignal;
   log?: RelayLog;
@@ -554,6 +556,7 @@ export async function runRelayInbox(options: RunRelayInboxOptions): Promise<void
     log,
     ...(options.now ? { now: options.now } : {}),
     ...(options.fetch ? { fetch: options.fetch } : {}),
+    ...(options.messenger ? { messenger: options.messenger } : {}),
     ...(options.callHandler ? { callHandler: options.callHandler } : {}),
   });
   inbox.wake();

@@ -1,6 +1,9 @@
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { inspect } from "node:util";
 import { describe, expect, it } from "vitest";
-import { ConfigError, DEFAULT_GEMINI_CALL_MODELS, DEFAULT_GEMINI_MODELS, loadConfig, normalizeHandle, parseHandles, resolveCheckinDate } from "../src/config.ts";
+import { ConfigError, DEFAULT_GEMINI_CALL_MODELS, DEFAULT_GEMINI_MODELS, KNOWN_ENV_NAMES, loadConfig, normalizeHandle, parseHandles, resolveCheckinDate } from "../src/config.ts";
+import { REPO_ROOT } from "../src/finchnode/fixtures.ts";
 
 const TOKEN = "relay_agent_tok_SECRET_123";
 
@@ -30,6 +33,13 @@ describe("loadConfig defaults", () => {
       familyHandles: [],
       timezone: "America/Detroit",
     });
+  });
+
+  it("keeps the longest video pause under SmartSpectra's own 2 s limit, whatever VITALS_MAX_FRAME_GAP_MS says", () => {
+    expect(loadConfig({}).calls.maxFrameGapMs).toBe(1_900);
+    expect(loadConfig({ VITALS_MAX_FRAME_GAP_MS: "1500" }).calls.maxFrameGapMs).toBe(1_500);
+    expect(loadConfig({ VITALS_MAX_FRAME_GAP_MS: "3000" }).calls.maxFrameGapMs).toBe(1_900);
+    expect(loadConfig({ VITALS_MAX_FRAME_GAP_MS: "10000" }).calls.maxFrameGapMs).toBe(1_900);
   });
 
   it("treats empty strings as unset, like a fresh .env", () => {
@@ -221,5 +231,23 @@ describe("direct ElevenLabs call settings", () => {
     expect(loadConfig({ ELEVENLABS_STT_LANGUAGE: "" }).calls.elevenLabsSttLanguage).toBeUndefined();
     expect(loadConfig({ ELEVENLABS_STT_LANGUAGE: "  " }).calls.elevenLabsSttLanguage).toBeUndefined();
     for (const bad of ["english", "e", "en-US", "1"]) expect(() => loadConfig({ ELEVENLABS_STT_LANGUAGE: bad }), bad).toThrow("ELEVENLABS_STT_LANGUAGE");
+  });
+});
+
+describe("KNOWN_ENV_NAMES (what demo:check does not call a typo)", () => {
+  it("has every variable in .env.example", () => {
+    const names = [...readFileSync(join(REPO_ROOT, ".env.example"), "utf8").matchAll(/^([A-Z][A-Z0-9_]*)=/gm)].map((match) => match[1]!);
+    expect(names.length).toBeGreaterThan(30);
+    expect(names.filter((name) => !KNOWN_ENV_NAMES.has(name))).toEqual([]);
+  });
+
+  it("has every variable the source reads", () => {
+    const source = join(REPO_ROOT, "apps/server/src");
+    const read = new Set<string>();
+    for (const file of readdirSync(source, { recursive: true, encoding: "utf8" }).filter((name) => name.endsWith(".ts"))) {
+      for (const match of readFileSync(join(source, file), "utf8").matchAll(/\benv\.([A-Z][A-Z0-9_]+)|\bget\("([A-Z][A-Z0-9_]+)"\)/g)) read.add(match[1] ?? match[2]!);
+    }
+    expect(read.size).toBeGreaterThan(3);
+    expect([...read].filter((name) => !KNOWN_ENV_NAMES.has(name))).toEqual([]);
   });
 });

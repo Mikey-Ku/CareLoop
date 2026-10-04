@@ -129,6 +129,8 @@ export type DoctorReport = {
     adherence: { day: string; morning: ReportDose; evening: ReportDose }[];
     totals: { morning: { taken: number; notConfirmed: number }; evening: { taken: number; notConfirmed: number } };
     labelMismatches: { day: string; outcome: "strength_differs" | "not_on_list"; label: string; onHerList: string | null }[];
+    /** Every label photo of the week by outcome, matches and unreadable ones too (labelMismatches lists only the ones that differ). */
+    labelChecks: { total: number; matched: number; unreadable: number };
     refills: { medicine: string; runsOut: string; status: "reminded" | "asked" | "snoozed"; remindedOn: string; familyTold: boolean }[];
     paperChecks: ReportPaperCheck[];
   };
@@ -297,6 +299,14 @@ export function buildDoctorReport(db: Db, patientId: string, options: BuildDocto
   });
 
   const labelMismatches = facts.flatMap((f) => f.medicines.labelMismatches.map((l) => ({ day: f.day, ...l })));
+  const photoRows = (db.prepare(`SELECT outcome, created_at AS createdAt FROM med_label_checks WHERE patient_id = ?`).all(patientId) as { outcome: string; createdAt: string }[])
+    .map((r) => ({ outcome: r.outcome, day: localDay(r.createdAt, tz) }))
+    .filter((r) => r.day >= from && r.day <= to);
+  const labelChecks = {
+    total: photoRows.length,
+    matched: photoRows.filter((r) => r.outcome === "match").length,
+    unreadable: photoRows.filter((r) => r.outcome === "unreadable").length,
+  };
 
   // A refill shows on each day it was reminded or answered; the week keeps its latest state.
   const refillMap = new Map<string, DoctorReport["medicines"]["refills"][number]>();
@@ -402,6 +412,7 @@ export function buildDoctorReport(db: Db, patientId: string, options: BuildDocto
       adherence,
       totals: { morning: tally("morning"), evening: tally("evening") },
       labelMismatches,
+      labelChecks,
       refills: [...refillMap.values()],
       paperChecks,
     },

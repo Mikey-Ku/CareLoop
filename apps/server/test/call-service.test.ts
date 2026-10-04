@@ -1,8 +1,8 @@
 import type { Call, CallWebhookEvent } from "@relaymessenger/sdk";
 import type { RelayCallTransport } from "@relaymessenger/sdk/calls";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ElevenLabsRealtimeStt, ElevenLabsTts } from "../src/calls/audio.ts";
-import { CAMERA_OFFER_AT_END, callClosing, cantHearYou } from "../src/calls/copy.ts";
+import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, callClosing, cantHearYou } from "../src/calls/copy.ts";
 import { emptyCallVitals } from "../src/calls/screening.ts";
 import { CallService, type CallEngine } from "../src/calls/service.ts";
 import { createCheckinEngine } from "../src/checkin/engine.ts";
@@ -46,6 +46,8 @@ class FakeTransport {
   readonly waitForPeerAudio = vi.fn(async (_timeoutMs: number) => {});
   /** Her video track once it has reached the call; the tests set it, or emit the events. */
   remoteVideoTrack: object | undefined = undefined;
+  /** Her video's counters as the SDK's videoStats() reports them. Fakes that say nothing leave it unset. */
+  videoStats: (() => unknown) | undefined = undefined;
   readonly connect = vi.fn(async () => {});
   readonly close = vi.fn(() => this.emit("close"));
   readonly end = vi.fn(() => this.emit("ended"));
@@ -67,6 +69,7 @@ class FakeBridge {
   readonly stop = vi.fn(async () => emptyCallVitals());
   readonly result = vi.fn(() => emptyCallVitals());
   readonly beginQuietMeasurement = vi.fn();
+  readonly measuring = vi.fn(() => this.quiet.status !== "interrupted");
 }
 
 class FakeStt {
@@ -480,18 +483,58 @@ describe("her audio goes to the transcriber", () => {
   });
 });
 
-describe("the camera reading is offered only while her video is on", () => {
+describe("the camera reading is offered only while her video is on, and without it she is told how to turn it on", () => {
   const withCamera = { PRESAGE_API_KEY: "presage-test-key" }; // a bridge exists, as on the demo machine
   const endsTheCall = () => modelPlan();
   const turn = "My ankles are a bit swollen.";
 
-  it("an audio-only call is never offered it", async () => {
+  it("an audio-only call is not offered the reading but told how to turn her camera on, and may say no", async () => {
     const service = setup({ callTurn: endsTheCall, env: withCamera });
     await start(service);
     stt.emit(turn);
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_GUIDANCE));
+    expect(tts.spoken).not.toContain(CAMERA_OFFER_AT_END);
+    expect(transport.end).not.toHaveBeenCalled(); // the call waits for her answer
+    stt.emit("No thanks.");
     await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
     expect(tts.spoken.at(-1)).toBe(callClosing("Harriet", []));
-    expect(tts.spoken).not.toContain(CAMERA_OFFER_AT_END);
+    expect(bridge.beginQuietMeasurement).not.toHaveBeenCalled();
+  });
+
+  it("she turns her camera on after the guidance and says ready: the quiet reading starts", async () => {
+    const service = setup({ callTurn: endsTheCall, env: withCamera });
+    await start(service);
+    stt.emit(turn);
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_GUIDANCE));
+    transport.emit("remoteVideo", true);
+    stt.emit("Ready.");
+    await vi.waitFor(() => expect(bridge.beginQuietMeasurement).toHaveBeenCalledOnce());
+    expect(tts.spoken.at(-1)).toMatch(/face and upper chest/i);
+    await service.end("call-1");
+  });
+
+  it("she says ready but her camera is still off: she is told once more, then the call goes on without the reading", async () => {
+    const service = setup({ callTurn: endsTheCall, env: withCamera });
+    await start(service);
+    stt.emit(turn);
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_GUIDANCE));
+    stt.emit("Ready.");
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_STILL_OFF));
+    stt.emit("Ready now.");
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(tts.spoken.at(-1)).toBe(callClosing("Harriet", []));
+    expect(bridge.beginQuietMeasurement).not.toHaveBeenCalled();
+  });
+
+  it("she hangs up as the call is being ended: ending a room that is gone is logged, not thrown", async () => {
+    const service = setup({ callTurn: endsTheCall });
+    transport.end.mockImplementation(() => { throw new Error("Relay Call room is not connected."); });
+    await start(service);
+    stt.emit(turn);
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(logs.find((entry) => entry.event === "call_end_failed")).toMatchObject({ error: "Error: Relay Call room is not connected." });
+    expect(logs.some((entry) => entry.event === "call_turn_failed")).toBe(false);
+    await service.end("call-1");
   });
 
   it("a call without Presage is never offered it, video or not", async () => {
@@ -520,7 +563,7 @@ describe("the camera reading is offered only while her video is on", () => {
   it.each([
     ["turns her camera off", () => transport.emit("remoteVideo", false)],
     ["loses her video track", () => transport.emit("trackUnsubscribed", {})],
-  ])("a call where she %s before the goodbye gets no offer", async (_how, cameraOff) => {
+  ])("a call where she %s before the goodbye gets the guidance, not the offer", async (_how, cameraOff) => {
     let turns = 0;
     const service = setup({ callTurn: () => (turns += 1) === 1 ? modelPlan({ nextAction: "ask_follow_up", nextQuestion: "When did the swelling start?" }) : modelPlan(), env: withCamera });
     await start(service);
@@ -529,9 +572,237 @@ describe("the camera reading is offered only while her video is on", () => {
     await vi.waitFor(() => expect(tts.spoken.at(-1)).toContain("When did the swelling start?"));
     cameraOff();
     stt.emit("Since Monday.");
-    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
-    expect(tts.spoken.at(-1)).toBe(callClosing("Harriet", []));
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_GUIDANCE));
     expect(tts.spoken).not.toContain(CAMERA_OFFER_AT_END);
+  });
+});
+
+describe("her video is logged, so a call with no camera offer can be explained", () => {
+  const withCamera = { PRESAGE_API_KEY: "presage-test-key" };
+  const videoLogs = () => logs.filter((entry) => entry.event.startsWith("call_video_") || entry.event === "call_camera_offer_skipped");
+  const skipped = () => logs.filter((entry) => entry.event === "call_camera_offer_skipped");
+  const endsTheCall = () => modelPlan();
+  afterEach(() => vi.useRealTimers());
+
+  it.each([
+    ["trackSubscribed", [true, "trackSubscribed"], () => transport.emit("trackSubscribed", {})],
+    ["remoteVideo", [true, "remoteVideo"], () => transport.emit("remoteVideo", true)],
+  ] as const)("logs her video turning on, with the event that said so (%s)", async (_event, [on, source], emitIt) => {
+    const service = setup();
+    await start(service);
+    emitIt();
+    expect(videoLogs()).toEqual([{ event: "call_video_changed", call_id: "call-1", on, source }]);
+    await service.end("call-1");
+  });
+
+  it.each([
+    ["remoteVideo", () => transport.emit("remoteVideo", false)],
+    ["trackUnsubscribed", () => transport.emit("trackUnsubscribed", {})],
+  ])("logs her video turning off, with the event that said so (%s)", async (source, emitIt) => {
+    const service = setup();
+    transport.remoteVideoTrack = {};
+    await start(service);
+    emitIt();
+    expect(videoLogs()).toEqual([{ event: "call_video_changed", call_id: "call-1", on: false, source }]);
+    await service.end("call-1");
+  });
+
+  it("logs only a change: an event that repeats what is already so says nothing", async () => {
+    const service = setup();
+    await start(service);
+    transport.emit("remoteVideo", false); // off already
+    transport.emit("trackUnsubscribed", {});
+    transport.emit("remoteVideo", true);
+    transport.emit("trackSubscribed", {}); // on already
+    transport.emit("remoteVideo", true);
+    expect(videoLogs().map((entry) => [entry.on, entry.source])).toEqual([[true, "remoteVideo"]]);
+    transport.emit("remoteVideo", false);
+    expect(videoLogs().map((entry) => [entry.on, entry.source])).toEqual([[true, "remoteVideo"], [false, "remoteVideo"]]);
+    await service.end("call-1");
+  });
+
+  describe("the state line, 5 seconds after the call is answered", () => {
+    const counters = { codec: "vp8", rtpPackets: 410, framesAssembled: 90, framesDecoded: 88, decodeErrors: 0, firstFrameAt: 1_790_000_000_000, lastFrameAt: 1_790_000_004_000, width: 640, height: 480 };
+    const stateLines = () => logs.filter((entry) => entry.event === "call_video_state");
+    /** `prepare` sets up the fake transport (setup() makes a new one) before the call is answered. */
+    const startWithFakeTimers = async (options: Parameters<typeof setup>[0] = {}, prepare: () => void = () => {}) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const service = setup(options);
+      prepare();
+      await start(service);
+      return service;
+    };
+
+    it("says once whether her video is on, whether a track reached the agent, whether Presage is set up, and the receive counters", async () => {
+      const service = await startWithFakeTimers({ env: withCamera }, () => {
+        transport.remoteVideoTrack = {};
+        transport.videoStats = () => ({ outbound: undefined, inbound: counters });
+      });
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(stateLines()).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(stateLines()).toEqual([{ event: "call_video_state", call_id: "call-1", on: true, has_track: true, camera_configured: true, stats: { inbound: counters } }]);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(stateLines()).toHaveLength(1);
+      await service.end("call-1");
+    });
+
+    it("reports a call with no camera as it is: off, no track, and no counters when the transport has none to give", async () => {
+      const service = await startWithFakeTimers();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(stateLines()).toEqual([{ event: "call_video_state", call_id: "call-1", on: false, has_track: false, camera_configured: false }]);
+      await service.end("call-1");
+    });
+
+    it("reads her video as it is at that moment, from the events, apart from whether a track is there", async () => {
+      const service = await startWithFakeTimers({ env: withCamera }, () => { transport.remoteVideoTrack = {}; });
+      transport.emit("remoteVideo", false); // her camera went off; the track object is still there
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(stateLines()).toMatchObject([{ on: false, has_track: true }]);
+      await service.end("call-1");
+    });
+
+    it.each([
+      ["a transport that throws", () => { throw new Error("transport closed"); }],
+      ["one that returns nothing usable", () => null],
+    ])("still logs when the counters cannot be read: %s", async (_how, videoStats) => {
+      const service = await startWithFakeTimers({}, () => { transport.videoStats = videoStats; });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(stateLines()).toEqual([{ event: "call_video_state", call_id: "call-1", on: false, has_track: false, camera_configured: false }]);
+      await service.end("call-1");
+    });
+
+    it("keeps only finite numbers and short strings, in the two directions, and never a frame", async () => {
+      const frame = new Uint8Array([1, 2, 3, 4]);
+      const service = await startWithFakeTimers({}, () => {
+        transport.videoStats = () => ({
+          inbound: { ...counters, bytes: Number.POSITIVE_INFINITY, lost: Number.NaN, rawFrame: frame, nested: { frames: 3 }, note: "x".repeat(200), none: undefined, flag: true },
+          outbound: undefined,
+          frames: [frame],
+        });
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(stateLines()).toEqual([{ event: "call_video_state", call_id: "call-1", on: false, has_track: false, camera_configured: false, stats: { inbound: counters } }]);
+      await service.end("call-1");
+    });
+
+    it.each([
+      ["she hangs up", (service: CallService) => service.end("call-1")],
+      ["Relay says the call ended", () => transport.emit("ended")],
+    ])("says nothing when the call is over first (%s)", async (_how, endIt) => {
+      const service = await startWithFakeTimers();
+      await endIt(service);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(stateLines()).toEqual([]);
+      await service.end("call-1");
+    });
+
+    it("never keeps the process alive", async () => {
+      const timers = vi.spyOn(globalThis, "setTimeout");
+      try {
+        const service = setup();
+        await start(service);
+        const index = timers.mock.calls.findIndex(([, delay]) => delay === 5_000);
+        expect(index).toBeGreaterThanOrEqual(0);
+        expect((timers.mock.results[index]!.value as NodeJS.Timeout).hasRef()).toBe(false);
+        await service.end("call-1");
+      } finally {
+        timers.mockRestore();
+      }
+    });
+  });
+
+  describe("the camera offer that was not made", () => {
+    const turn = "My ankles are a bit swollen.";
+
+    it("Presage is set up but her video is off: one line says why, she is told how to turn the camera on, and a no gets the goodbye", async () => {
+      const service = setup({ callTurn: endsTheCall, env: withCamera });
+      await start(service);
+      stt.emit(turn);
+      await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_GUIDANCE));
+      expect(skipped()).toEqual([{ event: "call_camera_offer_skipped", call_id: "call-1", reason: "no_video" }]);
+      expect(tts.spoken).not.toContain(CAMERA_OFFER_AT_END);
+      stt.emit("No thanks.");
+      await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+      expect(tts.spoken.at(-1)).toBe(callClosing("Harriet", []));
+      expect(skipped()).toHaveLength(1);
+    });
+
+    it("her camera turned off before the goodbye counts the same", async () => {
+      let turns = 0;
+      const service = setup({ callTurn: () => (turns += 1) === 1 ? modelPlan({ nextAction: "ask_follow_up", nextQuestion: "When did the swelling start?" }) : modelPlan(), env: withCamera });
+      await start(service);
+      transport.emit("remoteVideo", true);
+      stt.emit(turn);
+      await vi.waitFor(() => expect(tts.spoken.at(-1)).toContain("When did the swelling start?"));
+      expect(skipped()).toEqual([]); // not yet: nothing has been skipped
+      transport.emit("remoteVideo", false);
+      stt.emit("Since Monday.");
+      await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_GUIDANCE));
+      expect(skipped()).toEqual([{ event: "call_camera_offer_skipped", call_id: "call-1", reason: "no_video" }]);
+      stt.emit("No thanks.");
+      await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    });
+
+    it("once per call, even when the goodbye could not be spoken and the call carried on to a second one", async () => {
+      const service = setup({ callTurn: endsTheCall, env: withCamera });
+      await start(service);
+      tts.speak.mockRejectedValueOnce(new Error("ElevenLabs TTS returned HTTP 500")); // the camera guidance, which comes first with her video off
+      stt.emit(turn);
+      await vi.waitFor(() => expect(tts.spoken.at(-1)).toMatch(/did not catch that/i));
+      expect(transport.end).not.toHaveBeenCalled();
+      stt.emit("Since Monday.");
+      await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_GUIDANCE)); // not heard the first time, so said now
+      stt.emit("No thanks.");
+      await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+      expect(llm.calls.filter((call) => call.method === "callTurn")).toHaveLength(3); // the end was reached twice, then her no to the guidance is a turn that ends it
+      expect(skipped()).toHaveLength(1);
+    });
+
+    it("says nothing when Presage is not set up: there was no reading to offer", async () => {
+      const service = setup({ callTurn: endsTheCall });
+      await start(service);
+      stt.emit(turn);
+      await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+      expect(skipped()).toEqual([]);
+    });
+
+    it("says nothing when the offer was made, nor after she turns it down", async () => {
+      const service = setup({ callTurn: endsTheCall, env: withCamera });
+      await start(service);
+      transport.emit("remoteVideo", true);
+      stt.emit(turn);
+      await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_OFFER_AT_END));
+      stt.emit("No thanks.");
+      await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+      expect(skipped()).toEqual([]);
+    });
+
+    it("says nothing when she has to go: that call is never offered the reading, video or not", async () => {
+      const service = setup({ callTurn: () => modelPlan({ nextAction: "end_call" }), env: withCamera });
+      await start(service);
+      stt.emit("I have to go now.");
+      await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+      expect(skipped()).toEqual([]);
+    });
+  });
+
+  it("logs no media and no secret, whatever the transport reports", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const service = setup({ callTurn: endsTheCall, env: { ...withCamera, GEMINI_API_KEY: "gemini-secret-key" } });
+    transport.videoStats = () => ({ inbound: { codec: "h264", framesDecoded: 3, rawFrame: new Uint8Array(8), frameBase64: "AAECAwQFBgc=".repeat(10) }, outbound: undefined });
+    await start(service);
+    transport.emit("remoteVideo", true);
+    await vi.advanceTimersByTimeAsync(5_000);
+    stt.emit("My ankles are a bit swollen.");
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_OFFER_AT_END));
+    const lines = videoLogs();
+    expect(lines.map((entry) => entry.event)).toEqual(["call_video_changed", "call_video_state"]);
+    const text = JSON.stringify(lines);
+    for (const secret of ["presage-test-key", "gemini-secret-key", "test-key", "voice-test"]) expect(text).not.toContain(secret);
+    expect(text).not.toMatch(/AAECAwQFBgc|rawFrame|base64|"0":|samples/i);
+    expect(Object.keys(lines[1]!).sort()).toEqual(["call_id", "camera_configured", "event", "has_track", "on", "stats"]);
+    await service.end("call-1");
   });
 });
 
