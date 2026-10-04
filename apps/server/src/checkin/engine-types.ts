@@ -44,7 +44,7 @@ export type SpokenTurn = { id: string; text: string };
 /** What the call's voice may know before it starts: no record details beyond what the check-in uses. */
 export type CallCheckinContext = {
   firstName: string;
-  /** Today's check-in questions she hasn't answered yet (none when the day's check-in is done). */
+  /** Today's check-in questions she hasn't answered yet; when she has answered them all, all of them again (the call is a full check-in). */
   questions: { id: string; text: string }[];
   /** Yesterday's level 1+ topics in plain words ("ankle swelling", "knee pain"). */
   yesterday: string[];

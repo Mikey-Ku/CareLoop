@@ -1187,3 +1187,42 @@ describe("ConversationOrchestrator: the camera reading as a call-back (CAMERA_CA
     expect(onComplete).toHaveBeenCalledOnce();
   });
 });
+
+describe("ConversationOrchestrator: the call is a full check-in", () => {
+  const QUESTIONS = [
+    { id: "hf-ankle-swelling", text: "Have your ankles or feet been more swollen than usual?" },
+    { id: "dizzy-on-standing", text: "Do you get dizzy when you stand up?" },
+  ];
+  const initialContext = { firstName: "Harriet", questions: QUESTIONS, yesterday: [], memories: [], familyNames: [] };
+
+  it("Gemini would finish on \"I'm feeling great\": each of today's questions is asked first, in fixed words, then the camera check", async () => {
+    const llm = new FakeLlmClient({ callTurn: () => plan() }); // complete_screening on every turn
+    const cameraCallBack = vi.fn();
+    const { spoken, onComplete, say } = buildFlow(llm, { initialContext, canMeasure: () => true, cameraCallBack });
+    await say("I'm feeling great.");
+    await say("No.");
+    await say("No, not at all.");
+    expect(spoken).toEqual([`Thank you for telling me. ${QUESTIONS[0]!.text}`, `Thank you for telling me. ${QUESTIONS[1]!.text}`, CAMERA_CALLBACK_OFFER]);
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(cameraCallBack).not.toHaveBeenCalled();
+  });
+
+  it("a question already asked in the same words is not asked again", async () => {
+    let turns = 0;
+    const llm = new FakeLlmClient({ callTurn: () => ((turns += 1) === 1 ? plan({ nextAction: "ask_follow_up", nextQuestion: QUESTIONS[0]!.text }) : plan()) });
+    const { spoken, onComplete, say } = buildFlow(llm, { initialContext });
+    await say("I'm feeling great.");
+    await say("No.");
+    await say("No, not at all.");
+    expect(spoken).toEqual([`Thank you for telling me. ${QUESTIONS[0]!.text}`, `Thank you for telling me. ${QUESTIONS[1]!.text}`, callClosing("Harriet")]);
+    expect(onComplete).toHaveBeenCalledOnce();
+  });
+
+  it("her \"I have to go\" does not wait for the questions", async () => {
+    const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction: "end_call" }) });
+    const { spoken, onComplete, say } = buildFlow(llm, { initialContext, canMeasure: () => true });
+    await say("I have to go now, my daughter is here.");
+    expect(spoken).toEqual([callClosing("Harriet")]);
+    expect(onComplete).toHaveBeenCalledOnce();
+  });
+});

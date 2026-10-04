@@ -2366,9 +2366,12 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       .filter((o) => o.level >= 1 && o.source !== "safety" && o.source !== "follow_up")
       .map((o) => topicWords(o.topic))
       .filter((w): w is string => w !== undefined);
+    // A call is a full check-in: her unanswered questions, or, when she has answered them all today (in the chat or on
+    // an earlier call), all of them again, so the call still goes through her symptoms before the camera check.
+    const unanswered = open ? unansweredForExtraction(open).map((q) => ({ id: q.id, text: q.question })) : [];
     return {
       firstName: patient.preferredName,
-      questions: open ? unansweredForExtraction(open).map((q) => ({ id: q.id, text: q.question })) : [],
+      questions: unanswered.length > 0 ? unanswered : (c?.questionIds ?? []).map(questionById).map((q) => ({ id: q.id, text: q.text })),
       yesterday: [...new Set(yesterday)].slice(0, 3),
       memories: recentMemories(db, patientId, 3),
       familyNames: familyChats(db, patientId).map(familyName),

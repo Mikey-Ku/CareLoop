@@ -291,6 +291,17 @@ export class ConversationOrchestrator {
       await this.#speak(`${acknowledgment} ${question}`);
       return;
     }
+    if (decision.nextAction === "complete_screening") {
+      // Gemini finishes when it has enough ("I'm feeling great" can be enough), but the call is a full check-in: each of
+      // today's questions is asked first, in fixed words, before the camera check and the goodbye. Not for the
+      // emergency words or her "I have to go".
+      const next = this.#unaskedQuestion;
+      if (next) {
+        this.#lastQuestion = next;
+        await this.#speak(`${FALLBACK_ACKNOWLEDGMENT} ${next}`);
+        return;
+      }
+    }
     if (decision.nextAction === "complete_screening" && this.#canMeasure) {
       // Gemini has what it needs, but the reading only happens if she is asked, and Gemini asks only
       // sometimes. So the offer is ours: once, in fixed words, before the goodbye. Her answer takes the
@@ -456,8 +467,12 @@ export class ConversationOrchestrator {
   #question(modelQuestion: string | null): string {
     const safe = modelQuestion ? guardSpoken(modelQuestion) : undefined;
     if (safe) return safe;
-    const next = this.#options.initialContext.questions.find((q) => !isRepeatedQuestion(q.text, this.#options.transcript));
-    return next?.text ?? OPEN_QUESTION;
+    return this.#unaskedQuestion ?? OPEN_QUESTION;
+  }
+
+  /** Today's first check-in question not yet said on this call, in its fixed words. */
+  get #unaskedQuestion(): string | undefined {
+    return this.#options.initialContext.questions.find((q) => !isRepeatedQuestion(q.text, this.#options.transcript))?.text;
   }
 
   async #loadContext(): Promise<unknown> {
