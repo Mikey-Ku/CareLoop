@@ -1,3 +1,4 @@
+import { buildDigest, renderDigest, storedRecord, type Digest } from "../context/digest.ts";
 import {
   LET_ME_EXPLAIN,
   QUESTION_BANK,
@@ -338,6 +339,11 @@ import {
 //      Each reaction while a check-in step waits re-sends that step after it.
 //   Memories and complaints the model picked out are saved as memories (never on a crisis or
 //   urgent symptom), never acted on.
+// Context digest (src/context/digest.ts, docs/DESIGN.md "Context digest"): every reading of her words (classify,
+// the understanding pass, small talk; her open reply; what she says on a call) gets a digest of what the app
+// knows about her, rebuilt from SQLite and her stored record on each message (digestFor, no LLM, no cache), so
+// "same as yesterday" and "the pills" can be understood. It changes no level, flag or alert: fixed rules decide
+// those, and the model's small talk goes out only after the reply guard (src/context/guard.ts).
 // The LLM call is async and planning is a synchronous transaction, so planning runs twice: the
 // first pass stops at typed text and asks for the LLM's reading without writing anything (the
 // message stays unhandled); the second pass plans with it. A message already handled never
@@ -895,6 +901,26 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     return c?.date ?? latestCheckin(db, patientId)?.date ?? clock.now().slice(0, 10);
   }
 
+  /**
+   * The context digest (src/context/digest.ts) for her next message: rebuilt from the database and her stored
+   * record every time, with no LLM and no cache. Gemini reads it as reference facts, and the history answers are
+   * worded from it. Undefined when it can't be built: the call then goes out without context, as before.
+   */
+  function digestFor(patient: CheckinPatient, day: string): Digest | undefined {
+    try {
+      return buildDigest({ db, patientId: patient.id, day, record: storedRecord(db, patient.id, rxnavCache()), now: clock.now() });
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** The digest as the `context` of an LLM input: `{}` when there is none, so the input has no key at all. */
+  function contextFor(patient: CheckinPatient, day: string): { context?: string } {
+    const digest = digestFor(patient, day);
+    const text = digest ? renderDigest(digest) : "";
+    return text ? { context: text } : {};
+  }
+
   /** What the repetition rule needs: her observations on the last REPETITION.days check-in dates up to `day`. */
   function historyFor(patientId: string, day: string): SeverityHistory {
     return { today: day, observations: observationsBetween(db, patientId, addDays(day, -(REPETITION.days - 1)), day) };
@@ -1429,6 +1455,8 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     const context = contextKey(ctx);
     const here: NoteTarget | undefined = ctx.at === "question" ? { checkinId: ctx.c.id, questionId: ctx.q.id } : undefined;
     if (deps.llm && understood === undefined) {
+      // The context digest goes to all three readings (classify, small talk, the understanding pass).
+      const digest = contextFor(patient, dayFor(patient.id, ctx.at === "question" || ctx.at === "step" ? ctx.c : pendingCheckin(patient.id)));
       return {
         needs: {
           kind: "classify",
@@ -1437,11 +1465,11 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
           about: here,
           // An explicit yes on a red-flag question, or her medicine question: the reply is fixed.
           noSmallTalk: redFlagYes !== undefined || ctx.at === "meds_question",
-          classify: { seniorName: name, message: text, pending: pendingFor(ctx, name) },
-          smallTalk: { seniorName: name, message: text, memories: recentMemories(db, patient.id, SMALL_TALK_MEMORIES) },
+          classify: { seniorName: name, message: text, pending: pendingFor(ctx, name), ...digest },
+          smallTalk: { seniorName: name, message: text, memories: recentMemories(db, patient.id, SMALL_TALK_MEMORIES), ...digest },
           // The understanding pass, while a question waits (an explicit yes on a red-flag question needs none).
           ...(ctx.at === "question" && redFlagYes === undefined
-            ? { extract: { seniorName: name, message: text, questions: unansweredForExtraction(ctx.c), answeringNow: ctx.c.questionIds[ctx.c.questionIndex] } }
+            ? { extract: { seniorName: name, message: text, questions: unansweredForExtraction(ctx.c), answeringNow: ctx.c.questionIds[ctx.c.questionIndex], ...digest } }
             : {}),
         },
       };
@@ -1754,12 +1782,13 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       return { sends: p ? [withButtons(patient, { at: "step", c, prompt: p }, msg, didntUnderstand(p.buttons), "didnt-understand")] : [] };
     }
     if (deps.llm && reading === undefined) {
+      const digest = contextFor(patient, c.date);
       return {
         needs: {
           kind: "extract",
           context: openContext(c),
-          extract: { seniorName: name, message: text, questions: unansweredForExtraction(c) },
-          classify: { seniorName: name, message: text, pending: undefined },
+          extract: { seniorName: name, message: text, questions: unansweredForExtraction(c), ...digest },
+          classify: { seniorName: name, message: text, pending: undefined, ...digest },
         },
       };
     }
@@ -2265,11 +2294,12 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     let reading: SpokenReading | undefined;
     if (words && deps.llm) {
       const open = openOn(patientId, day);
+      const digest = contextFor(patient, day);
       const read = await readOpenReply({
         kind: "extract",
         context: open ? openContext(open) : `call:${day}`,
-        extract: { seniorName: patient.preferredName, message: words, questions: open ? unansweredForExtraction(open) : [] },
-        classify: { seniorName: patient.preferredName, message: words, pending: undefined },
+        extract: { seniorName: patient.preferredName, message: words, questions: open ? unansweredForExtraction(open) : [], ...digest },
+        classify: { seniorName: patient.preferredName, message: words, pending: undefined, ...digest },
       });
       if (read.safety) {
         // The model read a crisis or an urgent symptom the screen missed: it wins, nothing else is recorded.

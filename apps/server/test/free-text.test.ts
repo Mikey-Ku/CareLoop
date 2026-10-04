@@ -169,7 +169,7 @@ describe("typed answer to an ordinary question", () => {
     setup({ classifyMessage: () => answered("A little", "medium") });
     await atAnkles();
     expect(brief(await say("bit puffy"))).toEqual([asked(medicines, notedForDoctor())]);
-    expect(llm?.classifyCalls).toEqual([{ seniorName: "Harriet", message: "bit puffy", pending: { question: ankles.text, options: ankles.buttons } }]);
+    expect(llm?.classifyCalls).toEqual([{ seniorName: "Harriet", message: "bit puffy", pending: { question: ankles.text, options: ankles.buttons }, context: expect.any(String) }]);
     const row = getCheckin(db, P, DAY2)!;
     expect(row).toMatchObject({ step: "question", questionIndex: 1 });
     expect(row.answers).toEqual([
@@ -479,7 +479,7 @@ describe("small talk (nothing pending)", () => {
     addMemories(db, P, ["has a cat called Biscuit"], `${DAY1}T08:00:00.000Z`);
     expect(brief(await say("my granddaughter Mia is visiting on Sunday"))).toEqual([msg(ME, "That sounds lovely, Harriet. Enjoy the visit.")]);
     expect(llm?.smallTalkCalls).toEqual([
-      { seniorName: "Harriet", message: "my granddaughter Mia is visiting on Sunday", memories: ["has a cat called Biscuit"] },
+      { seniorName: "Harriet", message: "my granddaughter Mia is visiting on Sunday", memories: ["has a cat called Biscuit"], context: expect.any(String) },
     ]);
     expect(memories()).toEqual(["granddaughter Mia visits Sunday", "has a cat called Biscuit"]);
     expect(events).toEqual([`activity ${READING_ACTIVITY}`, "llm smallTalk", "send her", "activity cleared"]);
@@ -503,7 +503,7 @@ describe("small talk (nothing pending)", () => {
     setup({ classifyMessage: () => ({ kind: "chat", confidence: "high", complaints: [], memories: [] }), smallTalk: () => chat("Hello, Harriet.") });
     await say("hi there");
     expect(events).toEqual([`activity ${READING_ACTIVITY}`, "llm classifyMessage", "llm smallTalk", "send her", "activity cleared"]);
-    expect(llm?.classifyCalls).toEqual([{ seniorName: "Harriet", message: "hi there", pending: undefined }]);
+    expect(llm?.classifyCalls).toEqual([{ seniorName: "Harriet", message: "hi there", pending: undefined, context: expect.any(String) }]);
   });
 
   it("with no LLM, the fixed fallback (and no label)", async () => {

@@ -215,7 +215,7 @@ describe("her open reply", () => {
       { questionId: mood.id, questionText: mood.text, answer: "Good", at: now, level: 0, via: "free_text", freeText: words },
     ]);
     expect(llm?.extractCalls).toEqual([
-      { seniorName: "Harriet", message: words, questions: [ankles, medicines, mood].map((q) => ({ id: q.id, question: q.text, options: q.buttons })) },
+      { seniorName: "Harriet", message: words, questions: [ankles, medicines, mood].map((q) => ({ id: q.id, question: q.text, options: q.buttons })), context: expect.any(String) },
     ]);
   });
 
@@ -480,7 +480,7 @@ describe("safety comes first in her open reply", () => {
     extractions.push(extracted([[dizzy.id, "No"]]));
     expect(brief(await say(words))).toEqual([msg(ME, crisisReply("Harriet", ["Sarah"])), msg(SARAH, familyCrisisAlert({ seniorName: "Harriet", sharing: "status" }))]);
     expect(answers()).toEqual([]);
-    expect(llm?.classifyCalls).toEqual([{ seniorName: "Harriet", message: words, pending: undefined }]);
+    expect(llm?.classifyCalls).toEqual([{ seniorName: "Harriet", message: words, pending: undefined, context: expect.any(String) }]);
   });
 });
 
@@ -505,7 +505,7 @@ describe("Let me explain", () => {
     readings.push(as("more_detail"));
     const words = "tight at points but fine other times, little cough";
     expect(brief(await say(words))).toEqual([msg(ME, noteSaved("Harriet"), promptButtons(breathing))]);
-    expect(llm?.classifyCalls.at(-1)).toEqual({ seniorName: "Harriet", message: words, pending: { question: breathing.text, options: breathing.buttons } });
+    expect(llm?.classifyCalls.at(-1)).toEqual({ seniorName: "Harriet", message: words, pending: { question: breathing.text, options: breathing.buttons }, context: expect.any(String) });
     expect(checkinNotes(db, row().id).map((n) => [n.questionId, n.text])).toEqual([[breathing.id, words]]);
     expect(row().explainAt).toBeNull();
     expect(answers()).toEqual([]);

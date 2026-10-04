@@ -28,6 +28,8 @@ export type SmallTalkInput = {
   message: string;
   /** A few things she told us before, newest first (memories). */
   memories?: string[];
+  /** The context digest (src/context/digest.ts): reference facts about her, for understanding only. */
+  context?: string | undefined;
 };
 
 export type SmallTalkReply = {
@@ -70,6 +72,8 @@ export type ClassifyInput = {
   message: string;
   /** The question waiting for an answer, if any. */
   pending?: { question: string; options: string[] } | undefined;
+  /** The context digest (src/context/digest.ts): reference facts about her, for understanding only. */
+  context?: string | undefined;
 };
 
 export type MessageClassification = {
@@ -111,6 +115,8 @@ export type ExtractCheckinInput = {
   questions: { id: string; question: string; options: string[] }[];
   /** The question she is replying to right now, when it isn't the opening "How are you feeling today?". */
   answeringNow?: string | undefined;
+  /** The context digest (src/context/digest.ts): reference facts about her, for understanding only. */
+  context?: string | undefined;
 };
 
 export type CheckinExtraction = {
