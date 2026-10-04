@@ -1,3 +1,4 @@
+import { randomInt } from "node:crypto";
 import { buildDigest, renderDigest, storedRecord, type Digest } from "../context/digest.ts";
 import { guardSmallTalk } from "../context/guard.ts";
 import {
@@ -46,6 +47,7 @@ import {
   syncFlags,
 } from "../db/index.ts";
 import { addFamilyRelay, familyChats, markFamilyRelayPassedOn, waitingFamilyRelays, type FamilyChat } from "../db/family.ts";
+import { beginCaregiverInvite, createCaregiverInvite, decideCaregiverInvite, linkApprovedCaregiver, pendingInviteForPatient, revokeCaregiver, setCaregiverInviteTarget } from "../db/caregivers.ts";
 import { addClarification, closeClarification, openClarification, type Clarification } from "../db/clarifications.ts";
 import {
   answerFollowUp,
@@ -101,6 +103,13 @@ import {
   checkinDone,
   checkinDoneAfterConcern,
   checkinGreeting,
+  caregiverApproved,
+  caregiverDenied,
+  caregiverHandlePrompt,
+  caregiverInviteCreated,
+  caregiverInviteInvalid,
+  caregiverRevoked,
+  familyWelcome,
   clarifyAmount,
   complaintReply,
   crisisReply,
@@ -766,6 +775,65 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     }
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1) throw new AggregateError(failures, `${failures.length} of ${sends.length} sends failed`);
+  }
+
+  function caregiverCode(): string {
+    return String(randomInt(100_000, 1_000_000));
+  }
+
+  function caregiverTarget(text: string): { handle: string; name: string | undefined } | undefined {
+    const match = text.trim().match(/^@?([a-z0-9_]{3,32})(?:\s+(.+))?$/i);
+    if (!match) return undefined;
+    return { handle: match[1]!.toLowerCase(), name: match[2]?.trim() || undefined };
+  }
+
+  /** Handle identity and caregiver controls with fixed copy, before any LLM or check-in routing. */
+  async function handleCaregiverControl(msg: InboundMessage): Promise<boolean> {
+    const patient = patientForChat(db, msg.chatId);
+    if (!patient || screenMessage(msg.text)) return false;
+    const text = norm(msg.text);
+    const key = `${patient.id}:caregiver:${msg.messageId}`;
+    let sends: Send[] | undefined;
+
+    if (text === norm(BUTTON.addCaregiver)) {
+      beginCaregiverInvite(db, patient.id, clock.now());
+      sends = [{ chatId: msg.chatId, message: { text: caregiverHandlePrompt(patient.preferredName) }, key }];
+    } else if (text === norm(BUTTON.approveCaregiver) || text === norm(BUTTON.denyCaregiver)) {
+      const invite = decideCaregiverInvite(db, { patientId: patient.id, approve: text === norm(BUTTON.approveCaregiver), now: clock.now() });
+      if (invite) {
+        const handle = invite.requestedHandle;
+        if (text === norm(BUTTON.approveCaregiver)) {
+          linkApprovedCaregiver(db, invite, clock.now());
+          sends = [
+            { chatId: msg.chatId, message: { text: caregiverApproved(handle) }, key },
+            ...(invite.claimedChatId ? [{ chatId: invite.claimedChatId, message: { text: familyWelcome(patient.preferredName) }, key: `${key}:welcome` }] : []),
+          ];
+        } else {
+          sends = [{ chatId: msg.chatId, message: { text: caregiverDenied(handle) }, key }];
+          if (invite.claimedChatId) sends.push({ chatId: invite.claimedChatId, message: { text: "The patient did not approve caregiver access." }, key: `${key}:denied` });
+        }
+      }
+    } else if (/^remove\s+caregiver\b/i.test(msg.text)) {
+      const target = caregiverTarget(msg.text.replace(/^remove\s+caregiver\s*/i, ""));
+      if (target && revokeCaregiver(db, { patientId: patient.id, handle: target.handle, now: clock.now() }))
+        sends = [{ chatId: msg.chatId, message: { text: caregiverRevoked(target.handle) }, key }];
+    } else {
+      const pending = pendingInviteForPatient(db, patient.id, clock.now());
+      if (pending?.requestedHandle === "__awaiting_handle__") {
+        const target = caregiverTarget(msg.text);
+        if (target) {
+          const invite = setCaregiverInviteTarget(db, { patientId: patient.id, handle: target.handle, name: target.name, now: clock.now(), code: caregiverCode() });
+          if (invite) sends = [{ chatId: msg.chatId, message: { text: caregiverInviteCreated(invite.requestedHandle, invite.code), buttons: [BUTTON.addCaregiver] }, key }];
+        } else {
+          sends = [{ chatId: msg.chatId, message: { text: caregiverInviteInvalid(), buttons: [BUTTON.addCaregiver] }, key }];
+        }
+      }
+    }
+
+    if (!sends) return false;
+    markInboundHandled(db, msg.messageId, msg.chatId, clock.now());
+    await deliver(sends);
+    return true;
   }
 
   // Typed messages (see "Typed messages" above). The LLM and the activity label are best effort:
@@ -2468,6 +2536,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     },
 
     async handleInbound(msg: InboundMessage): Promise<void> {
+      if (await handleCaregiverControl(msg)) return;
       // A "Yes" to a paper read-back needs a fresh snapshot. Load it before the transaction,
       // so a failed load leaves the message unhandled and a retry can try again.
       let fresh: FreshRecord | undefined;

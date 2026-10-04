@@ -29,6 +29,9 @@ export const BUTTON = {
   tellMeMore: "Tell me more",
   later: "Later",
   willAskDoctor: "I'll ask my doctor",
+  addCaregiver: "Add caregiver",
+  approveCaregiver: "Approve caregiver",
+  denyCaregiver: "Deny caregiver",
 } as const;
 
 /** Older labels of BUTTON.start, still taken (typed or tapped) at the greeting so old messages and scripts work. */
@@ -54,6 +57,43 @@ function whoWasTold(familyNames: string[] | undefined): string | undefined {
 export function checkinGreeting(name: string, questionCount: number): string {
   if (questionCount <= 0) return `Good morning, ${name}. This is your check-in assistant. There are no questions today. I just wanted to say hello.`;
   return `Good morning, ${name}. How are you feeling today? Just tell me in your own words, like a text to a friend. Or tap ${BUTTON.start} if you'd rather tap.`;
+}
+
+/** First message for a newly linked Relay user using synthetic FinchNode data. */
+export function syntheticWelcome(profileName: string): string {
+  return `Welcome. I'm your AI check-in assistant. For this demo, your profile is ${profileName}'s synthetic FinchNode health record. It is not real medical data. You can start a check-in when one is scheduled, or add a caregiver.`;
+}
+
+export function caregiverHandlePrompt(name: string): string {
+  return `Tell me your caregiver's Relay handle, such as @sam. You can include their name after it. This will create a one-time invitation for ${name}.`;
+}
+
+export function caregiverInviteCreated(handle: string, code: string): string {
+  return `I created an invitation for @${handle}. Ask them to message this agent with the code ${code}. I will ask you to approve them after they claim it.`;
+}
+
+export function caregiverClaimed(name: string, handle: string): string {
+  return `${name} says @${handle} wants caregiver access. Do you approve this person?`;
+}
+
+export function caregiverApproved(handle: string): string {
+  return `Approved. @${handle} will receive the updates allowed by your sharing setting.`;
+}
+
+export function caregiverDenied(handle: string): string {
+  return `I did not add @${handle} as a caregiver.`;
+}
+
+export function caregiverClaimReply(): string {
+  return "Thanks. I sent your request to the patient for approval. You will receive updates here only if they approve you.";
+}
+
+export function caregiverInviteInvalid(): string {
+  return "I could not match that invitation. Ask the patient for a current code and send it in a new message.";
+}
+
+export function caregiverRevoked(handle: string): string {
+  return `I removed @${handle} as a caregiver. They will not receive new updates.`;
 }
 
 /** The hint under each question on her first check-ins (HINT_CHECKINS in the engine), so typing is obvious. */

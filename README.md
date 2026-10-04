@@ -49,6 +49,14 @@ cp ../../.env.example ../../.env    # the .env lives at the repo root
 
 For the Relay agent, each person messages the agent once from their own Relay app so it can reach them: the senior (`PATIENT_RELAY_HANDLE`) and each family member (`FAMILY_RELAY_HANDLES`). A Relay chat holds one person, so there is no family group: each family member gets updates in their own chat with the agent. `npm run relay:check` shows who has.
 
+### Multi-user demo identities
+
+The demo can serve several Relay users from one local database. Each Relay handle and chat is resolved to its own local account, with separate check-ins, memories, snapshots, flags, sharing settings and caregiver links. The local accounts may reuse FinchNode's read-only synthetic subjects, so the health fixture is shared while the app state is not.
+
+The available record-bearing subjects are `patient-demo-001` (Morgan), `patient-demo-polypharmacy` (Harriet), `patient-demo-multi-source` (Priya), `patient-demo-sparse` (Jonah), `patient-demo-messy-coding` (Dolores) and `patient-demo-pediatric-asthma` (Theo). These are synthetic demo records only. `PATIENT_FINCHNODE_SUBJECT` selects the subject for the configured senior; newly discovered Relay users are assigned from this catalog for local rehearsal.
+
+Caregivers pair through a Relay handle and an invitation code shown in the senior's chat. The code is temporary and the senior must approve the claimed invitation. Phone numbers are not used to identify, claim or link a caregiver. A caregiver still needs to message the agent from their own Relay account before the agent can deliver updates.
+
 ## Try it on your phone (about 10 minutes)
 
 Each person runs their own agent: two programs on the same agent token take each other's messages.

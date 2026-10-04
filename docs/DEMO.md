@@ -4,7 +4,9 @@ Use only Harriet's synthetic FinchNode record. The five features are video check
 
 ## Before the timer
 
-Follow the README setup and QA guide. Link Harriet and Sarah on separate Relay phones; confirm sharing permissions. Open a report populated by the synthetic week rehearsal. Stage both synthetic apixaban labels and a successfully rehearsed call recording. Check provider readiness without exposing keys. Tell everyone the numbers and records are synthetic. Do not run the simulator against the live agent database.
+Follow the README setup and QA guide. Link Harriet and Sarah on separate Relay accounts; confirm sharing permissions. For the multi-user flow, have Harriet create an invitation for Sarah's Relay handle, have Sarah claim it with the code, and approve it from Harriet's chat. Pairing uses the Relay handle and temporary code, never a phone number. Open a report populated by the synthetic week rehearsal. Stage both synthetic apixaban labels and a successfully rehearsed call recording. Check provider readiness without exposing keys. Tell everyone the numbers and records are synthetic. Do not run the simulator against the live agent database.
+
+Each Relay user gets an isolated local account and local conversation state. The users may point at the same FinchNode synthetic subject, but their check-ins, memories, sharing choices and caregiver relationships stay separate. To rehearse more than one senior, use a fresh database or distinct Relay identities and choose subjects from the catalog in the README and `.env.example`.
 
 The full patient call may take about three minutes itself. To fit five features into the presentation, show a disclosed excerpt from a successful rehearsal, or begin the live call before the presentation timer. Do not speed through consent or interrupt a safety response for the timer.
 

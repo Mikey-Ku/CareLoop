@@ -205,6 +205,23 @@ describe("direct STT/Gemini/TTS Relay call", () => {
     expect(getCallSession(db, "call-stranger")).toBeUndefined();
   });
 
+  it("routes a multi-user call by the local Relay handle and links that patient's chat", async () => {
+    upsertPatient(db, {
+      id: "priya",
+      finchnodePatientId: "relay-binding:priya",
+      finchnodeSubject: "patient-demo-001",
+      preferredName: "Priya",
+      relayHandle: "priya",
+      relayChatId: null,
+    });
+    const service = setup();
+    await start(service, relayCall("@Priya", "call-priya"));
+
+    expect(getCallSession(db, "call-priya")).toMatchObject({ patientId: "priya", relayChatId: "chat-@Priya" });
+    expect(getCheckinPatient(db, "priya")?.relayChatId).toBe("chat-@Priya");
+    await service.end("call-priya");
+  });
+
   it("fails cleanly when Relay connection would answer after its 32-second deadline", async () => {
     const service = setup({ wallNow: () => new Date(Date.parse(NOW) + 33_000).toISOString() });
     await service.handle(created(relayCall("harriet", "call-late")));

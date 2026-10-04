@@ -12,7 +12,6 @@ import { addVitalsReading } from "../db/vitals.ts";
 import { normalizeHandle, type Config } from "../config.ts";
 import type { Db } from "../db/index.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
-import { linkPatientChat } from "../relay/inbox.ts";
 import type { VitalsResult } from "../vitals/types.ts";
 import type { CallScreeningLlmOutput, LlmClient } from "../llm/types.ts";
 import { QUIET_MINUTE_PROMPT, cantHearYou, heartRateReadback, noReadingReadback, noVideoReadback, stillMeasuring, wrongCallerDecline } from "./copy.ts";
@@ -63,7 +62,7 @@ export type CallServiceOptions = {
   /** Gemini client for adaptive turn planning. */
   llm?: LlmClient;
   /** Her check-in date now (YYYY-MM-DD, her time zone or CLOCK_DATE). Defaults to the UTC date. */
-  today?: () => string;
+  today?: (patientId?: string) => string;
   log?: CallLog;
   now?: () => string;
   /** The real clock, for Relay's own timestamps (the 32-second answer deadline). Defaults to `now`. */
@@ -122,7 +121,7 @@ export class CallService implements CallEventHandler {
   readonly #log: CallLog;
   readonly #now: () => string;
   readonly #wallNow: () => string;
-  readonly #today: () => string;
+  readonly #today: (patientId?: string) => string;
   readonly #active = new Map<string, ActiveCall>();
   /** A camera check call-back is ringing or being read: one at a time, since each rings her one phone. */
   #callingBack = false;
@@ -181,7 +180,7 @@ export class CallService implements CallEventHandler {
     const patientId = active?.patientId ?? stored!.patientId;
     const patient = getCheckinPatient(this.#options.db, patientId);
     if (!patient) throw new Error("patient is not available");
-    const day = active?.day ?? this.#today();
+    const day = active?.day ?? this.#today(stored!.patientId);
     const transcript = active?.transcript ?? callTranscript(this.#options.db, callId);
     const read = await this.#read(callId, patientId, day, transcript, { assessOnly: true });
     const level = Math.max(read.level, active?.safetyLevel ?? 0);
@@ -233,7 +232,7 @@ export class CallService implements CallEventHandler {
       await this.#decline(call);
       return;
     }
-    const day = this.#today();
+    const day = this.#today(patient.id);
     const active: ActiveCall = {
       call,
       patientId: patient.id,
@@ -425,7 +424,10 @@ export class CallService implements CallEventHandler {
   #linkChat(call: Call, patientId: string): void {
     try {
       if (getCheckinPatient(this.#options.db, patientId)?.relayChatId) return;
-      if (linkPatientChat(this.#options.db, call.from.handle, call.chat_id)) this.#log("call_patient_chat_linked", { call_id: call.id });
+      const changed = this.#options.db
+        .prepare(`UPDATE patients SET relay_chat_id = ? WHERE id = ? AND relay_chat_id IS NULL`)
+        .run(call.chat_id, patientId).changes;
+      if (changed > 0) this.#log("call_patient_chat_linked", { call_id: call.id, patient_id: patientId });
     } catch (error) {
       this.#log("call_chat_link_failed", { call_id: call.id, error: summary(error) });
     }
@@ -701,7 +703,13 @@ export class CallService implements CallEventHandler {
   #patientForCall(call: Call): { id: string; finchnodePatientId: string; preferredName: string } | undefined {
     const caller = normalizeHandle(call.from.handle);
     if (!caller) return undefined;
-    const rows = this.#options.db.prepare(`SELECT id, finchnode_patient_id AS finchnodePatientId, preferred_name AS preferredName, relay_handle AS relayHandle FROM patients`).all() as {
+    const rows = this.#options.db
+      .prepare(
+        `SELECT id, COALESCE(finchnode_subject, finchnode_patient_id) AS finchnodePatientId,
+                preferred_name AS preferredName, relay_handle AS relayHandle
+         FROM patients WHERE onboarding_status = 'active'`,
+      )
+      .all() as {
       id: string;
       finchnodePatientId: string;
       preferredName: string;

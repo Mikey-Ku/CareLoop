@@ -493,6 +493,36 @@ export const MIGRATIONS: readonly string[] = [
     value TEXT NOT NULL
   );
   `,
+  // 16: multi-user Relay identities and caregiver pairing. `finchnode_subject` is the synthetic
+  // subject to read; `finchnode_patient_id` remains the legacy unique local binding used by older
+  // rows. This allows multiple local accounts to reuse one FinchNode demo subject without sharing
+  // check-ins, memories, snapshots or family relationships.
+  `
+  ALTER TABLE patients ADD COLUMN finchnode_subject TEXT;
+  UPDATE patients SET finchnode_subject = finchnode_patient_id WHERE finchnode_subject IS NULL;
+  ALTER TABLE patients ADD COLUMN onboarding_status TEXT NOT NULL DEFAULT 'active'
+    CHECK (onboarding_status IN ('pending', 'active', 'revoked'));
+  CREATE INDEX patients_finchnode_subject ON patients (finchnode_subject);
+  CREATE UNIQUE INDEX patients_relay_handle ON patients (relay_handle) WHERE relay_handle IS NOT NULL;
+  CREATE UNIQUE INDEX patients_relay_chat ON patients (relay_chat_id) WHERE relay_chat_id IS NOT NULL;
+
+  CREATE TABLE caregiver_invites (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    requested_handle TEXT NOT NULL,
+    requested_name TEXT,
+    code TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'claimed', 'approved', 'denied', 'expired', 'revoked')),
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    claimed_chat_id TEXT,
+    claimed_at TEXT,
+    decided_at TEXT,
+    UNIQUE (patient_id, code)
+  );
+  CREATE INDEX caregiver_invites_lookup ON caregiver_invites (requested_handle, status, expires_at);
+  CREATE INDEX caregiver_invites_patient ON caregiver_invites (patient_id, status);
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

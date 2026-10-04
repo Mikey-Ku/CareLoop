@@ -227,13 +227,19 @@ describe("message.received", () => {
     expect(handled[0]).not.toHaveProperty("replyTo");
   });
 
-  it("ignores a message from a chat that belongs to no patient", async () => {
-    const { db, inbox, engine, log } = setup();
+  it("onboards a message from a chat that belongs to no patient", async () => {
+    const { db, inbox, engine, log, relay } = setup();
     await inbox.onEvent(textMessage({ chatId: OTHER_CHAT, sender: "stranger.demo", text: "hi" }), { sequence: "1" });
     await inbox.drain();
     expect(engine.handleInbound).not.toHaveBeenCalled();
     expect(rows(db)[0]).toMatchObject({ processedAt: T, error: null });
-    expect(log).toHaveBeenCalledWith("relay_unknown_chat", expect.objectContaining({ chat_id: OTHER_CHAT }));
+    expect(db.prepare("SELECT relay_handle, relay_chat_id, finchnode_subject FROM patients WHERE relay_chat_id = ?").get(OTHER_CHAT)).toMatchObject({
+      relay_handle: "stranger.demo",
+      relay_chat_id: OTHER_CHAT,
+      finchnode_subject: "patient-demo-001",
+    });
+    expect(relay.chats.markAsRead).toHaveBeenCalledWith(OTHER_CHAT);
+    expect(log).toHaveBeenCalledWith("relay_patient_created", expect.objectContaining({ chat_id: OTHER_CHAT, profile_subject: "patient-demo-001" }));
   });
 
   it("ignores group chat messages (the app uses no groups)", async () => {

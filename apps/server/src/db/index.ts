@@ -41,12 +41,15 @@ function migrate(db: Db): void {
 export type PatientRow = {
   id: string;
   finchnodePatientId: string;
+  /** The FinchNode subject to read. For legacy rows this equals finchnodePatientId. */
+  finchnodeSubject?: string | null;
   preferredName: string;
   relayHandle?: string | null;
   relayChatId?: string | null;
   checkinTime?: string | null;
   timezone?: string | null;
   sharing?: SharingLevel;
+  onboardingStatus?: "pending" | "active" | "revoked";
 };
 
 /**
@@ -55,26 +58,52 @@ export type PatientRow = {
  */
 export function upsertPatient(db: Db, p: PatientRow): void {
   db.prepare(
-    `INSERT INTO patients (id, finchnode_patient_id, preferred_name, relay_handle, relay_chat_id, checkin_time, timezone, sharing)
-     VALUES (@id, @finchnodePatientId, @preferredName, @relayHandle, @relayChatId, @checkinTime, @timezone, COALESCE(@sharing, 'status'))
+    `INSERT INTO patients (id, finchnode_patient_id, finchnode_subject, preferred_name, relay_handle, relay_chat_id, checkin_time, timezone, sharing, onboarding_status)
+     VALUES (@id, @finchnodePatientId, COALESCE(@finchnodeSubject, @finchnodePatientId), @preferredName, @relayHandle, @relayChatId, @checkinTime, @timezone, COALESCE(@sharing, 'status'), COALESCE(@onboardingStatus, 'active'))
      ON CONFLICT (id) DO UPDATE SET
        finchnode_patient_id = excluded.finchnode_patient_id,
+       finchnode_subject = COALESCE(@finchnodeSubject, patients.finchnode_subject, excluded.finchnode_patient_id),
        preferred_name = excluded.preferred_name,
        relay_handle = excluded.relay_handle,
        relay_chat_id = excluded.relay_chat_id,
        checkin_time = excluded.checkin_time,
        timezone = excluded.timezone,
-       sharing = COALESCE(@sharing, patients.sharing)`,
+       sharing = COALESCE(@sharing, patients.sharing),
+       onboarding_status = COALESCE(@onboardingStatus, patients.onboarding_status)`,
   ).run({
     id: p.id,
     finchnodePatientId: p.finchnodePatientId,
+    finchnodeSubject: p.finchnodeSubject ?? null,
     preferredName: p.preferredName,
     relayHandle: p.relayHandle ?? null,
     relayChatId: p.relayChatId ?? null,
     checkinTime: p.checkinTime ?? null,
     timezone: p.timezone ?? null,
     sharing: p.sharing ?? null,
+    onboardingStatus: p.onboardingStatus ?? null,
   });
+}
+
+export type ActivePatient = {
+  id: string;
+  finchnodePatientId: string;
+  preferredName: string;
+  relayHandle: string | null;
+  relayChatId: string | null;
+  timezone: string | null;
+  onboardingStatus: "pending" | "active" | "revoked";
+};
+
+/** All local patient accounts that can receive a check-in. */
+export function activePatients(db: Db): ActivePatient[] {
+  return db
+    .prepare(
+      `SELECT id, COALESCE(finchnode_subject, finchnode_patient_id) AS finchnodePatientId,
+              preferred_name AS preferredName, relay_handle AS relayHandle, relay_chat_id AS relayChatId,
+              timezone, onboarding_status AS onboardingStatus
+       FROM patients WHERE onboarding_status = 'active' ORDER BY id`,
+    )
+    .all() as ActivePatient[];
 }
 
 export function getSharing(db: Db, patientId: string): SharingLevel | undefined {

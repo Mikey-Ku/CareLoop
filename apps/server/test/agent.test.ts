@@ -7,7 +7,6 @@ import {
   MEDS_MORNING_JOB,
   MISSED_JOB,
   REFILL_JOB,
-  MISSING_HANDLE_MESSAGE,
   MISSING_TOKEN_MESSAGE,
   llmStatus,
   main as agentMain,
@@ -304,11 +303,41 @@ describe("startAgent", () => {
     expect(calls.inbox).toEqual([]);
   });
 
-  it("refuses to start without PATIENT_RELAY_HANDLE", async () => {
+  it("starts in multi-user mode without PATIENT_RELAY_HANDLE", async () => {
     const { start } = setup({ env: { PATIENT_RELAY_HANDLE: "" } });
-    const error = await start().catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(AgentStartError);
-    expect((error as Error).message).toBe(MISSING_HANDLE_MESSAGE);
+    const agent = await start();
+    expect(agent.patientId).toBe("");
+  });
+
+  it("runs a daily job for every active local patient in multi-user mode", async () => {
+    const { db, messenger, start } = setup({ env: { PATIENT_RELAY_HANDLE: "" } });
+    upsertPatient(db, {
+      id: "morgan",
+      finchnodePatientId: "relay-binding:morgan",
+      finchnodeSubject: SUBJECT,
+      preferredName: "Morgan",
+      relayHandle: "morgan",
+      relayChatId: "chat_morgan",
+      checkinTime: "09:00",
+      timezone: "America/Detroit",
+    });
+    upsertPatient(db, {
+      id: "priya",
+      finchnodePatientId: "relay-binding:priya",
+      finchnodeSubject: SUBJECT,
+      preferredName: "Priya",
+      relayHandle: "priya",
+      relayChatId: "chat_priya",
+      checkinTime: "09:30",
+      timezone: "America/Detroit",
+    });
+    const agent = await start();
+    await agent.scheduler.runNow(CHECKIN_JOB);
+
+    expect(getCheckin(db, "morgan", "2026-09-01")?.status).toBe("sent");
+    expect(getCheckin(db, "priya", "2026-09-01")?.status).toBe("sent");
+    expect(messenger.sent.map((message) => message.chatId)).toEqual(expect.arrayContaining(["chat_morgan", "chat_priya"]));
+    expect(agent.scheduler.upcoming()).toHaveLength(10);
   });
 
   it("stop() aborts the inbox, stops the scheduler and closes the server", async () => {
