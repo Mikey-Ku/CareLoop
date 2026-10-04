@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.ts";
 import { parseScript, runSimulation } from "../src/cli/simulator.ts";
 import { loadConfig } from "../src/config.ts";
-import { openDatabase, type Db } from "../src/db/index.ts";
+import { openDatabase, upsertPatient, type Db } from "../src/db/index.ts";
 import { REPO_ROOT } from "../src/finchnode/fixtures.ts";
 import {
   REPORT_FOOTER,
@@ -99,9 +99,13 @@ describe("doctor report from a simulated week", () => {
       ["2026-08-30", 2, "About the same"],
     ]);
     const text = visibleText(html);
-    expect(text).toContain(`${levelText(3)} ${reportDate("2026-08-28")} breathing when lying flat`);
+    // The table: one row per topic with its highest level, then when, then her answer and words.
+    expect(text).toContain(`Level 3 breathing when lying flat ${reportDate("2026-08-28")} Answer "Yes, it was hard"`);
     expect(text).toContain("Lying flat made it hard to breathe so I slept sitting up in my chair");
-    expect(text).toContain('"Better"');
+    expect(text).toContain("Level 2 knee pain Level 2: Aug 30; Level 1: Aug 26 and Aug 27 no words kept");
+    // In brief: the highest level with her words and how its follow-up went.
+    expect(text).toContain(`Highest level: ${levelText(3)} breathing when lying flat, Aug 28.`);
+    expect(text).toContain('Her follow-up that day: "Better".');
   });
 
   it("has the label mismatch, the refill, the paper discrepancy and the adherence counts", () => {
@@ -118,8 +122,8 @@ describe("doctor report from a simulated week", () => {
     expect(text).toContain("Apixaban 2.5 mg");
     expect(text).toContain("trazodone hydrochloride 50 mg oral tablet");
     expect(text).toContain(`runs out ${reportDate("2026-09-03")}`);
-    expect(text).toContain("aspirin 81 mg marked stopped on the papers");
-    expect(text).toContain("morning 6 taken, 1 not confirmed; evening 6 taken, 1 not confirmed");
+    expect(text).toContain("aspirin 81 mg marked stopped");
+    expect(text).toContain("Medicine reminders confirmed: morning 6 of 7 days, evening 6 of 7.");
     expect(text).toContain("Is the aspirin still on my list after the hospital?");
     // The assistant's own question after the label photo is not quoted as hers; the mismatch is listed above.
     expect(report.visitQuestions.map((q) => q.text)).not.toContainEqual(expect.stringContaining("A medicine label I photographed"));
@@ -166,6 +170,65 @@ describe("doctor report from a simulated week", () => {
     expect(latest.value).toContain(`: ${egfr.value} `);
     expect(egfr.date).toBe(latest.date);
     expect(visibleText(html)).toContain(`eGFR (CKD-EPI 2021) 98979-8 ${egfr.value} mL/min/1.73m2`);
+  });
+});
+
+describe("what the first page says was collected", () => {
+  const one = <T>(sql: string, ...args: unknown[]) => db.prepare(sql).get(...args) as T;
+
+  it("opens with the collected-data tiles, and every number in them is a count of the data", () => {
+    const text = visibleText(html);
+    expect(text.indexOf("What was collected this week")).toBeGreaterThan(-1);
+    expect(text.indexOf("What was collected this week")).toBeLessThan(text.indexOf("In brief"));
+    expect(text.indexOf("In brief")).toBeLessThan(text.indexOf("Day by day"));
+    expect(text.indexOf("Day by day")).toBeLessThan(text.indexOf("For your review"));
+    // Check-ins answered, from the database.
+    const answered = one<{ n: number }>(`SELECT COUNT(*) AS n FROM checkins WHERE patient_id = ? AND status = 'answered' AND date BETWEEN ? AND ?`, PATIENT, report.from, report.to);
+    expect(text).toContain(`Check-ins ${answered.n} of 7 days answered 1 "Not today" 1 missed From her daily check-ins`);
+    // Reminders confirmed over reminders sent.
+    const taken = one<{ n: number }>(`SELECT COUNT(*) AS n FROM med_doses WHERE patient_id = ? AND status = 'taken' AND day BETWEEN ? AND ?`, PATIENT, report.from, report.to);
+    const sent = one<{ n: number }>(`SELECT COUNT(*) AS n FROM med_doses WHERE patient_id = ? AND day BETWEEN ? AND ?`, PATIENT, report.from, report.to);
+    expect(text).toContain(`Medicines ${taken.n} of ${sent.n} reminders confirmed`);
+    // Label photos checked: every one, from med_label_checks, not only the ones that differ.
+    const photos = one<{ n: number }>(`SELECT COUNT(*) AS n FROM med_label_checks WHERE patient_id = ?`, PATIENT);
+    expect(report.medicines.labelChecks.total).toBe(photos.n);
+    expect(text).toContain(`${photos.n} label photo checked, 1 differs from her list`);
+    // Flags, and what her record holds.
+    const flags = one<{ n: number }>(`SELECT COUNT(*) AS n FROM flags WHERE patient_id = ? AND status != 'cleared'`, PATIENT);
+    expect(text).toContain(`Record flags ${flags.n} for your review R1, R3, R4, R6 Fixed rules on her FinchNode record`);
+    expect(text).toContain(`Her record ${report.medicines.active.length} medicines ${report.labs.length} lab tests ${report.patient.conditions.length} active problems FinchNode, data as of Sep 1, 2026`);
+    // Camera vitals: none this week, said plainly.
+    expect(text).toContain("Camera vitals 0 readings None taken this week Presage camera estimate, not a medical measurement");
+  });
+
+  it("says in brief what the week holds, in the data's own terms, with no assessment", () => {
+    const text = visibleText(html);
+    expect(text).toContain('Answered 5 of 7 check-ins. "Not today" on Aug 31. Missed Aug 29.');
+    expect(text).toContain("Label photo Aug 30 read Apixaban 2.5 mg; her list has apixaban 5 mg; she was told to check with her pharmacist.");
+  });
+
+  it("puts the reference detail on a page of its own, after page 1", () => {
+    expect(html).toMatch(/<section class="reference"><h2>Camera vitals and labs/);
+    expect(html.indexOf('class="reference"')).toBeGreaterThan(html.indexOf("Her questions for the visit"));
+    expect(html).toContain(".reference { break-before: page; }");
+    // The codes and record ids are on page 2: the problem list with SNOMED CT, the evidence with its record ids.
+    const reference = html.slice(html.indexOf('class="reference"'));
+    expect(reference).toContain("SNOMED CT 49436004");
+    for (const flag of report.flags) for (const e of flag.evidence) if (!e.resourceId.startsWith("paper:")) expect(reference).toContain(e.resourceId); // hospital papers have no record id
+  });
+
+  it("renders a week with nothing in it, and a patient with no record copy, without breaking or inventing", () => {
+    const empty = openDatabase(":memory:");
+    upsertPatient(empty, { id: "nobody", finchnodePatientId: "patient-none", preferredName: "Nobody", relayHandle: null, relayChatId: null });
+    const none = buildDoctorReport(empty, "nobody", { to: "2026-09-01", now: NOW });
+    const page = visibleText(renderDoctorReportHtml(none));
+    expect(page).toContain("Check-ins 0 of 7 days answered No day missed".replace("No day missed", "").trim());
+    expect(page).toContain("Camera vitals 0 readings None taken this week");
+    expect(page).toContain("Record flags 0 for your review No open rule flags");
+    expect(page).toContain("No record copy stored");
+    expect(page).toContain("No symptoms above Level 0 were reported.");
+    expect(page).toContain("None this week.");
+    empty.close();
   });
 });
 
