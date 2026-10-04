@@ -96,6 +96,11 @@ export function doctorHeader(f: CareFacts): string {
   ].join("\n");
 }
 
+/** A red flag's answer: in quotes when it is her answer or her words, as is when it says what happened. */
+function quotedIfHers(r: CareFacts["redFlags"][number]): string {
+  return r.source === "answer" || r.source === "typed" || r.source === "button" ? `"${r.answer}"` : r.answer;
+}
+
 /** The doctor's RED FLAGS lines, fixed: every red-flag answer, what she was told and who was alerted. */
 export function doctorRedFlags(f: CareFacts): string {
   const redLines = [`RED FLAGS: ${f.redFlags.length}`];
@@ -107,7 +112,7 @@ export function doctorRedFlags(f: CareFacts): string {
         : r.level === 4
           ? "She was told to call 911 if it was happening, then her doctor"
           : "She was told to call her doctor today";
-    redLines.push(`- L${r.level} ${r.question} "${r.answer}". ${advice}; ${told}.`);
+    redLines.push(`- L${r.level} ${r.question} ${quotedIfHers(r)}. ${advice}; ${told}.`);
   }
   return redLines.join("\n");
 }
@@ -173,7 +178,7 @@ export function doctorSummary(f: CareFacts, contacts: CareContacts, overview?: s
       ? ` (sent ${localTime(c.startedAt, tz)}${c.finishedAt ? `, finished ${localTime(c.finishedAt, tz)}` : ""})`
       : "";
   const checkinLines = [`CHECK-IN: ${OUTCOME_FOR_DOCTOR[c.outcome]}${timing}.`];
-  const redIds = new Set(f.redFlags.map((r) => r.questionId));
+  const redIds = new Set(f.redFlags.filter((r) => r.source === "answer").map((r) => r.questionId));
   for (const a of c.answers)
     checkinLines.push(`- ${a.question} ${a.answer}${redIds.has(a.questionId) ? "  [RED FLAG]" : a.worrying ? "  [non-routine answer]" : ""}`);
   if (c.answers.length === 0 && c.outcome !== "none") checkinLines.push("- No answers recorded.");
@@ -303,7 +308,7 @@ export function familyAttention(f: CareFacts, contacts: CareContacts): string | 
   if (three.length > 0) {
     lines.push(`${name} reported something she should call her doctor about.${crisis || urgent ? "" : ` Please call ${name} today to check on her.`}`);
     if (all) {
-      for (const r of three) lines.push(`- ${r.question} "${r.answer}"`);
+      for (const r of three) lines.push(`- ${r.question} ${quotedIfHers(r)}`);
       lines.push(`I asked ${name} to call her doctor today.`);
     }
   }

@@ -249,7 +249,7 @@ export function buildCareFacts(db: Db, input: BuildCareFactsInput): CareFacts {
     const q = QUESTIONS.get(o.topic);
     const what =
       o.source === "follow_up"
-        ? '"Worse" on the follow-up'
+        ? "Worse on the follow-up"
         : o.topic === "crisis"
           ? "words about not wanting to live (988 given)"
           : o.topic === "urgent_symptom"

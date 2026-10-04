@@ -157,7 +157,7 @@ describe("care facts", () => {
     addObservation(db, { patientId: P, checkinId: c.id, day: DAY1, topic: "crisis", level: 5, source: "safety", createdAt: at });
     expect(facts().redFlags.map((r) => [r.questionId, r.level, r.source, r.answer])).toEqual([
       ["crisis", 5, "safety", "words about not wanting to live (988 given)"],
-      ["anticoagulant-bleeding", 3, "follow_up", '"Worse" on the follow-up'],
+      ["anticoagulant-bleeding", 3, "follow_up", "Worse on the follow-up"],
       ["chest tightness", 3, "typed", "tight chest"],
     ]);
     expect(facts().familyAlerted).toEqual(["Sarah"]);
