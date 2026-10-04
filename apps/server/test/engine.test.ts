@@ -25,6 +25,7 @@ import {
 import { createCheckinEngine } from "../src/checkin/engine.ts";
 import type { CheckinEngine } from "../src/checkin/engine-types.ts";
 import { QUESTION_BANK, promptButtons, type Question } from "../src/context/questions.ts";
+import { createCallSession, patchCallSession } from "../src/db/calls.ts";
 import { getCheckin, getCheckinPrompt } from "../src/db/checkins.ts";
 import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import {
@@ -590,6 +591,15 @@ describe("family chats (one per family member)", () => {
       [FAMILY, `${P}:${DAY1}:missed:family:sarah`],
       [TOM, `${P}:${DAY1}:missed:family:tom`],
     ]);
+  });
+
+  it("no missed alert when she was on a video call, even one that recorded no answers", async () => {
+    const send = vi.spyOn(messenger, "send");
+    await engine.startDay(P, DAY1);
+    createCallSession(db, { callId: "call-1", patientId: P, relayChatId: ME, at: now });
+    patchCallSession(db, "call-1", { status: "ended", answeredAt: now, endedAt: now });
+    expect(await engine.runMissedCheckin(P, DAY1)).toBe("nothing_to_do");
+    expect(familyKeys(send)).toEqual([]);
   });
 
   it("an unlinked family member is skipped, and gets messages once they link", async () => {

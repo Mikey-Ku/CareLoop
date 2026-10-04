@@ -101,3 +101,17 @@ export function callForSummaryMessage(db: Db, messageId: string): { callId: stri
     )
     .get(messageId) as { callId: string; patientId: string; day: string; startedAt: string } | undefined;
 }
+
+/**
+ * Whether she was on a call (answered, and still going or ended) at or after `sinceIso`. Her day's
+ * check-in counts as touched then, even if the call recorded no answers: she talked to us, so the
+ * family must not get "hasn't checked in". A 10-minute margin covers a call that opened the check-in
+ * itself (answered a moment before the check-in's sent time).
+ */
+export function wasOnCallSince(db: Db, patientId: string, sinceIso: string): boolean {
+  const since = Date.parse(sinceIso) - 10 * 60_000;
+  const rows = db
+    .prepare(`SELECT answered_at AS answeredAt, ended_at AS endedAt FROM call_sessions WHERE patient_id = ? AND answered_at IS NOT NULL AND status != 'failed' ORDER BY started_at DESC LIMIT 10`)
+    .all(patientId) as { answeredAt: string; endedAt: string | null }[];
+  return rows.some((r) => Date.parse(r.endedAt ?? r.answeredAt) >= since);
+}

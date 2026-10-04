@@ -160,7 +160,7 @@ import {
 import type { CheckinEngine, DayResult, EngineDeps, FreeTextAnswer, MedsReminderResult, PhotoOutcome } from "./engine-types.ts";
 import type { CallCheckinContext, SpokenCheckinResult, SpokenTurn } from "./engine-types.ts";
 import { CALL_SUMMARY_BUTTONS, callSummary, callSummaryThanks } from "../calls/copy.ts";
-import { callForSummaryMessage } from "../db/calls.ts";
+import { callForSummaryMessage, wasOnCallSince } from "../db/calls.ts";
 import { SAFETY_LEVELS } from "./severity.ts";
 import { PAPER_CONFIRM_BUTTONS, paperReadback } from "./paper-check.ts";
 import {
@@ -2454,6 +2454,8 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         // Only an untouched check-in is missed; a partly answered one is not. After a safety hit
         // the family already had an alert, and a follow-up is on its way.
         if (!c || c.status !== "sent" || c.answers.length > 0 || c.finishedAt !== null || c.concernAt !== null) return undefined;
+        // A video call counts as checking in, even one that recorded no answers.
+        if (c.sentAt !== null && wasOnCallSince(db, patientId, c.sentAt)) return undefined;
         updateCheckin(db, c.id, { status: "missed" });
         return toFamily(patient, familyMissedAlert(patient.preferredName, missedCheckinTime), `${patientId}:${day}:missed`);
       })();

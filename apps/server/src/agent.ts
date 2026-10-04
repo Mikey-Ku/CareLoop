@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createApp } from "./app.ts";
+import { doctorReportRoute } from "./report/index.ts";
 import { loadCareConfig } from "./care/config.ts";
 import { connectCareRuntime, type CareRuntime } from "./care/runtime.ts";
 import { createCheckinEngine } from "./checkin/engine.ts";
@@ -323,6 +324,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   const server = await listen(
     createApp({
       config,
+      doctorReport: doctorReportRoute(db),
       ...(calls
         ? {
             calls: {
@@ -338,6 +340,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   );
   const port = (server.address() as AddressInfo).port;
   log(`[agent] health check on http://localhost:${port}/health`);
+  log(`[agent] doctor report on http://localhost:${port}/report/<patient id> (her first name in lower case, e.g. /report/harriet)`);
   const followUpTimer = setInterval(() => void followUpTick(), deps.followUpPollMs ?? FOLLOW_UP_POLL_MS);
 
   // 8. Once she's linked: --checkin-now, else the late-start catch-up. The scheduler only
