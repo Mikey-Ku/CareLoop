@@ -105,16 +105,38 @@ def speech(text: str | None) -> np.ndarray | None:
 
 
 async def say(call, pcm: np.ndarray | None) -> None:
+    """Speaks a prompt. Best effort: audio is held while she isn't listening, so a hang-up mid-prompt must not
+    stall the check."""
     from relaymessenger.calls import RelayAudioFrame
 
     if pcm is None:
         return
-    for start in range(0, len(pcm), 960):  # whole 20 ms frames
-        chunk = pcm[start : start + 960]
-        if len(chunk) < 960:
-            chunk = np.pad(chunk, (0, 960 - len(chunk)))
-        await call.write_audio(RelayAudioFrame(chunk, 48_000, 1))
-    await call.wait_for_playout()
+
+    async def play() -> None:
+        for start in range(0, len(pcm), 960):  # whole 20 ms frames
+            chunk = pcm[start : start + 960]
+            if len(chunk) < 960:
+                chunk = np.pad(chunk, (0, 960 - len(chunk)))
+            await call.write_audio(RelayAudioFrame(chunk, 48_000, 1))
+        await call.wait_for_playout()
+
+    try:
+        await asyncio.wait_for(play(), timeout=len(pcm) / 48_000 + 10)
+    except Exception as error:
+        emit("speech_failed", detail=type(error).__name__)
+
+
+async def first_of(*events: asyncio.Event, timeout: float) -> bool:
+    """Waits until one of the events is set; False when the time runs out first."""
+    if any(event.is_set() for event in events):
+        return True
+    waits = [asyncio.ensure_future(event.wait()) for event in events]
+    try:
+        done, _ = await asyncio.wait(waits, timeout=max(timeout, 0), return_when=asyncio.FIRST_COMPLETED)
+        return bool(done)
+    finally:
+        for wait in waits:
+            wait.cancel()
 
 
 def place_call(api: str, token: str, chat_id: str, handle: str) -> str:
@@ -147,16 +169,21 @@ async def run(args: argparse.Namespace) -> int:
         emit("failed", reason="call_not_placed", detail=type(error).__name__)
         return 2
     emit("calling")
+    loop = asyncio.get_running_loop()
+    ring_deadline = loop.time() + ANSWER_TIMEOUT_S
     call = RelayCallTransport(api_key=token, call_id=call_id, base_url=api)
     recorder = Recorder(args.out, args.seconds)
+    answered = asyncio.Event()  # her audio or her camera reached the agent: she picked up
     first_frame = asyncio.Event()
     recording = asyncio.Event()
     finished = asyncio.Event()
+    ended = asyncio.Event()  # she declined or hung up
 
     async def read(track) -> None:
         async for event in VideoStream(track, capacity=2):
             if not first_frame.is_set():
                 first_frame.set()
+                answered.set()
                 emit("video", width=event.frame.width, height=event.frame.height)
             if recording.is_set() and not finished.is_set():
                 if recorder.add(event.frame.to_av(), event.timestamp_us):
@@ -164,25 +191,34 @@ async def run(args: argparse.Namespace) -> int:
 
     @call.on("track_subscribed")
     def _camera(track) -> None:
-        asyncio.get_running_loop().create_task(read(track))
+        loop.create_task(read(track))
+
+    @call.on("peer_audio")
+    def _picked_up() -> None:
+        answered.set()
+
+    @call.on("ended")
+    def _hung_up(*_) -> None:
+        ended.set()
 
     try:
+        # connect() returns once the agent's own media is up, while her phone may still be ringing.
         await asyncio.wait_for(call.connect(), timeout=ANSWER_TIMEOUT_S)
+        if not await first_of(answered, ended, timeout=ring_deadline - loop.time()) or not answered.is_set():
+            emit("failed", reason="not_answered")
+            return 2
         emit("answered")
-        try:
-            await asyncio.wait_for(first_frame.wait(), timeout=VIDEO_TIMEOUT_S)
-        except asyncio.TimeoutError:
+        await say(call, start_pcm)  # it asks her to tap the video button when her camera is off
+        if not await first_of(first_frame, ended, timeout=VIDEO_TIMEOUT_S) or not first_frame.is_set():
             emit("failed", reason="no_video")
             return 2
-        await say(call, start_pcm)
         recording.set()
         emit("recording", seconds=args.seconds)
-        try:
-            await asyncio.wait_for(finished.wait(), timeout=args.seconds + 20)
-        except asyncio.TimeoutError:
-            pass  # a short recording is still read; Presage decides whether it is enough
+        await first_of(finished, ended, timeout=args.seconds + 20)  # a short recording is still read; Presage decides
+        finished.set()  # read() adds nothing more, so closing the file is safe
         recorder.close()
-        await say(call, end_pcm)
+        if not ended.is_set():
+            await say(call, end_pcm)
         if recorder.written < FPS * 15:
             emit("failed", reason="too_short", frames=recorder.written)
             return 2

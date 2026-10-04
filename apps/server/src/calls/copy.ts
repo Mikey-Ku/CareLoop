@@ -52,7 +52,7 @@ export const QUIET_RETRY_OFFER = "I couldn't get a clear camera reading. Would y
 export const CAMERA_CHECK_NOTICE =
   "I'll call you right back for a quick camera check. Please answer, tap the video button, and hold still with your face and upper chest in view for about 30 seconds. It's an estimate, not a medical test.";
 export const CAMERA_CHECK_START =
-  "Hi, it's your check-in assistant for the camera check. Please hold your phone steady with your face and upper chest in view, and stay still and quiet for about 30 seconds. I'll text you the estimate.";
+  "Hi, it's your check-in assistant for the camera check. If your camera is off, please tap the video button. Then hold your phone steady with your face and upper chest in view, and stay still and quiet for about 30 seconds.";
 export const CAMERA_CHECK_END = "Thank you, that's all. I'll text you the estimate in about a minute.";
 export const CAMERA_CHECK_MISSED = "I couldn't reach your camera for the check this time. That's okay, we can try again another day.";
 export const CAMERA_STILL_OFF = "I can't see your camera yet. Please tap the video button, then say ready, or say no thanks and we can skip it.";
