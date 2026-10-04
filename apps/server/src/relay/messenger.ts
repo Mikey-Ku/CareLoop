@@ -1,10 +1,8 @@
+import { BUTTONS_MAX_ITEMS, BUTTON_LABEL_MAX_LENGTH, buttonsPart, type ButtonsPart } from "@relaymessenger/sdk";
+
 // The seam between the check-in engine and Relay. RelayMessenger implements
 // Messenger with @relaymessenger/sdk; tests and the terminal simulator use
 // FakeMessenger. The engine never imports the Relay SDK directly.
-
-/** Relay allows 1 to 5 buttons per message, each label up to 80 characters. */
-export const MAX_BUTTONS = 5;
-export const MAX_BUTTON_LABEL = 80;
 
 export type OutboundMessage = {
   text: string;
@@ -59,11 +57,17 @@ export function assertValidActivityLabel(label: string): void {
     throw new Error(`Activity label must be 1 to ${MAX_ACTIVITY_LABEL} visible characters, got ${length}: "${label}"`);
 }
 
+/**
+ * The `buttons` part for these labels, checked by the SDK's buttonsPart against Relay's own limits
+ * (1 to BUTTONS_MAX_ITEMS buttons, each label 1 to BUTTON_LABEL_MAX_LENGTH characters).
+ */
+export function relayButtonsPart(labels: string[]): ButtonsPart {
+  const part = buttonsPart(labels.map((label) => ({ label })));
+  if (typeof part === "string")
+    throw new Error(`Relay messages take 1 to ${BUTTONS_MAX_ITEMS} buttons, each label 1 to ${BUTTON_LABEL_MAX_LENGTH} characters: ${part}`);
+  return part;
+}
+
 export function assertValidButtons(buttons: string[] | undefined): void {
-  if (!buttons) return;
-  if (buttons.length < 1 || buttons.length > MAX_BUTTONS)
-    throw new Error(`Relay messages take 1 to ${MAX_BUTTONS} buttons, got ${buttons.length}`);
-  for (const label of buttons)
-    if (label.length === 0 || label.length > MAX_BUTTON_LABEL)
-      throw new Error(`Button label must be 1 to ${MAX_BUTTON_LABEL} characters: "${label}"`);
+  if (buttons) relayButtonsPart(buttons);
 }

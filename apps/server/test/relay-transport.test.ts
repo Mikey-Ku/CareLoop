@@ -60,6 +60,14 @@ describe("RelayMessenger", () => {
     });
   });
 
+  it("builds exactly the parts Relay took before the SDK helpers: text, then one buttons part", () => {
+    expect(toRelayParts({ text: "Ready?", buttons: ["Let's start", "Not today"] })).toEqual([
+      { type: "text", value: "Ready?" },
+      { type: "buttons", items: [{ label: "Let's start" }, { label: "Not today" }] },
+    ]);
+    expect(toRelayParts({ text: "Ready?", buttons: [] })).toEqual([{ type: "text", value: "Ready?" }]);
+  });
+
   it("sends a plain text part when there are no buttons", async () => {
     expect(toRelayParts({ text: "Thank you." })).toEqual([{ type: "text", value: "Thank you." }]);
     const relay = fakeRelay();
