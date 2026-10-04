@@ -134,3 +134,71 @@ describe("ConversationOrchestrator", () => {
     flow.close();
   });
 });
+
+describe("ConversationOrchestrator: repeats and the end of the call", () => {
+  function build(llm: FakeLlmClient) {
+    const transcript: TranscriptTurn[] = [];
+    const spoken: string[] = [];
+    const flow = new ConversationOrchestrator({
+      callId: "call-r",
+      patientId: "harriet",
+      subject: "patient-demo-polypharmacy",
+      firstName: "Harriet",
+      transcript,
+      initialContext: { firstName: "Harriet", questions: [], yesterday: [], memories: [], familyNames: [] },
+      llm,
+      loadSnapshot: async (subject) => loadSnapshot(subject),
+      getVitals: emptyCallVitals,
+      canMeasure: false,
+      quietMeasurementMs: 30_000,
+      speak: async (text) => { spoken.push(text); },
+      recordAgentTurn: (text) => transcript.push({ speaker: "agent", text }),
+      beginQuietMeasurement: () => {},
+      onComplete: () => {},
+    });
+    return { flow, spoken };
+  }
+  const asks = (question: string) => plan({ nextAction: "ask_follow_up", nextQuestion: question });
+  const turns = (llm: FakeLlmClient) => llm.calls.filter((call) => call.method === "callTurn").length;
+
+  it("repeats the last question when she asks to hear it again, without asking Gemini again", async () => {
+    const llm = new FakeLlmClient({ callTurn: () => asks("How has your breathing been when you lie down?") });
+    const { flow, spoken } = build(llm);
+    flow.start();
+    await flow.handlePatientTurn("I am a bit tired.");
+    await flow.handlePatientTurn("Sorry, what did you ask?");
+    expect(spoken.at(-1)).toBe("Of course. How has your breathing been when you lie down?");
+    await flow.handlePatientTurn("Pardon?");
+    expect(spoken.at(-1)).toBe("Of course. How has your breathing been when you lie down?");
+    expect(turns(llm)).toBe(1);
+  });
+
+  it("repeats the greeting question when she asks before any question was planned", async () => {
+    const llm = new FakeLlmClient({ callTurn: () => asks("When did it begin?") });
+    const { flow, spoken } = build(llm);
+    flow.start();
+    await flow.handlePatientTurn("What?");
+    expect(spoken.at(-1)).toBe("Of course. How are you feeling today?");
+    expect(turns(llm)).toBe(0);
+  });
+
+  it("does not take a sentence that merely starts with sorry or what for a request to repeat", async () => {
+    const llm = new FakeLlmClient({ callTurn: () => asks("When did it begin?") });
+    const { flow } = build(llm);
+    flow.start();
+    await flow.handlePatientTurn("Sorry, my ankles hurt today.");
+    await flow.handlePatientTurn("What changed is I got dizzy.");
+    expect(turns(llm)).toBe(2);
+  });
+
+  it("says nothing if a planned turn finishes after the call has closed", async () => {
+    let flow!: ConversationOrchestrator;
+    const llm = new FakeLlmClient({ callTurn: () => { flow.close(); return asks("When did it begin?"); } });
+    const built = build(llm);
+    flow = built.flow;
+    flow.start();
+    const before = built.spoken.length;
+    await flow.handlePatientTurn("I feel dizzy.");
+    expect(built.spoken).toHaveLength(before);
+  });
+});

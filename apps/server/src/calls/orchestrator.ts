@@ -56,6 +56,7 @@ export class ConversationOrchestrator {
   handlePatientTurn(text: string): Promise<void> {
     this.#queue = this.#queue.then(() => this.#handlePatientTurn(text)).catch(async (error) => {
       this.#log("call_turn_failed", { error: summary(error) });
+      if (this.#completed) return; // the call is over: nobody to speak to
       try {
         await this.#speak("I am sorry, I did not catch that clearly. Please tell me once more.");
       } catch (speechError) {
@@ -96,6 +97,10 @@ export class ConversationOrchestrator {
         return;
       }
     }
+    if (asksToRepeat(text)) {
+      await this.#speak(`Of course. ${this.#lastQuestion ?? "How are you feeling today?"}`);
+      return;
+    }
     await this.#planTurn(this.#phase);
   }
 
@@ -127,6 +132,7 @@ export class ConversationOrchestrator {
       canMeasure: this.#options.canMeasure && !this.#measurementDeclined,
       interviewPhase: interviewPhase === "quiet_measurement" ? "screening" : interviewPhase,
     });
+    if (this.#completed) return;
     this.#summary = summarize(decision.informationCollected, decision.missingInformation, decision.uncertainty);
     this.#lastQuestion = decision.nextQuestion ?? undefined;
     if (decision.nextAction === "ask_follow_up" && decision.nextQuestion) {
@@ -210,6 +216,11 @@ export class ConversationOrchestrator {
 
 function affirmative(text: string): boolean {
   return /^(yes|yeah|yep|sure|okay|ok|that's fine|i agree|go ahead)\b/i.test(text.trim());
+}
+
+/** "Sorry, what did you ask?", "pardon", "can you say that again": the whole utterance, not a sentence that merely starts so. */
+function asksToRepeat(text: string): boolean {
+  return /^(?:sorry|excuse me|oh)?[\s,.]*(?:what|pardon|huh|come again|what did you (?:say|ask)|(?:can|could) you (?:say|repeat) that(?: again)?|say that again|i (?:didn'?t|couldn'?t) (?:catch|hear) (?:that|you))[\s?.!]*$/i.test(text.trim());
 }
 
 function negative(text: string): boolean {
