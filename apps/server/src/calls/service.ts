@@ -12,6 +12,7 @@ import { addVitalsReading } from "../db/vitals.ts";
 import { normalizeHandle, type Config } from "../config.ts";
 import type { Db } from "../db/index.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
+import { linkPatientChat } from "../relay/inbox.ts";
 import type { VitalsResult } from "../vitals/types.ts";
 import type { CallScreeningLlmOutput, LlmClient } from "../llm/types.ts";
 import { QUIET_MINUTE_PROMPT, heartRateReadback, noReadingReadback, noVideoReadback, stillMeasuring, wrongCallerDecline } from "./copy.ts";
@@ -235,6 +236,7 @@ export class CallService implements CallEventHandler {
       return;
     }
 
+    this.#linkChat(call, patient.id);
     try {
       const context = await this.#context(patient, day);
       active.firstName = context.firstName;
@@ -344,6 +346,20 @@ export class CallService implements CallEventHandler {
       active.conversation?.close();
       this.#closeMedia(active);
       await this.#finish(active);
+    }
+  }
+
+  /**
+   * She may call before she has ever typed, so her chat isn't linked and "Here's what I noted from our
+   * call" and her family's alerts would have nowhere to go. Link the call's chat the way the inbox links
+   * her on her first message. A chat she already has is left alone. Never fails the call.
+   */
+  #linkChat(call: Call, patientId: string): void {
+    try {
+      if (getCheckinPatient(this.#options.db, patientId)?.relayChatId) return;
+      if (linkPatientChat(this.#options.db, call.from.handle, call.chat_id)) this.#log("call_patient_chat_linked", { call_id: call.id });
+    } catch (error) {
+      this.#log("call_chat_link_failed", { call_id: call.id, error: summary(error) });
     }
   }
 

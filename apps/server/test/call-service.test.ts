@@ -3,14 +3,18 @@ import type { RelayCallTransport } from "@relaymessenger/sdk/calls";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ElevenLabsRealtimeStt, ElevenLabsTts } from "../src/calls/audio.ts";
 import { callClosing } from "../src/calls/copy.ts";
-import { CallService } from "../src/calls/service.ts";
+import { CallService, type CallEngine } from "../src/calls/service.ts";
+import { createCheckinEngine } from "../src/checkin/engine.ts";
 import { crisisReply, urgentReply } from "../src/checkin/copy.ts";
 import { callTranscript, getCallSession } from "../src/db/calls.ts";
+import { getCheckinPatient } from "../src/db/checkins.ts";
+import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import { openDatabase, upsertPatient, type Db } from "../src/db/index.ts";
 import { loadConfig } from "../src/config.ts";
-import { loadSnapshot } from "../src/finchnode/fixtures.ts";
+import { loadRxNavCache, loadSnapshot } from "../src/finchnode/fixtures.ts";
 import { FakeLlmClient } from "../src/llm/fake.ts";
 import type { CallTurnLlmOutput } from "../src/llm/types.ts";
+import { FakeMessenger } from "../src/relay/fake-messenger.ts";
 
 const PATIENT = "harriet";
 const DATE = "2026-10-04";
@@ -81,7 +85,7 @@ let ttsOptions: ConstructorParameters<typeof ElevenLabsTts>[1] | undefined;
 let sttOptions: ConstructorParameters<typeof ElevenLabsRealtimeStt>[0] | undefined;
 let relay: { calls: { end: ReturnType<typeof vi.fn> }; chats: { messages: { send: ReturnType<typeof vi.fn> } } };
 
-function setup(options: { wallNow?: () => string; callTurn?: (input: Parameters<NonNullable<FakeLlmClient["callTurn"]>>[0]) => CallTurnLlmOutput | Error; env?: Record<string, string> } = {}) {
+function setup(options: { wallNow?: () => string; callTurn?: (input: Parameters<NonNullable<FakeLlmClient["callTurn"]>>[0]) => CallTurnLlmOutput | Error; env?: Record<string, string>; engine?: CallEngine } = {}) {
   transport = new FakeTransport();
   stt = new FakeStt();
   tts = new FakeTts();
@@ -93,6 +97,7 @@ function setup(options: { wallNow?: () => string; callTurn?: (input: Parameters<
     relay: relay as never,
     loadSnapshot: async (subject) => loadSnapshot(subject),
     llm,
+    ...(options.engine ? { engine: options.engine } : {}),
     today: () => DATE,
     now: () => NOW,
     wallNow: options.wallNow ?? (() => NOW),
@@ -191,6 +196,67 @@ const modelPlan = (overrides: Partial<CallTurnLlmOutput> = {}): CallTurnLlmOutpu
   evidence: [],
   uncertainty: [],
   ...overrides,
+});
+
+describe("her chat is linked from the call", () => {
+  const unlinked = (relayChatId: string | null = null) =>
+    upsertPatient(db, { id: PATIENT, finchnodePatientId: "patient-demo-polypharmacy", preferredName: "Harriet", relayHandle: "harriet", relayChatId });
+  const chatOf = () => getCheckinPatient(db, PATIENT)?.relayChatId;
+  const realEngine = () => {
+    const messenger = new FakeMessenger({ now: () => NOW });
+    const engine = createCheckinEngine({ db, messenger, clock: { now: () => NOW }, loadSnapshot: async (subject) => loadSnapshot(subject), llm: new FakeLlmClient() }, { rxnav: loadRxNavCache() });
+    return { messenger, engine };
+  };
+
+  it("when she called before she ever typed, the call's chat becomes her chat", async () => {
+    unlinked();
+    expect(chatOf()).toBeNull();
+    const service = setup();
+    await start(service);
+    expect(chatOf()).toBe("chat-harriet");
+    await service.end("call-1");
+  });
+
+  it("leaves a chat she already has alone", async () => {
+    unlinked("chat-earlier");
+    const service = setup();
+    await start(service);
+    expect(chatOf()).toBe("chat-earlier");
+    await service.end("call-1");
+  });
+
+  it("never links a stranger's chat as hers", async () => {
+    unlinked();
+    const service = setup();
+    await service.handle(created(relayCall("stranger", "call-stranger")));
+    await vi.waitFor(() => expect(relay.calls.end).toHaveBeenCalledWith("call-stranger"));
+    expect(chatOf()).toBeNull();
+  });
+
+  it("so the post-call message can reach her", async () => {
+    unlinked();
+    const { messenger, engine } = realEngine();
+    const service = setup({ engine });
+    await start(service);
+    stt.emit("My knee aches a bit today.");
+    await vi.waitFor(() => expect(callTranscript(db, "call-1").some((turn) => turn.speaker === "patient")).toBe(true));
+    await service.end("call-1");
+    expect(messenger.inChat("chat-harriet").map((message) => message.text)).toEqual([expect.stringMatching(/^Here's what I noted from our call/)]);
+  });
+
+  it("and an emergency on the call reaches her chat as well as her family", async () => {
+    unlinked();
+    syncFamilyMembers(db, PATIENT, ["sarah"]);
+    linkFamilyMember(db, "sarah", "chat-sarah", "Sarah", NOW);
+    const { messenger, engine } = realEngine();
+    const service = setup({ engine });
+    await start(service);
+    stt.emit("I have chest pain right now");
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    await service.end("call-1");
+    expect(messenger.inChat("chat-harriet").map((message) => message.text)).toContain(urgentReply("Harriet", ["Sarah"]));
+    expect(messenger.inChat("chat-sarah")).toHaveLength(1);
+  });
 });
 
 describe("the start of the call", () => {
