@@ -18,14 +18,20 @@ import {
   photoReadFailed,
   photoRejected,
   refillAskedReply,
+  smallTalkFallback,
 } from "../src/checkin/copy.ts";
+import { QUESTION_BANK, promptButtons } from "../src/context/questions.ts";
 import { MORNING_MEDICINES_QUESTION, createCheckinEngine, type EngineOptions } from "../src/checkin/engine.ts";
 import type { CheckinEngine } from "../src/checkin/engine-types.ts";
 import { PAPER_CONFIRM_BUTTONS } from "../src/checkin/paper-check.ts";
 import { getCheckin } from "../src/db/checkins.ts";
 import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import { openDatabase, setSharing, upsertPatient, type Db } from "../src/db/index.ts";
-import { getDose } from "../src/db/meds.ts";
+import { getDose, planMemoryCheck } from "../src/db/meds.ts";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { FIXTURES_DIR } from "../src/finchnode/fixtures.ts";
+import type { ExtractedPaper } from "../src/rules/paper-diff.ts";
 import { visitQuestions } from "../src/db/notes.ts";
 import { observationsBetween } from "../src/db/observations.ts";
 import { loadRxNavCache, loadSnapshot } from "../src/finchnode/fixtures.ts";
@@ -420,5 +426,178 @@ describe("reminder answers and the check-in", () => {
     await engine.sendMedsReminder(P, DAY, "morning");
     const sent = await say(MEDS_BUTTONS.question, lastMine());
     expect(sent.map((m) => m.text)).toEqual(["Go ahead, Harriet. What would you like to know?"]);
+  });
+});
+
+describe("latest prompt wins: typed text goes to the newest prompt still waiting", () => {
+  const PREV = "2026-07-27";
+  const medicineQuestion = "That's a good question for your doctor or pharmacist, Harriet. I've added it to your list for your next visit. Please don't change any medicine before you ask them.";
+  /** A model that understands nothing of her words as a check-in reply, as in the live log. */
+  const liveModel = (kind: "medicine_question" | "chat" = "medicine_question") =>
+    new FakeLlmClient({
+      extractCheckin: () => ({ answers: [], symptoms: [], memories: [] }),
+      classifyMessage: () => ({ kind, confidence: kind === "chat" ? "low" : "high", complaints: [], memories: [] }),
+    });
+  const transcript = (sent: SentMessage[]) => sent.map((m) => `${m.chatId === ME ? "Bot" : `Bot -> ${m.chatId}`}: ${m.text}${m.buttons ? ` [${m.buttons.join("] [")}]` : ""}`);
+
+  it("live case 2026-10-04: after \"I have a question\", an older open check-in's greeting doesn't take her question", async () => {
+    for (const kind of ["medicine_question", "chat"] as const) {
+      setup({ llm: liveModel(kind) });
+      // A different day's check-in is still open at its greeting.
+      now = `${PREV}T12:00:00.000Z`;
+      await engine.startDay(P, PREV);
+      const greeting = lastMine();
+      now = `${DAY}T08:00:00.000Z`;
+      await engine.sendMedsReminder(P, DAY, "morning");
+      later(1);
+      const goAhead = await say(MEDS_BUTTONS.question, lastMine());
+      expect(goAhead.map((m) => m.text)).toEqual(["Go ahead, Harriet. What would you like to know?"]);
+      later(1);
+      const sent = await say("What does it look like :(");
+      if (kind === "medicine_question")
+        console.log(["Harriet: [I have a question]", ...transcript(goAhead), "Harriet: What does it look like :(", ...transcript(sent)].join("\n"));
+      // The medicine-question path: the fixed reply, saved to her visit list; then the waiting greeting again.
+      expect(sent.map((m) => m.text)).toEqual([medicineQuestion, greeting.text]);
+      expect(sent[0]!.text).not.toContain("Thanks, Harriet.");
+      expect(visitQuestions(db, P).map((q) => q.text)).toEqual(["What does it look like :("]);
+      expect(getCheckin(db, P, PREV)).toMatchObject({ step: "greeting", answers: [] });
+      // Her next typed message is the check-in's again ("Go ahead" waited for one message).
+      later(1);
+      const next = await say("I'm fine thanks");
+      expect(next.at(-1)!.buttons).toBeDefined();
+      expect(getCheckin(db, P, PREV)!.step).toBe("question"); // her open reply, read by the check-in
+    }
+  });
+
+  it("without the model, her question still gets the fixed reply and goes on her list", async () => {
+    now = `${PREV}T12:00:00.000Z`;
+    await engine.startDay(P, PREV);
+    now = `${DAY}T08:00:00.000Z`;
+    await engine.sendMedsReminder(P, DAY, "morning");
+    await say(MEDS_BUTTONS.question, lastMine());
+    later(1);
+    const sent = await say("Can I take these with coffee?");
+    expect(sent[0]!.text).toBe(medicineQuestion);
+    expect(visitQuestions(db, P).map((q) => q.text)).toEqual(["Can I take these with coffee?"]);
+  });
+
+  it("a check-in question sent after the reminder still gets the typed answer", async () => {
+    setup({ llm: liveModel("chat") });
+    await engine.sendMedsReminder(P, DAY, "morning");
+    await say(MEDS_BUTTONS.question, lastMine());
+    later(5);
+    await engine.startDay(P, DAY);
+    const first = (await say(BUTTON.start, lastMine()))[0]!;
+    expect(getCheckin(db, P, DAY)!.step).toBe("question");
+    later(1);
+    const sent = await say("hmm, let me think");
+    // The check-in's question took it (its "didn't understand" with the question's buttons), not the helper.
+    expect(sent.map((m) => m.buttons)).toEqual([first.buttons]);
+    expect(sent[0]!.text).not.toBe(medicineQuestion);
+    expect(visitQuestions(db, P)).toEqual([]);
+  });
+
+  it("a medicines reminder sent after the check-in's question: typed text is not the check-in's answer", async () => {
+    await engine.startDay(P, DAY);
+    await say(BUTTON.start, lastMine());
+    const before = getCheckin(db, P, DAY)!;
+    later(5);
+    await engine.sendMedsReminder(P, DAY, "morning");
+    later(1);
+    const sent = await say("my ankles are a bit puffy");
+    expect(getCheckin(db, P, DAY)!.answers).toEqual(before.answers);
+    expect(getCheckin(db, P, DAY)!.questionIndex).toBe(before.questionIndex);
+    // Plain chat with nothing pending (no model: the fixed reply), then the check-in's question again.
+    expect(sent[0]).toMatchObject({ text: smallTalkFallback("Harriet") });
+    expect(sent[0]!.buttons).toBeUndefined();
+    expect(sent.at(-1)!.buttons).toEqual(promptButtons(QUESTION_BANK.find((q) => q.id === before.questionIds[before.questionIndex])!));
+    // Now the question is the newest prompt again: her next words are its.
+    later(1);
+    const next = await say("a bit puffy");
+    expect(next[0]!.text).not.toBe(smallTalkFallback("Harriet"));
+  });
+
+  it("a tap on the old reminder still works, and \"I have a question\" there makes her next message the question", async () => {
+    await engine.sendMedsReminder(P, DAY, "morning");
+    const reminder = lastMine();
+    later(5);
+    await engine.startDay(P, DAY);
+    await say(BUTTON.start, lastMine());
+    const question = getCheckin(db, P, DAY)!;
+    later(1);
+    expect((await say(MEDS_BUTTONS.question, reminder)).map((m) => m.text)).toEqual(["Go ahead, Harriet. What would you like to know?"]);
+    later(1);
+    const sent = await say("Is the white one the water pill?");
+    expect(sent[0]!.text).toBe(medicineQuestion);
+    expect(sent.at(-1)!.buttons).toEqual(lastMine().buttons); // the check-in's question again
+    expect(getCheckin(db, P, DAY)!.answers).toEqual(question.answers);
+    later(1);
+    await say(MEDS_BUTTONS.taken, reminder);
+    expect(getDose(db, P, DAY, "morning")!.status).toBe("taken");
+  });
+});
+
+describe("hospital papers: a medicine her papers say was stopped or changed", () => {
+  /** Harriet's synthetic discharge sheet: the one planted change is aspirin 81 mg, stopped on paper, still active in her record. */
+  const PAPER = JSON.parse(readFileSync(join(FIXTURES_DIR, "papers", "harriet-discharge.extracted.json"), "utf8")) as ExtractedPaper;
+  const STOPPED = "Your hospital papers say this was stopped. Please check with your pharmacist before taking it.";
+  const CHANGED = "Your hospital papers say this was changed. Please check with your pharmacist before taking it.";
+  const aspirin = harrietSchedule.find((s) => s.ingredient === "aspirin")!;
+  const aspirinLine = `Aspirin 81 mg: ${verbatim(sigOf("aspirin"))}`;
+
+  async function confirmPaper(paper: ExtractedPaper = PAPER) {
+    await engine.startPaperCheck(P, paper, `att_paper_${++inbound}`);
+    await say(PAPER_CONFIRM_BUTTONS[0]!, lastMine());
+  }
+
+  it("the reminder keeps aspirin on her list, its label words verbatim, then the note; nothing else changes", async () => {
+    await engine.sendMedsReminder(P, DAY, "morning");
+    const before = lastMine().text;
+    expect(before.split("\n")).toContain(aspirinLine);
+
+    setup();
+    await confirmPaper();
+    await engine.sendMedsReminder(P, DAY, "morning");
+    const lines = lastMine().text.split("\n");
+    expect(lines).toContain(`${aspirinLine}. ${STOPPED}`);
+    expect(lines.filter((l) => l.includes("hospital papers"))).toHaveLength(1);
+    expect(lastMine().text).toBe(before.replace(aspirinLine, `${aspirinLine}. ${STOPPED}`));
+    for (const word of ADVICE) expect(lastMine().text.toLowerCase()).not.toContain(word);
+  });
+
+  it("the memory check and a matching label photo for aspirin carry the same note", async () => {
+    setup({ llm: new FakeLlmClient({ readImage: () => label({ medicineName: "Aspirin", strength: "81 mg", instructions: "Take 1 tablet by mouth once daily" }) }) });
+    await confirmPaper();
+    // Today's memory check is about aspirin.
+    planMemoryCheck(db, {
+      patientId: P,
+      day: DAY,
+      medicationKey: aspirin.key,
+      ingredient: aspirin.ingredient,
+      unit: "tablet",
+      slot: "morning",
+      count: 1,
+      instructions: aspirin.instructions!,
+      plannedAt: now,
+    });
+    await engine.sendMedsReminder(P, DAY, "morning");
+    const [asked] = mine(await say(MEDS_BUTTONS.taken, lastMine()));
+    expect(asked!.text).toBe(`Thank you, Harriet. I've noted that you took your morning medicines.\n\nQuick memory check: how many aspirin tablets do you take in the morning? ${STOPPED}`);
+    expect((await say("1", asked))[0]!.text).toBe(`That's right, Harriet. ${STOPPED}`);
+
+    await engine.handlePhoto(P, new Uint8Array([1]), "image/jpeg", "att_aspirin");
+    expect(lastMine().text).toBe(`This is your aspirin 81 mg. Your label says: take 1 tablet by mouth once daily. It matches your medication list. ${STOPPED}`);
+  });
+
+  it("a changed dose says changed; once the R6 flag is cleared there is no note", async () => {
+    const changed: ExtractedPaper = { ...PAPER, medications: [{ name: "metformin", strength: "1000 mg", change: "changed" }] };
+    await confirmPaper(changed);
+    await engine.sendMedsReminder(P, DAY, "evening");
+    expect(lastMine().text).toContain(`Metformin hydrochloride 500 mg: ${verbatim(sigOf("metformin hydrochloride"))}. ${CHANGED}`);
+    expect(lastMine().text).not.toContain("Apixaban 5 mg: take 1 tablet by mouth twice daily. Your hospital");
+
+    db.prepare(`UPDATE flags SET status = 'cleared', cleared_at = ? WHERE rule_id = 'R6'`).run(now);
+    await engine.sendMedsReminder(P, "2026-07-29", "evening");
+    expect(lastMine().text).not.toContain("hospital papers");
   });
 });

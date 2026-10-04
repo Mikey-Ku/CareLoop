@@ -30,6 +30,9 @@ export function medsOutputs(): string[] {
     copy.medsNudge(NAME, "morning"),
     copy.medsNudge(NAME, "evening"),
     copy.medsQuestionPrompt(NAME),
+    copy.paperChangeNote("stopped"),
+    copy.paperChangeNote("changed"),
+    copy.withPaperNote(copy.labelMatchReply("aspirin 81 mg", "take 1 tablet by mouth once daily"), copy.paperChangeNote("stopped")),
     copy.memoryCheckRight(NAME),
     copy.labelNotOnList(),
     copy.labelUnreadable(),
@@ -75,4 +78,5 @@ export const MEDS_COPY_FUNCTIONS = [
   "memoryCheckButtons", "memoryCheckRight", "labelSaysLine", "labelMatchReply", "labelStrengthDiffers", "labelNotOnList",
   "labelUnreadable", "labelNoRecord", "photoOther", "photoReadFailed", "photoRejected", "photoCouldNotOpen", "refillTellButton",
   "refillReminder", "refillAskedReply", "refillTomorrowReply", "refillToldFamilyReply", "familyRefillNotice", "familyMedsNotConfirmed",
+  "paperChangeNote", "withPaperNote",
 ];

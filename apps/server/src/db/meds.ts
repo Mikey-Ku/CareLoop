@@ -219,6 +219,12 @@ export function recordMedPrompt(db: Db, p: MedPrompt): void {
   );
 }
 
+/** When the latest message carrying this helper prompt (a reminder and its re-reminder, a memory check, a refill) went out. */
+export function latestMedPromptAt(db: Db, kind: MedPromptKind, refId: number): string | undefined {
+  const row = db.prepare(`SELECT MAX(sent_at) AS at FROM med_prompts WHERE kind = ? AND ref_id = ?`).get(kind, refId) as { at: string | null };
+  return row.at ?? undefined;
+}
+
 export function getMedPrompt(db: Db, messageId: string): MedPrompt | undefined {
   return db
     .prepare(`SELECT message_id AS messageId, patient_id AS patientId, kind, ref_id AS refId, sent_at AS sentAt FROM med_prompts WHERE message_id = ?`)

@@ -10,6 +10,7 @@ import type { InboundMessage, Messenger } from "./messenger.ts";
 import { consoleLog, describeRelayError, normalizeHandle, sameHandle, type RelayClient, type RelayLog } from "./relay-client.ts";
 import { RelayMessenger } from "./relay-messenger.ts";
 import type { CallEventHandler } from "../calls/service.ts";
+import { passOnFamilyMessage } from "./family-inbound.ts";
 
 // Durable inbox for Relay's acknowledged WebSocket, after Relay-SDK
 // cookbook/websocket-agent. `onEvent` commits the whole event by `event_id`
@@ -22,8 +23,9 @@ import type { CallEventHandler } from "../calls/service.ts";
 // family member's own direct chat with the agent (a family chat) on
 // family_members.chat_id. Both are linked from contact.added, or from the first
 // direct message when that arrives first. Only the senior's chat reaches the
-// check-in engine; family messages are logged and otherwise ignored until family
-// replies and voice memos are built (build step 7).
+// check-in engine. A family member's text is passed on to her chat as plain text
+// (src/relay/family-inbound.ts: safety screen in the third person first, never an
+// answer or a sharing change); their photos get no reply. Voice memos are later.
 //
 // Photos: a media part in her chat is downloaded from its signed URL (promptly: it expires in
 // about an hour) with a size guard (MAX_IMAGE_BYTES, 8 MB), and the bytes go to the engine's
@@ -257,12 +259,17 @@ export async function processEvent(deps: InboxDeps, event: RelayWebhookEvent): P
       }
     }
     if (family.length > 0) {
-      log("relay_family_message_ignored", {
-        ...base,
-        handle: family[0]!.handle,
-        chat_id: data.chat.id,
-        patient_ids: family.map((f) => f.patientId),
-      });
+      const at = { ...base, handle: family[0]!.handle, chat_id: data.chat.id, patient_ids: family.map((f) => f.patientId) };
+      // Text only (a photo or empty message gets nothing). Their words are never logged.
+      const text = data.parts.some((part) => part.type === "media") ? "" : textOf(data);
+      if (!text) {
+        log("relay_family_message_ignored", at);
+        return "family_message";
+      }
+      const messenger = deps.messenger ?? new RelayMessenger(deps.relay);
+      const outcomes = await passOnFamilyMessage({ db: deps.db, messenger, now }, family, { chatId: data.chat.id, messageId: data.id, text });
+      log("relay_family_message", { ...at, outcomes });
+      await markRead(deps, log, base, data.chat.id);
       return "family_message";
     }
   }

@@ -679,6 +679,42 @@ export function familyWelcome(seniorName: string): string {
     `Each day I'll send you an update on ${seniorName}'s check-in here.`,
     `${seniorName} decides how much you see and can change it any time.`,
     `If ${seniorName} tells me something urgent, you'll always hear about it here.`,
+    `Anything else you write to me here, I'll pass on to ${seniorName}.`,
+  ].join(" ");
+}
+
+// A family member's message passed on to her (src/relay/family-inbound.ts). Their words are quoted as
+// plain text, never read as an answer or an instruction.
+
+/** What she reads: `Sarah says: "..."` (`from`: their display name, else their handle). */
+export function familySays(from: string, words: string): string {
+  return `${from} says: "${herWordsInFull(words)}"`;
+}
+
+/** The family member's acknowledgement once it went to her chat. */
+export function familyPassedOn(seniorName: string): string {
+  return `I've passed that on to ${seniorName}.`;
+}
+
+/** Her chat isn't linked yet, so nothing can be passed on. */
+export function familyCantPassOn(seniorName: string): string {
+  return `${seniorName} hasn't connected with me yet, so I can't pass this on.`;
+}
+
+/**
+ * The family member describes an emergency happening to her (the safety screen read in the third person,
+ * as for care replies): 911 now. It is not passed on to her.
+ */
+export function familyEmergencyAbout(seniorName: string): string {
+  return `If this is happening now, please call 911 right away. I'm an automated assistant, so I can't act on this myself, and I haven't passed this message on to ${seniorName}.`;
+}
+
+/** The family member says she may harm herself or not want to live: 988, 911 if she is in danger. Not passed on. */
+export function familyCrisisAbout(seniorName: string): string {
+  return [
+    `Please call or text 988, the Suicide & Crisis Lifeline, now. They can help you support ${seniorName}.`,
+    `If ${seniorName} is in danger right now, call 911.`,
+    `I'm an automated assistant, so I can't act on this myself, and I haven't passed this message on to ${seniorName}.`,
   ].join(" ");
 }
 
@@ -699,12 +735,29 @@ export const READING_PHOTO_ACTIVITY = "Reading your photo";
 
 export type MedsSlotName = "morning" | "evening";
 
-/** One medicine in a reminder: its name and strength ("Apixaban 5 mg") and her prescription's words. */
-export type MedsLine = { name: string; instructions?: string | undefined };
+/**
+ * One medicine in a reminder: its name and strength ("Apixaban 5 mg"), her prescription's words, and the
+ * note when her hospital papers say it was stopped or changed (paperChangeNote).
+ */
+export type MedsLine = { name: string; instructions?: string | undefined; note?: string | undefined };
 
-/** "Apixaban 5 mg: take 1 tablet by mouth twice daily" (the instructions verbatim), or just the name. */
+/** "Apixaban 5 mg: take 1 tablet by mouth twice daily" (the instructions verbatim), or just the name; a paper note after it. */
 export function medsLine(line: MedsLine): string {
-  return line.instructions ? `${line.name}: ${line.instructions}` : line.name;
+  const base = line.instructions ? `${line.name}: ${line.instructions}` : line.name;
+  return line.note ? `${base}. ${line.note}` : base;
+}
+
+/**
+ * Her hospital papers say a medicine still on her list was stopped (or changed): said after its label words
+ * in the reminder, the memory check and a matching label photo. Never tells her to stop or change it.
+ */
+export function paperChangeNote(kind: "stopped" | "changed"): string {
+  return `Your hospital papers say this was ${kind}. Please check with your pharmacist before taking it.`;
+}
+
+/** `text` with the paper note after it, when there is one. */
+export function withPaperNote(text: string, note: string | undefined): string {
+  return note ? `${text} ${note}` : text;
 }
 
 /**

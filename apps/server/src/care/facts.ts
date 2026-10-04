@@ -9,6 +9,8 @@ import { normalizeHealthRecord } from "../finchnode/normalize.ts";
 import type { RxNavCache } from "../finchnode/rxnav.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import { plainName } from "../meds/schedule.ts";
+import { DEFAULT_TIMEZONE } from "../config.ts";
+import { addDays, localDate } from "../scheduler.ts";
 import type { Evidence, RuleId, Severity } from "../rules/index.ts";
 
 // The facts behind one care summary: what she said in the day's check-in (and, once
@@ -262,9 +264,22 @@ export function buildCareFacts(db: Db, input: BuildCareFactsInput): CareFacts {
   }
 
   const notes = checkin ? checkinNotes(db, checkin.id).map((n) => ({ about: topicAbout(n.questionId ?? n.topic), text: oneLine(n.text) ?? "" })).filter((n) => n.text) : [];
+  // Visit questions, label checks and refills belong to the day in her time zone (America/Detroit by
+  // default), not the UTC date of their timestamp: an evening question in Detroit is already "tomorrow" in UTC.
+  const timezone = (db.prepare(`SELECT timezone FROM patients WHERE id = ?`).get(patientId) as { timezone: string | null } | undefined)?.timezone ?? null;
+  const zone = timezone ?? DEFAULT_TIMEZONE;
+  const nearDays = [addDays(day, -1), day, addDays(day, 1)];
+  const onHerDay = (iso: string) => {
+    const t = new Date(iso);
+    return !Number.isNaN(t.getTime()) && localDate(t, zone) === day;
+  };
   const visitQuestions = (
-    db.prepare(`SELECT text FROM visit_questions WHERE patient_id = ? AND substr(created_at, 1, 10) = ? ORDER BY created_at, id`).all(patientId, day) as { text: string }[]
-  ).flatMap((q) => oneLine(q.text) ?? []);
+    db
+      .prepare(`SELECT text, created_at AS createdAt FROM visit_questions WHERE patient_id = ? AND substr(created_at, 1, 10) IN (?, ?, ?) ORDER BY created_at, id`)
+      .all(patientId, ...nearDays) as { text: string; createdAt: string }[]
+  )
+    .filter((q) => onHerDay(q.createdAt))
+    .flatMap((q) => oneLine(q.text) ?? []);
 
   const doses = (
     db.prepare(`SELECT slot, status FROM med_doses WHERE patient_id = ? AND day = ? ORDER BY CASE slot WHEN 'morning' THEN 0 ELSE 1 END`).all(patientId, day) as {
@@ -276,11 +291,19 @@ export function buildCareFacts(db: Db, input: BuildCareFactsInput): CareFacts {
   const labelMismatches = (
     db
       .prepare(
-        `SELECT outcome, medication_key AS medicationKey, label_medicine AS labelMedicine, label_strength AS labelStrength FROM med_label_checks
-         WHERE patient_id = ? AND substr(created_at, 1, 10) = ? AND outcome IN ('strength_differs', 'not_on_list') ORDER BY id`,
+        `SELECT outcome, medication_key AS medicationKey, label_medicine AS labelMedicine, label_strength AS labelStrength, created_at AS createdAt FROM med_label_checks
+         WHERE patient_id = ? AND substr(created_at, 1, 10) IN (?, ?, ?) AND outcome IN ('strength_differs', 'not_on_list') ORDER BY id`,
       )
-      .all(patientId, day) as { outcome: "strength_differs" | "not_on_list"; medicationKey: string | null; labelMedicine: string | null; labelStrength: string | null }[]
-  ).map((l) => {
+      .all(patientId, ...nearDays) as {
+      outcome: "strength_differs" | "not_on_list";
+      medicationKey: string | null;
+      labelMedicine: string | null;
+      labelStrength: string | null;
+      createdAt: string;
+    }[]
+  )
+    .filter((l) => onHerDay(l.createdAt))
+    .map((l) => {
     const listed = l.medicationKey ? meds.find((m) => m.key === l.medicationKey) : undefined;
     const label = [l.labelMedicine ?? "a medicine", l.labelStrength].filter(Boolean).join(" ");
     return { outcome: l.outcome, label, onHerList: listed ? plainName(listed) : null };
@@ -288,11 +311,20 @@ export function buildCareFacts(db: Db, input: BuildCareFactsInput): CareFacts {
   const refills = (
     db
       .prepare(
-        `SELECT name, run_out AS runOut, status, family_told_at AS familyToldAt FROM med_refills
-         WHERE patient_id = ? AND (last_reminded_day = ? OR substr(updated_at, 1, 10) = ?) ORDER BY run_out, id`,
+        `SELECT name, run_out AS runOut, status, family_told_at AS familyToldAt, last_reminded_day AS lastRemindedDay, updated_at AS updatedAt FROM med_refills
+         WHERE patient_id = ? AND (last_reminded_day = ? OR substr(updated_at, 1, 10) IN (?, ?, ?)) ORDER BY run_out, id`,
       )
-      .all(patientId, day, day) as { name: string; runOut: string; status: "reminded" | "asked" | "snoozed"; familyToldAt: string | null }[]
-  ).map((r) => ({ medicine: r.name, runsOut: r.runOut, status: r.status, familyTold: r.familyToldAt !== null }));
+      .all(patientId, day, ...nearDays) as {
+      name: string;
+      runOut: string;
+      status: "reminded" | "asked" | "snoozed";
+      familyToldAt: string | null;
+      lastRemindedDay: string | null;
+      updatedAt: string;
+    }[]
+  )
+    .filter((r) => r.lastRemindedDay === day || onHerDay(r.updatedAt))
+    .map((r) => ({ medicine: r.name, runsOut: r.runOut, status: r.status, familyTold: r.familyToldAt !== null }));
 
   return {
     patient: {
@@ -300,7 +332,7 @@ export function buildCareFacts(db: Db, input: BuildCareFactsInput): CareFacts {
       preferredName: patient.preferredName,
       fullName: record?.demographics.name ?? null,
       age: packet?.patient.age ?? null,
-      timezone: (db.prepare(`SELECT timezone FROM patients WHERE id = ?`).get(patientId) as { timezone: string | null }).timezone,
+      timezone,
       sharing: getSharing(db, patientId) ?? "status",
     },
     day,

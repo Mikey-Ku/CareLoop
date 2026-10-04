@@ -62,7 +62,8 @@ export interface CheckinEngine {
    * Besides the check-in it handles, at any time: "Sharing" (the sharing menu and a tap on a level), and the
    * paper check's "Yes, that's right" / "No, something's off" and the R6 follow-up buttons.
    * A button tap whose replyTo is not the message waiting for an answer (a stale tap) re-sends the
-   * current prompt instead of recording an answer; typed text without replyTo is matched as before.
+   * current prompt instead of recording an answer; typed text without replyTo goes to the most recently sent
+   * prompt still waiting for her (engine.ts "Latest prompt wins").
    * Typed messages: the safety screen first (a crisis or urgent symptom wins over everything). During the
    * check-in (her open reply, any message while a question waits, "Let me explain") one understanding pass
    * (engine.ts "One understanding pass") reads answers to any of today's unanswered questions and every

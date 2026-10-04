@@ -16,6 +16,8 @@ import {
   medsReminder,
   medsTakenReply,
   memoryCheckButtons,
+  paperChangeNote,
+  withPaperNote,
   memoryCheckQuestion,
   memoryCheckRight,
   refillAskedReply,
@@ -61,6 +63,7 @@ import {
   type ReminderSlot,
 } from "../db/meds.ts";
 import { addVisitQuestion } from "../db/notes.ts";
+import { closeWaitingPrompts, openWaitingPrompt } from "../db/waiting-prompts.ts";
 import { addObservation } from "../db/observations.ts";
 import type { Medication } from "../finchnode/normalize.ts";
 import type { DischargePaperReading, MedicineLabelReading } from "../llm/types.ts";
@@ -69,6 +72,7 @@ import type { ExtractedPaper } from "../rules/paper-diff.ts";
 import { sameIngredient, sameStrength } from "../rules/paper-diff.ts";
 import { looksLikeInstructions } from "../safety/injection.ts";
 import { MAX_REFILL_REMINDERS_PER_DAY, longDay, plusDays, shortDay, type RefillDue } from "./refills.ts";
+import { paperChangeFor, unresolvedPaperChanges } from "./paper-notes.ts";
 import { labelInstructions, medicineWords, medsForSlot, memoryCandidates, plainName, strengthWords, type ScheduledMedication } from "./schedule.ts";
 
 // The medication helper's planning, inside the engine's transactions (like src/checkin/paper-flow.ts):
@@ -80,12 +84,16 @@ import { labelInstructions, medicineWords, medsForSlot, memoryCandidates, plainN
 //               "Yes" and not asked (hooks.morningTaken); with no check-in step waiting, the day's memory
 //               check follows in the same message.
 //   Not yet  -> one gentle re-reminder after MEDS_NUDGE_MINUTES (runMedsNudges), never more, no guilt.
-//   I have a question -> "Go ahead"; her next message takes the usual typed path (a medicine question
-//               goes on her visit list with the fixed "ask your doctor or pharmacist" reply).
+//   I have a question -> "Go ahead" (a waiting prompt, src/db/waiting-prompts.ts); her next typed message,
+//               unless something newer was sent since (engine.ts "Latest prompt wins"), is her medicine
+//               question: the fixed "ask your doctor or pharmacist" reply, and it goes on her visit list.
 //   No "Taken" by MISSED_CHECKIN_TIME -> missed; her family's daily status at "all" says so. No alert.
 // Memory check: one medicine a day, rotating through scheduled medicines with a known count. Right ->
 // "That's right"; wrong or "Not sure" -> only her label's words. Typed numbers count ("one", "just one").
 // Refills: guide, don't act (src/meds/refills.ts). At most MAX_REFILL_REMINDERS_PER_DAY a day.
+// Hospital papers (src/meds/paper-notes.ts): while an R6 discrepancy is unresolved, a medicine her papers say
+// was stopped or changed gets paperChangeNote after its words in the reminder, the memory check and a
+// matching label photo. It stays on her list; nothing tells her to stop it.
 // Label photos: matched with her list by ingredient and strength (src/rules/paper-diff.ts helpers).
 // A mismatch or an unknown medicine goes on her visit list and is a level-2 "medicine check"
 // observation for her doctor; no family alert.
@@ -227,6 +235,11 @@ export function checkLabel(label: MedicineLabelReading, active: readonly Medicat
 export function createMedsFlow(deps: { db: Db; clock: Clock; hooks: MedsHooks; options: MedsOptions }) {
   const { db, clock, hooks, options } = deps;
   const plusMinutes = (iso: string, minutes: number) => new Date(Date.parse(iso) + minutes * 60_000).toISOString();
+  /** The hospital-papers note for a medicine on her list, or undefined (src/meds/paper-notes.ts). */
+  const paperNote = (patientId: string, med: { name: string; strength?: string | undefined }): string | undefined => {
+    const kind = paperChangeFor(unresolvedPaperChanges(db, patientId), med);
+    return kind ? paperChangeNote(kind) : undefined;
+  };
   const reply = (patient: CheckinPatient, msg: InboundMessage, text: string, extra: Partial<MedSend> = {}): MedSend => ({
     chatId: msg.chatId,
     message: { text },
@@ -248,6 +261,7 @@ export function createMedsFlow(deps: { db: Db; clock: Clock; hooks: MedsHooks; o
     const again = () => hooks.reprompt(patient, msg.chatId, msg.messageId);
     switch (action) {
       case "taken": {
+        closeWaitingPrompts(db, patient.id, now, "meds_question");
         const already = dose.status === "taken";
         if (!already) setDoseStatus(db, dose.id, "taken", now);
         const thanks = medsTakenReply(name, dose.slot);
@@ -258,16 +272,19 @@ export function createMedsFlow(deps: { db: Db; clock: Clock; hooks: MedsHooks; o
         const memory = memoryCheckFor(db, patient.id, dose.day);
         if (!memory || memory.askedAt !== null) return [reply(patient, msg, thanks)];
         markMemoryAsked(db, memory.id, now);
-        const text = withLead(thanks, memoryCheckQuestion(memory.ingredient, memory.unit, memory.slot));
+        const question = withPaperNote(memoryCheckQuestion(memory.ingredient, memory.unit, memory.slot), paperNote(patient.id, { name: memory.ingredient }));
+        const text = withLead(thanks, question);
         return [reply(patient, msg, text, { message: { text, buttons: memoryCheckButtons(memory.count) }, medPrompt: { patientId: patient.id, kind: "memory", refId: memory.id } })];
       }
       case "not_yet": {
+        closeWaitingPrompts(db, patient.id, now, "meds_question");
         if (dose.status === "taken") return [reply(patient, msg, medsNotYetReply(name, false)), ...again()];
         setDoseStatus(db, dose.id, "not_yet", now);
         const remind = dose.nudgedAt === null && planNudge(db, dose.id, plusMinutes(now, options.nudgeMinutes));
         return [reply(patient, msg, medsNotYetReply(name, remind)), ...again()];
       }
       case "question":
+        openWaitingPrompt(db, { patientId: patient.id, kind: "meds_question", refId: dose.id, at: now });
         return [reply(patient, msg, medsQuestionPrompt(name))];
     }
   }
@@ -276,7 +293,8 @@ export function createMedsFlow(deps: { db: Db; clock: Clock; hooks: MedsHooks; o
     const correct = answer === m.count;
     if (!answerMemoryCheck(db, m.id, answer === "not_sure" ? MEMORY_NOT_SURE : String(answer), correct, clock.now())) return [];
     // Right: said so. Wrong or not sure: only her label's words, nothing more.
-    const text = correct ? memoryCheckRight(patient.preferredName) : labelSaysLine(m.instructions);
+    const said = correct ? memoryCheckRight(patient.preferredName) : labelSaysLine(m.instructions);
+    const text = withPaperNote(said, paperNote(patient.id, { name: m.ingredient }));
     return [reply(patient, msg, text), ...hooks.reprompt(patient, msg.chatId, msg.messageId)];
   }
 
@@ -356,7 +374,11 @@ export function createMedsFlow(deps: { db: Db; clock: Clock; hooks: MedsHooks; o
     planReminder(patient: CheckinPatient, day: string, slot: ReminderSlot, schedule: readonly ScheduledMedication[]): MedSend[] | undefined {
       const chatId = patient.relayChatId;
       if (!chatId) return [];
-      const line = (s: ScheduledMedication) => ({ name: s.name, instructions: s.instructions });
+      const changes = unresolvedPaperChanges(db, patient.id);
+      const line = (s: ScheduledMedication) => {
+        const kind = paperChangeFor(changes, s.med);
+        return { name: s.name, instructions: s.instructions, ...(kind ? { note: paperChangeNote(kind) } : {}) };
+      };
       const lines = medsForSlot(schedule, slot).map(line);
       const bedtime = slot === "evening" ? medsForSlot(schedule, "bedtime").map(line) : [];
       if (lines.length === 0 && bedtime.length === 0) return [];
@@ -504,7 +526,8 @@ export function createMedsFlow(deps: { db: Db; clock: Clock; hooks: MedsHooks; o
         }
       }
       const chatId = patient.relayChatId;
-      return { outcome: result.outcome, sends: chatId ? [{ chatId, message: { text: result.reply }, key: `${patient.id}:photo:${attachmentId}:label` }] : [] };
+      const reply = result.outcome === "match" ? withPaperNote(result.reply, paperNote(patient.id, result.med)) : result.reply;
+      return { outcome: result.outcome, sends: chatId ? [{ chatId, message: { text: reply }, key: `${patient.id}:photo:${attachmentId}:label` }] : [] };
     },
   };
 }
