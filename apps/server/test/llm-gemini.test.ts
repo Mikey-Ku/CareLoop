@@ -17,7 +17,7 @@ import {
   type FetchLike,
   type GeminiDeps,
 } from "../src/llm/gemini.ts";
-import { createLlmClient, describeLlm, FakeLlmClient, LlmUnavailableError, MESSAGE_KINDS } from "../src/llm/index.ts";
+import { createLlmClient, describeLlm, FakeLlmClient, HISTORY_TOPICS, LlmUnavailableError, MESSAGE_KINDS } from "../src/llm/index.ts";
 
 const KEY = "AIza_test_SECRET_key_123";
 const ANKLE_PENDING = { question: "Have your ankles or feet been more swollen than usual?", options: ["No", "A little", "More than usual"] };
@@ -455,7 +455,7 @@ describe("classifyMessage request shape", () => {
       responseMimeType: "application/json",
     });
     const schema = body.generationConfig.responseSchema;
-    const fields = ["kind", "confidence", "complaints", "symptoms", "memories", "forFamily"];
+    const fields = ["kind", "confidence", "complaints", "symptoms", "memories", "forFamily", "historyTopic"];
     expect(Object.keys(schema.properties)).toEqual(fields);
     expect(schema.required).toEqual(fields);
     expect(schema.propertyOrdering).toEqual(fields);
@@ -463,6 +463,7 @@ describe("classifyMessage request shape", () => {
     expect(schema.properties.confidence.enum).toEqual(["high", "medium", "low"]);
     expect(schema.properties.complaints).toEqual({ type: "ARRAY", items: { type: "STRING" } });
     expect(schema.properties.forFamily).toEqual({ type: "STRING" });
+    expect(schema.properties.historyTopic).toEqual({ type: "STRING", enum: [...HISTORY_TOPICS] });
     // Symptoms: her words first, then the enums; no questionId (classify has no question ids).
     expect(schema.properties.symptoms).toEqual({
       type: "ARRAY",
@@ -489,7 +490,7 @@ describe("classifyMessage request shape", () => {
     expect(JSON.parse(body.contents[0].parts[0].text)).toEqual({ herName: "Harriet", message: "Yes but it was weirder", pendingQuestion: BREATHING });
     const schema = body.generationConfig.responseSchema;
     expect(schema.properties.answer).toEqual({ type: "STRING", enum: ["No", "Yes", "unclear"] });
-    expect(schema.propertyOrdering).toEqual(["kind", "answer", "confidence", "complaints", "symptoms", "memories", "forFamily"]);
+    expect(schema.propertyOrdering).toEqual(["kind", "answer", "confidence", "complaints", "symptoms", "memories", "forFamily", "historyTopic"]);
     expect(schema.required).toEqual(schema.propertyOrdering);
   });
 
@@ -771,5 +772,26 @@ describe("the context digest in a request", () => {
     const [facts] = parts(calls[0]!);
     expect(facts!.match(/<<</g)).toHaveLength(1);
     expect(facts!.match(/>>>/g)).toHaveLength(1);
+  });
+});
+
+describe("history_question", () => {
+  it("has its own kind in the prompt, with the topics the model picks from; the app answers, never the model", () => {
+    expect(MESSAGE_KINDS).toContain("history_question");
+    expect(CLASSIFY_SYSTEM_PROMPT).toContain("history_question: she asks what this assistant has on file about her own recent days");
+    for (const topic of HISTORY_TOPICS) expect(CLASSIFY_SYSTEM_PROMPT).toContain(topic);
+    expect(CLASSIFY_SYSTEM_PROMPT).toContain("the app answers from its own records, never from you");
+    expect(CLASSIFY_SYSTEM_PROMPT).toContain("never about a medicine itself");
+    expect(CLASSIFY_SYSTEM_PROMPT).toContain("are medicine_question");
+  });
+
+  it("keeps the topic for a history question, forgiving case and spaces; an unknown or missing topic is other; other kinds have none", () => {
+    const json = (o: Record<string, unknown>) => JSON.stringify({ confidence: "high", complaints: [], memories: [], ...o });
+    expect(parseClassification(json({ kind: "history_question", historyTopic: "medicines_today" }))).toMatchObject({ kind: "history_question", historyTopic: "medicines_today" });
+    expect(parseClassification(json({ kind: "History Question", historyTopic: "Last Reading" }))).toMatchObject({ kind: "history_question", historyTopic: "last_reading" });
+    expect(parseClassification(json({ kind: "history_question", historyTopic: "the weather" })).historyTopic).toBe("other");
+    expect(parseClassification(json({ kind: "history_question" })).historyTopic).toBe("other");
+    expect(parseClassification(json({ kind: "chat", historyTopic: "refill" })).historyTopic).toBeUndefined();
+    expect(parseClassification(json({ kind: "history_question", historyTopic: "refill", symptoms: [{ topic: "knee pain", words: "my knee aches", amount: "a_little", change: "same" }] })).symptoms).toHaveLength(1);
   });
 });

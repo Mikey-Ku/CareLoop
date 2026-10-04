@@ -1,0 +1,66 @@
+# Harriet asks about her own recent history (three days, ending 2026-09-01), answered from the app's
+# records by fixed templates (the context digest, apps/server/src/context/digest.ts; the words are in
+# apps/server/src/checkin/copy.ts historyAnswer). The model only picks the topic; offline, /as
+# history_question <topic> stands in for it, so this runs the same way every time and needs no key.
+#   npm run simulate -- --reset --day 2026-08-30 --script ../../scripts/demo/harriet-history.txt
+# Topics: medicines_today, last_reading, symptoms_this_week, doctor_list, family_messages, refill, other.
+# No interpretation, ever: a heart rate is never called normal or compared with a range.
+#
+# ===== Sun Aug 30: a calm check-in, her knee in chat (level 1), a question for her doctor
+1
+1
+1
+1
+# The flag offer: Later
+2
+/meds
+1
+1
+/as chat | knee pain, a_little, same
+my knee aches a bit today
+/as medicine_question
+Is the aspirin still on my list after the hospital?
+/next
+# ===== Mon Aug 31: ankles "A little" (level 1)
+1
+2
+1
+1
+2
+/meds
+1
+1
+/next
+# ===== Tue Sep 1: a calm check-in, then her questions. First a camera reading and a message from Sarah.
+1
+1
+1
+1
+2
+/meds
+1
+1
+/reading 72
+/from sarah Bring the photos on Sunday, Mia can't wait to see them
+# Did I take my pills? From her medicines reminder.
+/as history_question medicines_today
+did I take my pills today?
+# Her last camera heart rate: an estimate, never a medical test, never compared with a range.
+/as history_question last_reading
+what was my last heart rate?
+# What she told us this week, by topic and day, and that it is noted for her doctor.
+/as history_question symptoms_this_week
+what did I tell you this week?
+# Her list for the doctor: her question, and the things from her record she said she would ask about.
+/as history_question doctor_list
+what's on my list for the doctor?
+/as history_question family_messages
+what did Sarah say?
+/as history_question refill
+when does my refill run out?
+# A symptom and a question in one message: the fixed reply by level first, then the answer.
+/as history_question symptoms_this_week | knee pain, a_little, same
+my knee is aching again, did I tell you about it this week?
+# Nothing the app can answer: one honest line saying what it can tell her.
+/as history_question other
+do I have an appointment on Thursday?

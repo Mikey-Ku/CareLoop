@@ -22,6 +22,7 @@ export type Reaction =
   | "medicine_question" // fixed reply, saved for her next visit
   | "feeling_low" // fixed warm reply, saved as a memory
   | "family_message" // passed on to her family chats
+  | "history_answer" // a fixed answer from the context digest (copy.ts historyAnswer), then the pending step again
   | "small_talk" // the model's own short reply, or a fixed reply by level when she mentions a symptom
   | "didnt_understand"; // the pending buttons again
 
@@ -41,6 +42,8 @@ export function reactionFor(c: Pick<MessageClassification, "kind" | "confidence"
     case "feeling_low":
     case "family_message":
       return kind;
+    case "history_question":
+      return "history_answer";
     case "answer":
       if (at !== "none") return "answer";
       break;

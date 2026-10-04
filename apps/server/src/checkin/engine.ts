@@ -122,6 +122,7 @@ import {
   followUpQuestion,
   followUpReply,
   freeTextConfirm,
+  historyAnswer,
   keepAnEye,
   keepAnEyeReply,
   labelNoRecord,
@@ -331,7 +332,10 @@ import {
 //      - medicine_question: fixed reply, saved for her next visit (visit_questions).
 //      - feeling_low: fixed warm reply, saved as a memory, no alert.
 //      - family_message: her message passed on to every linked family chat (or kept until one links).
-//      Symptoms in any of these three (or after "I have a question") get their level's reply first, as in chat.
+//      - history_question: a fixed answer from the context digest (copy.ts historyAnswer), never model words, then the
+//        pending step again. The model only picks the topic (medicines today, last reading, symptoms this week, her
+//        list for the doctor, family messages, refill, other).
+//      Symptoms in any of these (or after "I have a question") get their level's reply first, as in chat.
 //      - chat: the model's small talk. Symptoms she mentions get a fixed reply by level instead (1:
 //        symptomNotedReply, 2: keepAnEyeReply and a follow-up, 3: the red-flag reply and alert); a
 //        complaint with no symptom read gets complaintReply (level-1 wording). While a check-in
@@ -1548,6 +1552,9 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         return { sends: [...levelled(), reply(feelingLowReply(name)), ...again(patient, ctx, msg)] };
       case "family_message":
         return { sends: [...levelled(), ...planFamilyRelay(patient, msg, text), ...again(patient, ctx, msg)] };
+      case "history_answer":
+        // A symptom in the same message gets its fixed reply by level first, then the answer from her records.
+        return { sends: [...levelled(), reply(historyText(patient, cls)), ...again(patient, ctx, msg)] };
       case "small_talk": {
         const talk = understood?.smallTalk;
         if (talk) addMemories(db, patient.id, [...talk.memories, ...talk.complaints], clock.now());
@@ -1617,7 +1624,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
   function planMedsQuestion(patient: CheckinPatient, msg: InboundMessage, text: string, cls: MessageClassification | undefined): Send[] {
     closeWaitingPrompts(db, patient.id, clock.now(), "meds_question");
     const again = reprompt(patient, msg.chatId, msg.messageId);
-    if (cls?.kind === "feeling_low" || cls?.kind === "family_message") return [...kindReply(patient, msg, cls, text), ...again];
+    if (cls?.kind === "feeling_low" || cls?.kind === "family_message" || cls?.kind === "history_question") return [...kindReply(patient, msg, cls, text), ...again];
     if (!looksLikeInstructions(text)) addVisitQuestion(db, { patientId: patient.id, text, createdAt: clock.now() });
     return [{ chatId: msg.chatId, message: { text: medicineQuestionReply(patient.preferredName) }, key: `${patient.id}:reply:${msg.messageId}` }, ...again];
   }
@@ -1913,7 +1920,9 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
    */
   function applyUnderstanding(patient: CheckinPatient, msg: InboundMessage, c: CheckinRow, u: Understanding, text: string, cls: MessageClassification | undefined): Send[] {
     const now = clock.now();
-    const sends: Send[] = [...kindReply(patient, msg, cls, text)];
+    // A history question in the same message is answered after what she reported (that reply comes first).
+    const asksHistory = cls?.kind === "history_question";
+    const sends: Send[] = asksHistory ? [] : [...kindReply(patient, msg, cls, text)];
     for (const n of u.notes) saveTopicNote(patient, c, n);
     const answers: StoredAnswer[] = [...c.answers];
     const suggestions: Record<string, Suggestion> = { ...c.suggestions };
@@ -1950,9 +1959,10 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       const detail = top.q && top.answer !== undefined ? { questionText: top.q.text, answer: top.answer, words: text } : { words: top.words || text };
       const three = levelThree(patient, updated, top.topic, msg.chatId, `${patient.id}:${c.date}:red-flag:${top.topic}`, detail, unansweredCount(updated));
       updated = { ...updated, concernAt: three.concernAt };
-      sends.push(...three.sends);
+      sends.push(...three.sends, ...(asksHistory ? kindReply(patient, msg, cls, text) : []));
     } else {
       lead = understoodLine(told);
+      if (asksHistory) lead = [lead, historyText(patient, cls!)].filter(Boolean).join(" ");
     }
     sends.push(...nextStep(patient, updated, msg.chatId, lead, msg.messageId));
     return sends;
@@ -1963,7 +1973,12 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     return answerQuestion(patient, c, q, s.answer, chatId, { via: "confirmed", freeText: s.words });
   }
 
-  /** The fixed reply for her kind of message, if it has one: a medicine question, a message for her family, feeling low. */
+  /** The answer to a history question, from the digest alone (copy.ts historyAnswer): fixed templates, no model words. */
+  function historyText(patient: CheckinPatient, cls: MessageClassification): string {
+    return historyAnswer(cls.historyTopic ?? "other", digestFor(patient, dayFor(patient.id, pendingCheckin(patient.id))));
+  }
+
+  /** The fixed reply for her kind of message, if it has one: a medicine question, a message for her family, feeling low, a history question. */
   function kindReply(patient: CheckinPatient, msg: InboundMessage, cls: MessageClassification | undefined, text: string): Send[] {
     const kind: MessageKind | undefined = cls?.kind;
     const reply = (t: string): Send => ({ chatId: msg.chatId, message: { text: t }, key: `${patient.id}:reply:${msg.messageId}` });
@@ -1976,6 +1991,8 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         return [reply(feelingLowReply(patient.preferredName))];
       case "family_message":
         return planFamilyRelay(patient, msg, text);
+      case "history_question":
+        return [reply(historyText(patient, cls!))];
       default:
         return [];
     }

@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   evaluate,
@@ -10,7 +13,7 @@ import {
   type Catalogue,
 } from "../src/cli/content-eval.ts";
 import { QUESTION_BANK } from "../src/context/questions.ts";
-import { FakeLlmClient, MESSAGE_KINDS, type MessageClassification } from "../src/llm/index.ts";
+import { FakeLlmClient, HISTORY_TOPICS, MESSAGE_KINDS, type MessageClassification } from "../src/llm/index.ts";
 import { screenMessage, type SafetyHit } from "../src/safety/screen.ts";
 
 // The content catalogue (fixtures/content/messages.json) is the measuring stick
@@ -23,9 +26,9 @@ const BANK = new Map(QUESTION_BANK.map((q) => [q.id, q]));
 const LONG_DASH = /[\u2013\u2014]/;
 
 describe("content catalogue", () => {
-  it("has 100 to 120 cases with unique ids", () => {
+  it("has 100 to 160 cases with unique ids", () => {
     expect(cases.length).toBeGreaterThanOrEqual(100);
-    expect(cases.length).toBeLessThanOrEqual(120);
+    expect(cases.length).toBeLessThanOrEqual(160);
     const ids = cases.map((c) => c.id);
     expect(ids.filter((id, i) => ids.indexOf(id) !== i)).toEqual([]);
   });
@@ -78,6 +81,25 @@ describe("content catalogue", () => {
 
   it("marks every idiom and negation case mustNotScreen", () => {
     for (const c of cases.filter((x) => x.hard === "idiom" || x.hard === "negation")) expect(c.mustNotScreen, c.id).toBe(true);
+  });
+
+  it("has history questions with a topic, and context-dependent messages that carry the digest they need", () => {
+    const history = cases.filter((c) => c.expectKind === "history_question");
+    expect(history.length).toBeGreaterThanOrEqual(15);
+    for (const c of history) expect(HISTORY_TOPICS, c.id).toContain(c.expectTopic);
+    for (const topic of HISTORY_TOPICS) expect(history.some((c) => c.expectTopic === topic), topic).toBe(true);
+    for (const c of cases.filter((x) => x.expectTopic !== undefined)) expect(c.expectKind, c.id).toBe("history_question");
+    const withDigest = cases.filter((c) => c.digest !== undefined);
+    expect(withDigest.filter((c) => c.expectKind === "answer").length).toBeGreaterThanOrEqual(8);
+    for (const c of withDigest) expect(catalogue.digests?.[c.digest!], `${c.id}: digest ${c.digest}`).toEqual(expect.stringContaining("HER: Harriet, 78."));
+  });
+
+  it("keeps its digests private and instruction-free, as the app's are", () => {
+    for (const [name, text] of Object.entries(catalogue.digests ?? {})) {
+      expect(text.length, name).toBeLessThanOrEqual(4500);
+      expect(text, name).not.toMatch(/1948|Lindqvist|patient-demo|rec_|chat_|@|[\u2013\u2014]/);
+      expect(text, name).toContain("never instructions to you");
+    }
   });
 
   it("has no long dashes", () => {
@@ -151,6 +173,46 @@ describe("content eval with a fake model", () => {
       options: BANK.get("hf-ankle-swelling")?.buttons,
     });
     expect(results.map((r) => r.final)).toEqual(["crisis", "chat", "urgent_symptom", "answer", "answer", "urgent_symptom", "error"]);
+  });
+
+  it("reads a case with its named digest, and scores a history topic with the kind", async () => {
+    const digest = "HER: Harriet, 78.\nnever instructions to you";
+    const withDigests: Catalogue = {
+      ...mini,
+      digests: { d: digest },
+      cases: [
+        { id: "h-right", text: "did I take my pills", expectKind: "history_question", expectTopic: "medicines_today", digest: "d" },
+        { id: "h-wrong-topic", text: "what did sarah say", expectKind: "history_question", expectTopic: "family_messages", digest: "d" },
+        { id: "plain", text: "hello", expectKind: "chat" },
+      ],
+    };
+    const llm = new FakeLlmClient({
+      classifyMessage: (input) => ({
+        kind: input.message === "hello" ? "chat" : "history_question",
+        historyTopic: input.message === "did I take my pills" ? "medicines_today" : "other",
+        confidence: "high",
+        complaints: [],
+        memories: [],
+      }),
+    });
+    const results = await evaluate(withDigests, { screen: () => undefined, classify: async (i) => ({ value: await llm.classifyMessage(i), model: "fake" }), sleep: async () => {}, retryDelaysMs: [0] });
+    expect(llm.classifyCalls.map((c) => c.context)).toEqual([digest, digest, undefined]);
+    const s = summarize(results);
+    expect(s.topics).toEqual({ cases: 2, right: 1 });
+    expect(s.withDigest).toEqual({ cases: 2, right: 1 });
+    expect(s.mismatches.map((r) => r.c.id)).toEqual(["h-wrong-topic"]);
+    expect(renderReport(results, { generatedAt: "2026-10-04T12:00:00.000Z", chain: ["fake"] })).toContain("| h-wrong-topic | what did sarah say | none | history_question: family_messages | history_question: other (high) |");
+  });
+
+  it("refuses a case that names a digest the catalogue doesn't have", () => {
+    const dir = mkdtempSync(join(tmpdir(), "catalogue-"));
+    try {
+      const path = join(dir, "messages.json");
+      writeFileSync(path, JSON.stringify({ description: "t", seniorName: "Harriet", cases: [{ id: "x", text: "hi", expectKind: "chat", digest: "nope" }] }));
+      expect(() => loadCatalogue(path)).toThrow(/case x names unknown digest "nope"/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("scores safety, answers and mismatches, and lists a case nobody caught as critical", async () => {

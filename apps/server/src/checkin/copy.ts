@@ -1,4 +1,8 @@
+import type { Digest } from "../context/digest.ts";
+import { weekdayShort } from "../days.ts";
 import type { SharingLevel } from "../db/index.ts";
+import type { HistoryTopic } from "../llm/types.ts";
+import { shortDay } from "../meds/refills.ts";
 import { andList, orList } from "../text.ts";
 
 // Every word the senior and her family read, as fixed templates. No LLM here:
@@ -935,4 +939,124 @@ export const MEDS_NOT_CONFIRMED_LINE = "Morning medicines not confirmed.";
 /** The same line on its own, when the day's status already went out before MISSED_CHECKIN_TIME. Sharing "all" only. */
 export function familyMedsNotConfirmed(seniorName: string): string {
   return `Update on ${seniorName}'s day: ${MEDS_NOT_CONFIRMED_LINE}`;
+}
+
+// History questions (src/checkin/engine.ts "history_answer"): she asks about her own recent history.
+// The model only picks the topic. Every word here is a fixed template filled from the context digest
+// (src/context/digest.ts), so nothing about her health in a reply is model text. Never interpreted
+// ("that's normal"), never compared with a range, never advice.
+
+const WHAT_I_CAN_TELL =
+  "your medicines today, your last camera heart rate reading, what you've told me this week, your list for your doctor, what your family sent and when a refill runs out";
+
+/** No data for the topic she asked about, or something else: one honest line that lists what can be told. */
+export function historyNothing(topic: HistoryTopic): string {
+  const lead = topic === "other" ? "I'm not sure I can answer that one." : "I don't have anything on file about that yet.";
+  return `${lead} I can tell you about ${WHAT_I_CAN_TELL}.`;
+}
+
+/** Her symptom topics in a sentence about her week ("your ankles"). Topics left out are not symptoms she described (safety hits, follow-up taps, label checks). */
+const HISTORY_PHRASES: Readonly<Record<string, string>> = {
+  "hf-ankle-swelling": "your ankles",
+  "hf-breathing-lying-flat": "your breathing",
+  "anticoagulant-bleeding": "some bruising or bleeding",
+  "dizzy-on-standing": "some dizziness",
+  "morning-medicines": "your morning medicines",
+  mood: "your mood",
+};
+const NOT_A_SYMPTOM = new Set(["crisis", "urgent_symptom", "follow_up", "medicine check", "general", "other"]);
+
+function historyPhrase(topic: string): string | undefined {
+  if (NOT_A_SYMPTOM.has(topic)) return undefined;
+  const known = HISTORY_PHRASES[topic];
+  if (known) return known;
+  const words = topicWords(topic);
+  return words ? `your ${words}` : undefined;
+}
+
+const MORNING_QUESTION = "morning-medicines";
+
+function medicinesLines(d: Digest): string[] {
+  const lines: string[] = [];
+  const { morning, evening } = d.today.doses;
+  const told = d.today.questions.find((q) => q.id === MORNING_QUESTION)?.answer;
+  if (morning?.status === "taken") lines.push(`I have you down as taking your morning medicines${morning.time ? ` at ${morning.time}` : ""}.`);
+  else if (told === "Yes") lines.push("You told me in today's check-in that you took your morning medicines.");
+  else if (told === "Some of them") lines.push("You told me in today's check-in that you took some of your morning medicines.");
+  else if (told === "Not yet") lines.push("You told me in today's check-in that you hadn't taken your morning medicines yet.");
+  else if (morning?.status === "waiting") lines.push("I sent your morning medicines reminder and I don't have a tap from you yet.");
+  else if (morning?.status === "not_yet") lines.push("You told me not yet on your morning medicines, and I don't have them down as taken.");
+  else if (morning) lines.push("I don't have your morning medicines down as taken.");
+  if (evening?.status === "taken") lines.push(`I have you down as taking your evening medicines${evening.time ? ` at ${evening.time}` : ""}.`);
+  else if (evening?.status === "waiting") lines.push("I sent your evening medicines reminder and I don't have a tap from you yet.");
+  else if (evening?.status === "not_yet") lines.push("You told me not yet on your evening medicines, and I don't have them down as taken.");
+  else if (evening) lines.push("I don't have your evening medicines down as taken.");
+  return lines;
+}
+
+/** What she told us this week, by topic, with the days: "your ankles on Mon and Tue". */
+function symptomItems(d: Digest): string[] {
+  const byTopic = new Map<string, string[]>();
+  for (const f of [...d.week, d.today])
+    for (const s of f.symptoms) {
+      const phrase = historyPhrase(s.topic);
+      if (!phrase) continue;
+      const days = byTopic.get(phrase) ?? [];
+      const label = f.day === d.day ? "today" : weekdayShort(f.day);
+      if (!days.includes(label)) days.push(label);
+      byTopic.set(phrase, days);
+    }
+  return [...byTopic].slice(0, 4).map(([phrase, days]) => `${phrase} ${days.length === 1 && days[0] === "today" ? "today" : `on ${andList(days)}`}`);
+}
+
+/**
+ * The reply to a history question, from the digest alone: fixed templates, no model words. With nothing on
+ * file for the topic, or the topic "other", historyNothing. Never says what a number means.
+ */
+export function historyAnswer(topic: HistoryTopic, d: Digest | undefined): string {
+  if (!d) return historyNothing(topic);
+  switch (topic) {
+    case "medicines_today": {
+      const lines = medicinesLines(d);
+      return lines.length > 0 ? lines.join(" ") : historyNothing(topic);
+    }
+    case "last_reading": {
+      const r = d.standing.lastReading;
+      if (!r) return historyNothing(topic);
+      const when = r.day === d.day ? "today" : shortDay(r.day);
+      if (r.heartRate !== null) return `Your last heart rate reading was about ${r.heartRate}, a camera estimate from ${when}, not a medical test.`;
+      return `Your last breathing rate reading was about ${r.breathingRate} a minute, a camera estimate from ${when}, not a medical test.`;
+    }
+    case "symptoms_this_week": {
+      const items = symptomItems(d);
+      if (items.length > 0) return `This week you told me about ${andList(items)}. I've noted ${items.length === 1 ? "it" : "them"} for your doctor.`;
+      const checkedIn = [...d.week, d.today].some((f) => f.checkin !== "no check-in");
+      return checkedIn ? "I don't have any symptoms noted from you this week." : historyNothing(topic);
+    }
+    case "doctor_list": {
+      const questions = d.standing.visitQuestions;
+      const noted = d.who.flags.filter((f) => f.status === "noted").length;
+      const parts: string[] = [];
+      if (questions.length > 0) {
+        const last = questions[questions.length - 1]!;
+        parts.push(`${questions.length === 1 ? "Your question" : "Your questions"} for your doctor: ${andList(questions.map((q) => `"${q}"`))}${/[.?!]$/.test(last) ? "" : "."}`);
+      }
+      if (noted > 0) parts.push(`${noted === 1 ? "One thing" : `${noted} things`} from your health record that you said you'll ask your doctor about.`);
+      if (symptomItems(d).length > 0) parts.push("I've also noted what you told me about how you've felt this week.");
+      return parts.length > 0 ? parts.join(" ") : historyNothing(topic);
+    }
+    case "family_messages": {
+      const lines = d.standing.family.slice(0, 3).map((f) => (f.text ? `${f.from} said: "${f.text}" (${shortDay(f.day)}).` : `${f.from} sent you a message on ${shortDay(f.day)}, but I didn't keep the words.`));
+      return lines.length > 0 ? lines.join(" ") : historyNothing(topic);
+    }
+    case "refill": {
+      const r = d.standing.refill;
+      if (!r) return historyNothing(topic);
+      const ran = r.runOut < d.day ? "ran out" : "runs out";
+      const extra = r.status === "reminded" ? " I reminded you about the refill." : r.status === "snoozed" ? " You asked me to remind you again tomorrow." : "";
+      return `Your ${r.name} ${ran} around ${shortDay(r.runOut)}.${extra}`;
+    }
+    case "other":
+      return historyNothing(topic);
+  }
 }

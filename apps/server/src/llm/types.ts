@@ -54,6 +54,7 @@ export type MessageKind =
   | "urgent_symptom" // chest pain, a fall, can't breathe, fainting, heavy bleeding now
   | "crisis" // thoughts of self-harm or not wanting to live
   | "family_message" // something meant for her family ("tell Sarah I love her")
+  | "history_question" // asks about her own recent history ("did I take my pills?", "what was my last heart rate?")
   | "chat"; // anything else: news, plans, off-topic
 
 export const MESSAGE_KINDS: readonly MessageKind[] = [
@@ -64,7 +65,21 @@ export const MESSAGE_KINDS: readonly MessageKind[] = [
   "urgent_symptom",
   "crisis",
   "family_message",
+  "history_question",
   "chat",
+];
+
+/** What a history_question is about. The model only picks the topic; the app answers from its records (copy.ts historyAnswer). */
+export type HistoryTopic = "medicines_today" | "last_reading" | "symptoms_this_week" | "doctor_list" | "family_messages" | "refill" | "other";
+
+export const HISTORY_TOPICS: readonly HistoryTopic[] = [
+  "medicines_today",
+  "last_reading",
+  "symptoms_this_week",
+  "doctor_list",
+  "family_messages",
+  "refill",
+  "other",
 ];
 
 export type ClassifyInput = {
@@ -89,6 +104,8 @@ export type MessageClassification = {
   forFamily?: string | undefined;
   /** Symptoms she mentioned with how much and whether new or worse; rules set the level. Empty when none. */
   symptoms?: SymptomMention[] | undefined;
+  /** kind "history_question" only: what she asks about. */
+  historyTopic?: HistoryTopic | undefined;
 };
 
 /** How much of a symptom she describes. */
