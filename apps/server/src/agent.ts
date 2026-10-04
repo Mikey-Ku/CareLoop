@@ -63,8 +63,11 @@ export const MEDS_MORNING_JOB = "meds-morning";
 export const MEDS_EVENING_JOB = "meds-evening";
 export const REFILL_JOB = "refill-check";
 const LINK_POLL_MS = 3_000;
-/** After the check-in call ends and is recorded, this much longer before the camera check call-back rings. */
-const CAMERA_CALLBACK_DELAY_MS = 3_000;
+/**
+ * After the check-in call ends and is recorded, this much longer before the camera check call-back rings: a call
+ * placed 7 s after her call ended was over 2 s later, unanswered (her phone still finishing the first call).
+ */
+const CAMERA_CALLBACK_DELAY_MS = 10_000;
 /** How often the follow-up job runs. */
 export const FOLLOW_UP_POLL_MS = 60_000;
 

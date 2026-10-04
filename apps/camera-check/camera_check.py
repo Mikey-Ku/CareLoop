@@ -227,8 +227,8 @@ async def run(args: argparse.Namespace) -> int:
     except asyncio.TimeoutError:
         emit("failed", reason="not_answered")
         return 2
-    except Exception as error:
-        emit("failed", reason="call_error", detail=type(error).__name__)
+    except Exception as error:  # the call ending before she answered (declined, or her phone busy) ends connect() this way
+        emit("failed", reason="call_ended" if ended.is_set() else "call_error", detail=type(error).__name__)
         return 2
     finally:
         try:

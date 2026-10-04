@@ -102,7 +102,7 @@ export async function runCameraCallback(deps: CameraCallbackDeps, patient: Camer
     let failure = "no_result";
     try {
       for await (const event of recorder.events) {
-        deps.log("camera_check_step", { step: event.event, ...pick(event, ["reason", "frames", "seconds", "received", "longest_gap_ms", "width", "height"]) });
+        deps.log("camera_check_step", { step: event.event, ...pick(event, ["reason", "detail", "frames", "seconds", "received", "longest_gap_ms", "width", "height"]) });
         if (event.event === "recorded") recorded = event;
         if (event.event === "failed") failure = String(event.reason ?? "failed");
       }
