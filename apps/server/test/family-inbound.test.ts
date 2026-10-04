@@ -103,10 +103,9 @@ describe("family messages passed on to Harriet", () => {
     },
   );
 
-  it("stores only who and when, never their words", async () => {
-    await from(SARAH, "Bring the photos on Sunday");
+  it("stores who, when and their words as she read them, for her history questions and the context digest", async () => {
+    await from(SARAH, "  Bring the photos\n on Sunday ");
     const rows = db.prepare("SELECT * FROM family_messages").all();
-    expect(rows).toEqual([expect.objectContaining({ patient_id: P, direction: "to_senior", kind: "text", from_name: "Sarah" })]);
-    expect(JSON.stringify(rows)).not.toContain("photos");
+    expect(rows).toEqual([expect.objectContaining({ patient_id: P, direction: "to_senior", kind: "text", from_name: "Sarah", text: "Bring the photos on Sunday" })]);
   });
 });

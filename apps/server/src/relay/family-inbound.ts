@@ -16,8 +16,9 @@ import type { Messenger } from "./messenger.ts";
 // Their words are quoted as plain text, instruction-like text included (src/safety/injection.ts): never
 // read by a model, never an answer to her check-in, never a sharing change (none of this reaches the
 // engine). Her next typed message after a forward is plain chat (engine.ts "Latest prompt wins"). Sends use
-// idempotency keys from the Relay message id, so a replayed event never sends twice. Only metadata is
-// stored (family_messages, direction to_senior): never their words.
+// idempotency keys from the Relay message id, so a replayed event never sends twice. Who, when and their
+// words as she read them (family_messages, direction to_senior) are stored, so she can ask what Sarah said
+// and the context digest (src/context/digest.ts) can quote it as reference facts; still never an answer.
 
 /** Longest family message passed on, in characters. */
 export const MAX_FAMILY_WORDS = 500;
@@ -78,10 +79,10 @@ export async function passOnFamilyMessage(
     await deps.messenger.send(patient.relayChatId, { text: familySays(from, familyWords(msg.text)) }, `${key}:to-senior`);
     deps.db
       .prepare(
-        `INSERT INTO family_messages (patient_id, direction, kind, from_name, relay_message_id, created_at) VALUES (?, 'to_senior', 'text', ?, ?, ?)
+        `INSERT INTO family_messages (patient_id, direction, kind, from_name, relay_message_id, created_at, text) VALUES (?, 'to_senior', 'text', ?, ?, ?, ?)
          ON CONFLICT (relay_message_id) DO NOTHING`,
       )
-      .run(patient.id, from, `${msg.messageId}:${patient.id}`, deps.now());
+      .run(patient.id, from, `${msg.messageId}:${patient.id}`, deps.now(), familyWords(msg.text));
     await reply(familyPassedOn(senior), "ack");
     outcomes.push("passed_on");
   }

@@ -478,6 +478,12 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX waiting_prompts_open ON waiting_prompts (patient_id, closed_at, opened_at);
   `,
+  // 14: the words of a family message passed on to her (src/relay/family-inbound.ts), capped like the
+  // message she read, so she can ask what Sarah said and the context digest (src/context/digest.ts) can
+  // quote it. Rows from before have none.
+  `
+  ALTER TABLE family_messages ADD COLUMN text TEXT;
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
