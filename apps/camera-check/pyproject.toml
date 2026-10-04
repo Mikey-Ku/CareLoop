@@ -1,0 +1,6 @@
+[project]
+name = "camera-check"
+version = "0.1.0"
+description = "Camera check call-back: records a quiet stretch of her camera through the Relay Python SDK for Presage"
+requires-python = ">=3.10"
+dependencies = ["relaymessenger[calls]>=0.1,<0.2"]

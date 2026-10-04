@@ -44,6 +44,17 @@ export const CAMERA_OFFER_AT_END = "Before we finish, would you like to try a qu
 export const CAMERA_GUIDANCE = "For a quick camera reading, tap the video button. Say ready when your camera is on, or say no thanks.";
 /** The reading produced nothing usable (a pause in her video, no face found): one more try is offered, in these words, before the goodbye. */
 export const QUIET_RETRY_OFFER = "I couldn't get a clear camera reading. Would you like to try once more? You can say yes or no.";
+/**
+ * The camera check call-back (src/calls/camera-callback.ts): a short second call that only records her camera,
+ * when the reading on the check-in call came to nothing. The notice is a chat message before the phone rings;
+ * the start and end lines are spoken on that call; the result comes back as a chat message.
+ */
+export const CAMERA_CHECK_NOTICE =
+  "I'll call you right back for a quick camera check. Please answer, tap the video button, and hold still with your face and upper chest in view for about 30 seconds. It's an estimate, not a medical test.";
+export const CAMERA_CHECK_START =
+  "Hi, it's your check-in assistant for the camera check. Please hold your phone steady with your face and upper chest in view, and stay still and quiet for about 30 seconds. I'll text you the estimate.";
+export const CAMERA_CHECK_END = "Thank you, that's all. I'll text you the estimate in about a minute.";
+export const CAMERA_CHECK_MISSED = "I couldn't reach your camera for the check this time. That's okay, we can try again another day.";
 export const CAMERA_STILL_OFF = "I can't see your camera yet. Please tap the video button, then say ready, or say no thanks and we can skip it.";
 
 /** The goodbye: points her to her family, by name when we know them. */
@@ -178,6 +189,10 @@ export function callCopySamples(name = "Harriet"): { level: number; text: string
     { level: 0, text: CAMERA_GUIDANCE },
     { level: 0, text: CAMERA_STILL_OFF },
     { level: 0, text: QUIET_RETRY_OFFER },
+    { level: 0, text: CAMERA_CHECK_NOTICE },
+    { level: 0, text: CAMERA_CHECK_START },
+    { level: 0, text: CAMERA_CHECK_END },
+    { level: 0, text: CAMERA_CHECK_MISSED },
     { level: 0, text: MEDICINE_QUESTION_REPLY },
     { level: 0, text: callClosing(name, ["Sarah"]) },
     { level: 0, text: callClosing(name) },

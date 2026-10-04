@@ -208,6 +208,11 @@ export class CallService implements CallEventHandler {
       this.#log("call_duplicate_start_ignored", { call_id: call.id });
       return;
     }
+    if (call.from.kind === "agent") {
+      // A call this agent placed itself (the camera check call-back): its recorder takes it, so it is not declined.
+      this.#log("call_outbound_ignored", { call_id: call.id });
+      return;
+    }
     const patient = this.#patientForCall(call);
     if (!patient) {
       this.#log("call_wrong_caller", { call_id: call.id });

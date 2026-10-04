@@ -13,3 +13,5 @@ data/
 *.db-journal
 *.log
 apps/server/.vitest/
+.venv/
+__pycache__/
