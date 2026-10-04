@@ -12,7 +12,15 @@ const require = createRequire(import.meta.url);
 
 export type AudioLogger = (event: string, fields?: Record<string, unknown>) => void;
 
-/** Converts Relay's interleaved PCM16 frame to mono 16 kHz for Scribe realtime. */
+/** What Scribe realtime is given (audio_format pcm_48000): Relay's own rate, so her speech is only downmixed, never resampled. */
+const STT_SAMPLE_RATE = 48_000;
+
+/**
+ * Converts Relay's interleaved PCM16 frame to mono PCM16 at 48 kHz for Scribe realtime. A 48 kHz frame, which
+ * is what the transport delivers, is only downmixed (the old 16 kHz path interpolated without an anti-alias
+ * filter and misheard quiet words, "list in April" for "Lisinopril"). A frame at another rate is resampled by
+ * linear interpolation, as a fallback.
+ */
 export function relayAudioToStt(frame: { samples: Int16Array; sampleRate: number; channelCount: number }): Int16Array {
   if (!Number.isInteger(frame.sampleRate) || frame.sampleRate <= 0) throw new Error("invalid Relay audio sample rate");
   if (!Number.isInteger(frame.channelCount) || frame.channelCount < 1 || frame.channelCount > 2) throw new Error("unsupported Relay audio channel count");
@@ -32,10 +40,10 @@ export function relayAudioToStt(frame: { samples: Int16Array; sampleRate: number
     }
     mono[i] = count === 0 ? 0 : total / count;
   }
-  if (frame.sampleRate === 16_000) return floatToPcm16(mono);
-  const outputLength = Math.max(1, Math.round(mono.length * 16_000 / frame.sampleRate));
+  if (frame.sampleRate === STT_SAMPLE_RATE) return floatToPcm16(mono);
+  const outputLength = Math.max(1, Math.round(mono.length * STT_SAMPLE_RATE / frame.sampleRate));
   const output = new Float32Array(outputLength);
-  const ratio = frame.sampleRate / 16_000;
+  const ratio = frame.sampleRate / STT_SAMPLE_RATE;
   for (let i = 0; i < outputLength; i += 1) {
     const source = i * ratio;
     const left = Math.floor(source);
@@ -99,7 +107,7 @@ export class ElevenLabsRealtimeStt {
     const WebSocketImpl = this.#options.webSocket ?? (require("ws") as WsConstructor);
     const query = new URLSearchParams({
       model_id: this.#options.modelId ?? "scribe_v2_realtime",
-      audio_format: "pcm_16000",
+      audio_format: `pcm_${STT_SAMPLE_RATE}`,
       commit_strategy: "vad",
       vad_silence_threshold_secs: String(this.#options.vadSilenceSecs ?? 0.7),
       ...(this.#options.languageCode ? { language_code: this.#options.languageCode } : {}),

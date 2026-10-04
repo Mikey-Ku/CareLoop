@@ -21,10 +21,15 @@ class FakeWebSocket {
 }
 
 describe("call audio adapters", () => {
-  it("downmixes stereo and converts Relay PCM to 16 kHz", () => {
-    const downmixed = relayAudioToStt({ samples: new Int16Array([100, 300, -100, 100]), sampleRate: 16_000, channelCount: 2 });
-    expect([...downmixed]).toEqual([200, 0]);
-    expect([...relayAudioToStt({ samples: new Int16Array([100, 200, 300, 400]), sampleRate: 32_000, channelCount: 1 })]).toEqual([100, 300]);
+  it("downmixes stereo to mono and passes Relay's 48 kHz through untouched", () => {
+    expect([...relayAudioToStt({ samples: new Int16Array([100, 300, -100, 100]), sampleRate: 48_000, channelCount: 2 })]).toEqual([200, 0]);
+    const mono = Int16Array.from([5, -7, 32767, -32768, 0]);
+    expect([...relayAudioToStt({ samples: mono, sampleRate: 48_000, channelCount: 1 })]).toEqual([...mono]); // no resampling, no filtering
+  });
+
+  it("brings a frame at another rate up to 48 kHz by linear interpolation (a fallback: Relay delivers 48 kHz)", () => {
+    expect([...relayAudioToStt({ samples: new Int16Array([0, 100, 200]), sampleRate: 24_000, channelCount: 1 })]).toEqual([0, 50, 100, 150, 200, 200]);
+    expect(relayAudioToStt({ samples: new Int16Array(160), sampleRate: 16_000, channelCount: 1 })).toHaveLength(480);
   });
 
   it("rejects invalid sample rates and unsupported channel counts", () => {
@@ -48,7 +53,7 @@ describe("call audio adapters", () => {
     stt.close();
   });
 
-  it("asks for a 0.7 s speech wait unless told otherwise, and for her language only when it is set", async () => {
+  it("asks for 48 kHz audio and a 0.7 s speech wait unless told otherwise, and for her language only when it is set", async () => {
     const query = async (options: { vadSilenceSecs?: number; languageCode?: string } = {}) => {
       const stt = new ElevenLabsRealtimeStt({ apiKey: "test", webSocket: FakeWebSocket as never, ...options });
       await stt.connect();
@@ -58,6 +63,7 @@ describe("call audio adapters", () => {
     expect((await query()).get("vad_silence_threshold_secs")).toBe("0.7");
     expect((await query({ vadSilenceSecs: 1.2 })).get("vad_silence_threshold_secs")).toBe("1.2");
     expect((await query()).get("commit_strategy")).toBe("vad");
+    expect((await query()).get("audio_format")).toBe("pcm_48000"); // what relayAudioToStt produces
     expect((await query({ languageCode: "en" })).get("language_code")).toBe("en");
     expect((await query()).has("language_code")).toBe(false); // left out: ElevenLabs detects the language
   });

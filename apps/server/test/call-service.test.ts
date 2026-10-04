@@ -213,6 +213,16 @@ const modelPlan = (overrides: Partial<CallTurnLlmOutput> = {}): CallTurnLlmOutpu
   ...overrides,
 });
 
+describe("her audio goes to the transcriber", () => {
+  it("at Relay's own 48 kHz, only downmixed to mono", async () => {
+    const service = setup();
+    await start(service);
+    transport.emit("audio", { samples: Int16Array.from([100, 300, -100, 100]), sampleRate: 48_000, channelCount: 2 });
+    expect([...stt.send.mock.calls[0]![0]]).toEqual([200, 0]);
+    await service.end("call-1");
+  });
+});
+
 describe("the camera reading is offered only while her video is on", () => {
   const withCamera = { PRESAGE_API_KEY: "presage-test-key" }; // a bridge exists, as on the demo machine
   const endsTheCall = () => modelPlan();
