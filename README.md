@@ -39,11 +39,11 @@ cp ../../.env.example ../../.env    # the .env lives at the repo root
 | FinchNode | Harriet's synthetic health record, read live and read-only | nothing: the demo API is open (`FINCHNODE_API_KEY` only for an authenticated endpoint) | `npm run packet -- patient-demo-polypharmacy --live` |
 | Relay Messenger | Chat, video call and photos with the agent | `RELAY_AGENT_TOKEN`, `PATIENT_RELAY_HANDLE`, and `FAMILY_RELAY_HANDLES` for family | `npm run relay:check` |
 | Gemini | Understands typed and spoken words, words the questions | `GEMINI_API_KEY` (without it, buttons only) | `npm run llm:check` |
-| ElevenLabs | Hears and speaks on the call | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | `npm run demo:check`, then a call |
+| ElevenLabs | Hears and speaks on the call | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | `npm run voice:check` |
 | Presage | Pulse and breathing estimate from the call's video | `PRESAGE_API_KEY` (optional) | a video call with the camera on |
 | Photon (optional) | Texts care summaries to the doctor and emergency contact over iMessage | `SPECTRUM_PROJECT_ID`, `SPECTRUM_PROJECT_SECRET` | `npm run care:send -- --dry-run` |
 
-`npm run demo:check` reads the config and the synthetic fixtures without any network request and never prints a key. Exit `0` means configured, `2` means an optional part is missing, `1` means something required is. It shows presence, not that a key works: `relay:check` and `llm:check` call the providers (`llm:check` uses a little quota). `content:eval` runs 145 messages through Gemini and overwrites `docs/content-eval.md`. Phone calls, the camera and family delivery need a live rehearsal with a synthetic patient on a phone.
+`npm run demo:check` reads the config and the synthetic fixtures without any network request and never prints a key. Exit `0` means configured, `2` means an optional part is missing, `1` means something required is. It shows presence, not that a key works: `relay:check`, `llm:check` and `voice:check` call the providers (`llm:check` uses a little quota, `voice:check` about 6 characters of speech). `content:eval` runs 145 messages through Gemini and overwrites `docs/content-eval.md`. Phone calls, the camera and family delivery need a live rehearsal with a synthetic patient on a phone.
 
 **No keys? Run the recorded demo:** `npm run simulate -- --reset --day 2026-07-28 --sharing all --family sarah --script ../../scripts/demo/hackathon-demo.txt` (from `apps/server`). It needs no `.env`. See [the three-minute demo](docs/DEMO.md) and [QA gates](docs/QA.md) before presenting.
 
@@ -74,7 +74,7 @@ Each person runs their own agent: two programs on the same agent token take each
    ```sh
    CLOCK_DATE=2026-09-01 FOLLOW_UP_DELAY_MINUTES=2 npm run agent -- --checkin-now
    ```
-   The check-in arrives on your phone. Type naturally ("ankles a bit puffy, slept ok") or tap. `CLOCK_DATE` pins the demo day (use a new date for each fresh check-in); `FOLLOW_UP_DELAY_MINUTES=2` makes the same-day follow-up arrive in 2 minutes instead of 3 hours. Stop with Ctrl-C.
+   The check-in arrives on your phone. Type naturally ("ankles a bit puffy, slept ok") or tap. `CLOCK_DATE` pins the demo day. A check-in goes out once per date per database, so use a new date or a fresh `DATABASE_PATH` for another; a fresh database no longer collides with Relay's memory of earlier messages. `FOLLOW_UP_DELAY_MINUTES=2` makes the same-day follow-up arrive in 2 minutes instead of 3 hours. Stop with Ctrl-C.
 
 The commands above are for macOS (`sed -i ''`, zsh `read`). Your conversation is stored in `apps/server/data/app.db` (not in git).
 
@@ -119,7 +119,7 @@ npm run simulate -- [subject] [--day YYYY-MM-DD] [--db path] [--reset] [--live] 
 
 ### Doctor report
 
-A printable summary of one week for her doctor (US letter, two pages), laid out like a clinical summary for a visit: her identifiers and active problems, the week at a glance, what she reported by severity level with dates and her own words (Subjective), camera wellness estimates and labs from her record (Objective), her medications as a reconciliation table with this week's label photos, refills and hospital-paper differences, items for clinician review (rule flags R1 to R6 with their evidence), and her questions for the visit. Fixed wording from the data only: no diagnosis, no dosing advice. Example: [docs/examples/doctor-report-example.html](docs/examples/doctor-report-example.html) (synthetic).
+A printable summary of one week for her doctor (US letter, two pages). Page 1 says at a glance what was collected: six tiles (check-ins answered, what she reported, medicine reminders and label photos, camera estimates, record flags, her record), an "In brief" list, the week day by day, the record flags for review with their status, what she reported by level with the day and her own words, and her questions for the visit. Page 2 has the camera estimates and labs from her record, her medicines with this week's label photos, refills and hospital-paper differences, her problem list, the evidence behind each flag and what the report was made from. Fixed wording from the data only: no diagnosis, no dosing advice. Print it from the browser with Background graphics on. An example from the simulated week is in `docs/examples/doctor-report-example.html`.
 
 From a simulated week (`scripts/demo/harriet-week.txt`, Aug 26 to Sep 1, 2026):
 
@@ -152,4 +152,4 @@ DATABASE_PATH=../../data/simulator.db npm run dev
 
 ## License
 
-MIT
+MIT, see `LICENSE`. Third-party services keep their own terms: Presage SmartSpectra (the SDK is installed from npm under Presage's terms and is not redistributed here; it bundles LGPL FFmpeg), Gemini on the free tier (so only synthetic data is used), the FinchNode demo API and NLM RxNav. Camera readings are a wellness estimate, not a medical measurement.

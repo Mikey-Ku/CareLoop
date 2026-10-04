@@ -43,6 +43,8 @@ export type ConversationOrchestratorOptions = {
   beforeGreeting?: () => Promise<void>;
   recordAgentTurn: (text: string) => void;
   beginQuietMeasurement: () => void;
+  /** The call ended with no camera offer because canMeasure() said no (not because she declined or it was taken): the service logs why. */
+  onCameraOfferSkipped?: () => void;
   onComplete: (screening?: CallScreeningLlmOutput) => void;
   log?: (event: string, fields?: Record<string, unknown>) => void;
 };
@@ -290,12 +292,15 @@ export class ConversationOrchestrator {
     }
     if (decision.nextAction === "complete_screening" && this.#needsCameraOn) {
       // The reading is set up but her camera is off: how to turn it on, once, in fixed words, before the goodbye.
-      this.#cameraGuided = true;
-      this.#waitingForCameraOn = true;
+      // No offer was made because her video is off, which the call service logs.
+      this.#options.onCameraOfferSkipped?.();
       await this.#speak(CAMERA_GUIDANCE);
+      this.#cameraGuided = true; // only once it was said: a voice failure leaves her unguided, and the next turn guides her
+      this.#waitingForCameraOn = true;
       return;
     }
     if (decision.nextAction === "complete_screening" || decision.nextAction === "emergency" || decision.nextAction === "end_call") {
+      if (decision.nextAction === "complete_screening" && !this.#measurementDeclined && !this.#measurementDone) this.#options.onCameraOfferSkipped?.();
       // The screening is stored with the call and runs while the goodbye is spoken; none of its words, and
       // none of the model's, are ever said. The goodbye or the emergency words are ours (src/calls/copy.ts).
       const screening = this.#finalScreening();

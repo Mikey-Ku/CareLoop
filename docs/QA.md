@@ -38,6 +38,8 @@ Do "Try it on your phone" in the [README](../README.md#try-it-on-your-phone-abou
 | `FINCHNODE_BASE_URL`, `FINCHNODE_API_KEY` | The FinchNode demo API needs no key | Leave as is |
 | `CLOCK_DATE`, `FOLLOW_UP_DELAY_MINUTES`, `MEDS_NUDGE_MINUTES`, `CHECKIN_TIME`, `MISSED_CHECKIN_TIME`, `MEDS_MORNING_TIME`, `MEDS_EVENING_TIME`, `REFILL_REMIND_DAYS`, `PATIENT_TIMEZONE`, `DATABASE_PATH`, `PORT` | Demo knobs (see "Run the agent"). Easiest to set inline on the command line | Optional |
 
+`npm run voice:check` tries the ElevenLabs key, voice, a short spoken sample and listening for real (about 6 characters of speech): run it before a call test.
+
 Never paste keys in chat, screenshots or `FEEDBACK.md`. The README has copy-paste commands that put the Relay token and the Gemini key into `.env` without showing them.
 
 ### Run the agent
@@ -155,6 +157,7 @@ Before each: agent running with a fresh `CLOCK_DATE` (or fresh database), `FOLLO
 - Expect: answered within 10 seconds; first sentence says it is an AI; asks today's questions; quiet prompt; heart rate as a camera estimate with no usual-range words; a medicine question gets a pointer to her doctor or pharmacist, never advice (this is Gemini's wording on a call, so check it); the same fixed goodbye naming Sarah, with no advice and no question (never Gemini's own closing); ends by about 3 minutes (cut at 4). Then one "Here's what I noted from our call: ..." message with [That's right] [Something's wrong].
 4. Second call: say "I have chest pain". Expect the 911 reply and Sarah alerted during the call.
 5. Write down the heart rate next to Presage's own app, same person, same minute.
+- No camera offer: look for `call_video_changed` and `call_camera_offer_skipped` in the agent log (`[calls]`). Start the call with the video icon in Relay and allow camera access.
 
 **S13. Ask about her own history**
 1. After the medicines reminder and a check-in, type "did I take my pills today?", then "what did Sarah say?" (Sarah must have sent something), then "when does my refill run out?".

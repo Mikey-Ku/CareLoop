@@ -21,7 +21,7 @@ Backend parts:
 | `context` builder | One "context packet" per reply or call: record + our notes |
 | `rules` engine | Medication checks, red flags, paper discrepancies. Deterministic, unit tested |
 | `db` | SQLite tables below |
-| `relay` agent | Webhook server, check-in messages, buttons, family chats, photos, voice memos, scheduled jobs |
+| `relay` agent | WebSocket inbox, check-in messages, buttons, family chats, photos, voice memos, scheduled jobs |
 | `calls` handler | Relay call lifecycle, ElevenLabs STT/TTS, adaptive Gemini turns, video frames to Presage |
 | `llm` | Gemini contextualizes transcript and structured evidence. Deterministic rules retain safety precedence |
 
@@ -38,7 +38,7 @@ Backend parts:
 | Relay | `@relaymessenger/sdk`, CLI `npx relaymessenger` | Chat, buttons, calls, media, voice memos |
 | Voice | ElevenLabs realtime STT + streaming TTS APIs | Transcript enters Gemini; approved text is spoken into the Relay call |
 | LLM | Gemini (free tier) through its REST API, behind a provider-neutral `LlmClient` (`src/llm/`) | Reads free-text replies, writes small talk, reads paper photos. Free tier: synthetic data only, and Google may use prompts to improve its products. Decided 2026-10-03 |
-| Vitals | Presage SmartSpectra C++ SDK with custom frame input, as a sidecar in `services/presage-bridge/` | Takes raw frames from the Relay video call. Final choice after the spike |
+| Vitals | Presage SmartSpectra Node SDK (`@smartspectra/node-sdk`) with custom frame input, in the server process (`src/calls/video.ts`) | Takes frames from the Relay video call during a consented quiet window; a recorded clip can be read with `npm run vitals:video` |
 | Drug names | NLM RxNav REST API (no key) | Map free-text medication names to RxNorm codes. Exact normalized-name match only (`rxcui.json?search=2`); approximate search guesses wrong drugs |
 | Package manager | npm | Default with Node |
 
@@ -56,11 +56,13 @@ Mhacks_2026/
 │   ├── src/context/          # context packet builder, question picker
 │   ├── src/rules/            # medication rules, red flags, paper diff
 │   ├── src/db/               # schema, migrations, queries
-│   ├── src/relay/            # webhook server, messages, jobs
+│   ├── src/relay/            # WebSocket inbox, messages, jobs
 │   ├── src/calls/            # ElevenLabs bridge, video frames
-│   ├── src/llm/              # Claude prompts
+│   ├── src/llm/              # Gemini prompts
+│   ├── src/report/           # doctor report
+│   ├── src/care/             # optional Photon care summaries
+│   ├── src/vitals/           # Presage adapters
 │   └── test/
-├── services/presage-bridge/  # vitals sidecar (after spike)
 ├── fixtures/                 # recorded FinchNode responses, answer key, synthetic papers
 └── scripts/                  # spikes and dev helpers
 ```
@@ -327,6 +329,7 @@ Photon limits: 50 new conversations per line per day, 5,000 messages per server 
 ## Relay facts (from docs.relayapp.im)
 
 - API base `https://api.relayapp.im`; Agent Token auth; send with idempotency keys.
+- **Idempotency keys** (2026-10-04). Relay remembers each key for hours and the engine's keys repeat on a pinned `CLOCK_DATE` (`<patient>:<day>:question:0`), so a fresh database reused an earlier one's keys and a send with different words failed with 409 and code 1005. Each database now has a random instance id (`app_meta`, migration 15) and `RelayMessenger` sends `<instance id>.<24 hex of sha256(key)>`, which is stable for one database across restarts and new for a fresh one; on a 409 with code 1005 it retries once under `<key>.r` and logs a warning without the message. The fake messenger and the simulator still dedupe on the logical key, and call messages keep their own `call:<id>` keys.
 - **Delivery: WebSocket, not webhooks** (decided 2026-10-03). `relay.websocket.run({ onEvent, onFullSync })` from `@relaymessenger/sdk` runs from a laptop with no public URL. The agent must have zero webhook subscriptions. `onEvent` commits the event by `event_id` to SQLite before it resolves (the SDK ACKs after); work happens from that inbox. Pattern: Relay-SDK `cookbook/websocket-agent`. `RELAY_WEBHOOK_SECRET` is not needed.
 - First contact: the agent cannot open a chat with someone who never wrote to it (its message sits as a silent request). Harriet and each family member send the agent a message first; `contact.added` gives the direct `chat_id`.
 - Buttons: 1 to 5 per message, label up to 80 chars; a tap arrives as `message.received` with text equal to the label and `reply_to`.

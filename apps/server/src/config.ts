@@ -84,6 +84,19 @@ const ConfigSchema = z.object({
   VITALS_MAX_FRAME_GAP_MS: z.coerce.number().int().min(1_000).max(10_000).default(MAX_FRAME_GAP_LIMIT_MS).transform((ms) => Math.min(ms, MAX_FRAME_GAP_LIMIT_MS)),
 });
 
+/**
+ * Every variable name the app reads: the schema's keys plus the ones read outside it. `npm run demo:check`
+ * treats any other name in .env as a likely typo, so a new variable read anywhere is added here.
+ */
+export const KNOWN_ENV_NAMES: ReadonlySet<string> = new Set([
+  ...Object.keys(ConfigSchema.shape),
+  "RELAY_AGENT_TOKEN", "GEMINI_API_KEY", "ELEVENLABS_API_KEY", "PRESAGE_API_KEY", // secrets, kept away from the schema
+  "ELEVENLABS_STT_LANGUAGE", // read raw, because empty means auto-detect
+  "FOLLOW_UP_DELAY_MINUTES", // src/agent.ts
+  "SPECTRUM_PROJECT_ID", "SPECTRUM_PROJECT_SECRET", "CARE_CONTACTS_PATH", // src/care/config.ts
+  "NO_COLOR", // src/cli/sim-render.ts
+]);
+
 export type RelayConfig = {
   /** Origin only (https://api.relayapp.im). The SDK adds /v1 itself. */
   apiUrl: string;

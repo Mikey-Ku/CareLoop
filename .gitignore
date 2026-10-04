@@ -1,10 +1,13 @@
 .DS_Store
 .env
-.env.local
+.env.*
+!.env.example
+.claude/worktrees/
 care-contacts.json
 .idea/
 .vscode/
-node_modules/
+# no trailing slash: also matches a node_modules symlink (one was committed by mistake in d382586)
+node_modules
 dist/
 build/
 coverage/

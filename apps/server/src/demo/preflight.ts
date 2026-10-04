@@ -1,11 +1,15 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { DEFAULT_FINCHNODE_BASE_URL, loadConfig } from "../config.ts";
+import { DEFAULT_FINCHNODE_BASE_URL, KNOWN_ENV_NAMES, loadConfig } from "../config.ts";
 import { FIXTURES_DIR, REPO_ROOT, loadSnapshot, loadRxNavCache } from "../finchnode/fixtures.ts";
 
 export type Readiness = "ready" | "degraded" | "missing";
 export type PreflightResult = { status: Readiness; exitCode: number; lines: string[] };
-export type PreflightOptions = { nodeVersion?: string; fixturesDir?: string; engine?: string; packagePath?: string };
+/** envFile: the .env the commands load (ENV_FILE); without it the file itself is not checked. */
+export type PreflightOptions = { nodeVersion?: string; fixturesDir?: string; engine?: string; packagePath?: string; envFile?: string };
+
+/** The repo-root .env that every `npm run` script loads. */
+export const ENV_FILE = join(REPO_ROOT, ".env");
 
 /** Presence and local assets only: never authenticates, sends messages, or opens a database. */
 export function checkDemoSetup(env: Record<string, string | undefined>, options: PreflightOptions = {}): PreflightResult {
@@ -48,17 +52,24 @@ export function checkDemoSetup(env: Record<string, string | undefined>, options:
     ["ELEVENLABS_API_KEY", config.calls.elevenLabsApiKey],
     ["ELEVENLABS_VOICE_ID", config.calls.elevenLabsVoiceId],
   ] as const) {
-    if (present) ok(`${name} is configured (not authenticated)`);
+    if (present && looksLikePlaceholder(present)) fail(`${name} looks like a placeholder; put the real value in the repo-root .env`);
+    else if (present) ok(`${name} is configured (not authenticated)`);
     else fail(`Set ${name} in the repo-root .env for the full voice demo`);
   }
-  if (config.calls.presageApiKey) ok("Camera estimation enabled; PRESAGE_API_KEY is configured (not authenticated)");
+  if (config.calls.presageApiKey && looksLikePlaceholder(config.calls.presageApiKey)) optional("PRESAGE_API_KEY looks like a placeholder; camera estimation needs the real key");
+  else if (config.calls.presageApiKey) ok("Camera estimation enabled; PRESAGE_API_KEY is configured (not authenticated)");
   else optional("Camera estimation disabled: set PRESAGE_API_KEY to demonstrate camera readings; voice remains available");
-  if (config.patient.familyHandles.length) ok("Family delivery handles are configured (not printed)");
+  if (config.patient.familyHandles.some(looksLikePlaceholder)) optional("FAMILY_RELAY_HANDLES looks like a placeholder; family updates will not be delivered");
+  else if (config.patient.familyHandles.length) ok("Family delivery handles are configured (not printed)");
   else optional("FAMILY_RELAY_HANDLES is empty; family updates will not be delivered");
   const finchnodeHost = new URL(config.finchnode.baseUrl).host;
-  if (config.finchnode.apiKey?.trim()) ok(`FinchNode ${finchnodeHost}: FINCHNODE_API_KEY is configured (not authenticated)`);
+  if (config.finchnode.apiKey?.trim() && looksLikePlaceholder(config.finchnode.apiKey)) optional(`FinchNode ${finchnodeHost}: FINCHNODE_API_KEY looks like a placeholder; clear it for the open demo API`);
+  else if (config.finchnode.apiKey?.trim()) ok(`FinchNode ${finchnodeHost}: FINCHNODE_API_KEY is configured (not authenticated)`);
   else if (config.finchnode.baseUrl === DEFAULT_FINCHNODE_BASE_URL) ok(`FinchNode ${finchnodeHost}: the demo API is open and needs no key (the agent reads it live; \`npm run packet -- patient-demo-polypharmacy --live\` shows the record)`);
   else optional(`FinchNode ${finchnodeHost}: FINCHNODE_API_KEY is absent; set it if this endpoint is authenticated`);
+
+  if (config.clockDate) optional("CLOCK_DATE pins the demo day; a fresh database on the same day makes Relay refuse repeated message keys, so use a new date for each fresh database or leave CLOCK_DATE empty");
+  if (options.envFile) for (const note of envFileNotes(options.envFile)) optional(note);
 
   const fixtures = options.fixturesDir ?? FIXTURES_DIR;
   for (const relative of ["finchnode/records/patient-demo-polypharmacy.json", "rxnav-cache.json", "labels/apixaban-5mg.png", "labels/apixaban-2-5mg.png", "labels/metformin-500mg.png", "labels/ibuprofen-200mg.png"]) {
@@ -71,6 +82,7 @@ export function checkDemoSetup(env: Record<string, string | undefined>, options:
   lines.push("Live follow-up (explicit, separate commands from apps/server):",
     "  npm run relay:check — provider reads only; may migrate an existing local database and print configured handles",
     "  npm run llm:check — sends synthetic text and label fixtures to Gemini; consumes API quota",
+    "  npm run voice:check — tries ElevenLabs for real (key, voice, speech, listening); spends about 6 characters of speech",
     "  npm run content:eval — synthetic conversation evaluation; consumes API quota and overwrites docs/content-eval.md",
     "Voice and camera still require an authorized synthetic phone rehearsal; no live call is started by this check.");
   return result();
@@ -79,6 +91,33 @@ export function checkDemoSetup(env: Record<string, string | undefined>, options:
     const status = missing ? "missing" : degraded ? "degraded" : "ready";
     return { status, exitCode: missing ? 1 : degraded ? 2 : 0, lines };
   }
+}
+
+/** Filler where a real value belongs: "your_key_here", "xxxx", "<token>", or only quotes and dots. */
+export function looksLikePlaceholder(value: string): boolean {
+  const text = value.trim();
+  return /^(your|changeme|change_me|xxx+|todo|example|placeholder)/i.test(text) || /[<>]/.test(text) || /^[\s"'`.*_-]+$/.test(text);
+}
+
+/** What the .env file gives away, by name and mode only, never a value: loose permissions, and names nothing reads (likely typos). */
+function envFileNotes(path: string): string[] {
+  let mode: number;
+  let text: string;
+  try {
+    mode = statSync(path).mode;
+    text = readFileSync(path, "utf8");
+  } catch {
+    return []; // no file: the values come from the shell
+  }
+  const notes: string[] = [];
+  if (mode & 0o077) notes.push(`.env can be read by other users on this computer (mode ${(mode & 0o777).toString(8)}); from apps/server run chmod 600 ../../.env`);
+  const unknown = new Set<string>();
+  for (const line of text.split(/\r?\n/)) {
+    const name = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]{0,47})\s*=/.exec(line)?.[1];
+    if (name && !KNOWN_ENV_NAMES.has(name)) unknown.add(name);
+  }
+  if (unknown.size) notes.push(`.env sets names nothing reads (typos?): ${[...unknown].join(", ")}`);
+  return notes;
 }
 
 /** Current package engine is a minimum version; reject unknown ranges instead of guessing. */
