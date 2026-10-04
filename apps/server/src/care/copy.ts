@@ -1,6 +1,6 @@
 import type { RuleId } from "../rules/index.ts";
 import type { CareContact, CareContacts } from "./contacts.ts";
-import type { CareFacts } from "./facts.ts";
+import { LEVEL_WORDS, type CareFacts, type CareSymptom } from "./facts.ts";
 
 // Every word the doctor and the emergency contact read over Photon, as fixed templates
 // built from CareFacts. Rules decided everything in the facts; these only word them.
@@ -34,7 +34,7 @@ function shortEvidence(value: string): string {
   return `${name}: ${value.slice(colon + 2)}`;
 }
 
-const DOCTOR_RULE_LABELS: Record<RuleId, string> = {
+export const DOCTOR_RULE_LABELS: Record<RuleId, string> = {
   R1: "Metformin with eGFR below the review threshold",
   R2: "Apixaban dose vs label dose-reduction criteria",
   R3: "Anticoagulant with aspirin and/or an SSRI (bleeding risk)",
@@ -43,7 +43,7 @@ const DOCTOR_RULE_LABELS: Record<RuleId, string> = {
   R6: "Hospital paper differs from the medication list",
 };
 
-const FAMILY_RULE_LABELS: Record<RuleId, string> = {
+export const FAMILY_RULE_LABELS: Record<RuleId, string> = {
   R1: "her kidney test results and her metformin",
   R2: "whether her blood thinner (apixaban) dose is the right one for her",
   R3: "a combination of her medicines that can raise the chance of bleeding",
@@ -86,18 +86,80 @@ function vitalsLinesForDoctor(f: CareFacts): string[] {
   return lines;
 }
 
-export function doctorSummary(f: CareFacts, contacts: CareContacts): string {
-  const tz = f.patient.timezone;
+/** The doctor's summary header: who, the date, how current her record is, and that an automated assistant sent it. */
+export function doctorHeader(f: CareFacts): string {
   const who = [f.patient.fullName ?? f.patient.preferredName, f.patient.age !== null ? String(f.patient.age) : undefined].filter(Boolean).join(", ");
+  return [
+    `Daily check-in summary for ${who} (synthetic demo patient).`,
+    `Date: ${f.day}. Record data as of ${f.dataAsOf ?? "unknown"}${f.record === "none" ? " (no record copy stored: record access ended or not read)" : ""}.`,
+    "Sent by an automated check-in assistant. Flags come from fixed rules on her answers and her FinchNode record.",
+  ].join("\n");
+}
+
+/** The doctor's RED FLAGS lines, fixed: every red-flag answer, what she was told and who was alerted. */
+export function doctorRedFlags(f: CareFacts): string {
+  const redLines = [`RED FLAGS: ${f.redFlags.length}`];
+  for (const r of f.redFlags) {
+    const told = f.familyAlerted.length > 0 ? `${listJoin(f.familyAlerted)} alerted in Relay` : "no family chat linked";
+    redLines.push(`- ${r.question} "${r.answer}". She was told to call her doctor today; ${told}.`);
+  }
+  return redLines.join("\n");
+}
+
+/** The doctor's footer: the emergency contact, and that replies are answered. */
+export function doctorFooter(contacts: CareContacts): string {
+  const ec = contacts.emergencyContact;
+  return `Emergency contact: ${ec.name}${ec.relationship ? ` (${ec.relationship})` : ""}, ${displayPhone(ec.phone)}. Reply here with questions about this summary.`;
+}
+
+const SOURCE_FOR_DOCTOR: Record<string, string> = {
+  button: "tapped",
+  typed: "typed",
+  follow_up: "follow-up",
+  safety: "safety screen",
+  photo: "label photo",
+};
+
+/** "L2 worth watching: knee pain, "my knee aches" (typed)". */
+function symptomLine(s: CareSymptom): string {
+  return `- L${s.level} ${LEVEL_WORDS[s.level] ?? ""}: ${s.about}${s.words ? `, "${s.words}"` : ""} (${SOURCE_FOR_DOCTOR[s.source] ?? s.source})`;
+}
+
+/** The day's extra data for the doctor, as labelled lines: symptoms by level, her notes, visit questions, medicines. */
+export function doctorDayLines(f: CareFacts): string[] {
+  const sections: string[] = [];
+  const top = f.severity.highest;
+  sections.push(
+    top
+      ? [`SYMPTOMS (severity ladder; highest today L${top.level}, ${LEVEL_WORDS[top.level] ?? ""})`, ...f.severity.symptoms.map(symptomLine)].join("\n")
+      : "SYMPTOMS (severity ladder): nothing above level 0 today.",
+  );
+  if (f.notes.length > 0) sections.push(["HER NOTES FOR YOU", ...f.notes.map((n) => `- ${n.about}: "${n.text}"`)].join("\n"));
+  if (f.visitQuestions.length > 0) sections.push(["VISIT QUESTIONS (asked today)", ...f.visitQuestions.map((q) => `- ${q}`)].join("\n"));
+  const m = f.medicines;
+  const medLines = [
+    ...m.doses.map((d) => `- ${d.slot === "morning" ? "Morning" : "Evening"} medicines reminder: ${d.status}.`),
+    ...m.labelMismatches.map((l) =>
+      l.outcome === "strength_differs"
+        ? `- Label photo: ${l.label}; her list has ${l.onHerList ?? "another strength"} (strength differs; she was told to check with her pharmacist).`
+        : `- Label photo: ${l.label}; not on her medication list (she was told to check with her pharmacist).`,
+    ),
+    ...m.refills.map((r) => `- Refill: ${r.medicine}, runs out ${r.runsOut}; ${r.status === "asked" ? "she says she asked for it" : r.status === "snoozed" ? "reminded, she'll do it tomorrow" : "reminded"}${r.familyTold ? "; family told" : ""}.`),
+  ];
+  if (medLines.length > 0) sections.push(["MEDICINES TODAY", ...medLines].join("\n"));
+  return sections;
+}
+
+/**
+ * The doctor's summary: fixed data sections. `overview`, when given, is the LLM's few lines about the day
+ * (src/care/writer.ts), placed under the header and labelled; the data lines stay as they are.
+ */
+export function doctorSummary(f: CareFacts, contacts: CareContacts, overview?: string): string {
+  const tz = f.patient.timezone;
   const sections: string[] = [];
 
-  sections.push(
-    [
-      `Daily check-in summary for ${who} (synthetic demo patient).`,
-      `Date: ${f.day}. Record data as of ${f.dataAsOf ?? "unknown"}${f.record === "none" ? " (no record copy stored: record access ended or not read)" : ""}.`,
-      "Sent by an automated check-in assistant. Flags come from fixed rules on her answers and her FinchNode record.",
-    ].join("\n"),
-  );
+  sections.push(doctorHeader(f));
+  if (overview) sections.push(`OVERVIEW (worded by the assistant from the data below)\n${overview}`);
 
   const c = f.checkin;
   const timing =
@@ -111,12 +173,8 @@ export function doctorSummary(f: CareFacts, contacts: CareContacts): string {
   if (c.answers.length === 0 && c.outcome !== "none") checkinLines.push("- No answers recorded.");
   sections.push(checkinLines.join("\n"));
 
-  const redLines = [`RED FLAGS: ${f.redFlags.length}`];
-  for (const r of f.redFlags) {
-    const told = f.familyAlerted.length > 0 ? `${listJoin(f.familyAlerted)} alerted in Relay` : "no family chat linked";
-    redLines.push(`- ${r.question} "${r.answer}". She was told to call her doctor today; ${told}.`);
-  }
-  sections.push(redLines.join("\n"));
+  sections.push(doctorRedFlags(f));
+  sections.push(...doctorDayLines(f));
 
   sections.push(vitalsLinesForDoctor(f).join("\n"));
 
@@ -143,10 +201,7 @@ export function doctorSummary(f: CareFacts, contacts: CareContacts): string {
   if (f.conditions.length > 0) sections.push(`CONDITIONS: ${f.conditions.join("; ")}`);
   if (f.memories.length > 0) sections.push(["SHARED ON HER CALL TODAY", ...f.memories.map((m) => `- ${m}`)].join("\n"));
 
-  const ec = contacts.emergencyContact;
-  sections.push(
-    `Emergency contact: ${ec.name}${ec.relationship ? ` (${ec.relationship})` : ""}, ${displayPhone(ec.phone)}. Reply here with questions about this summary.`,
-  );
+  sections.push(doctorFooter(contacts));
   return sections.join("\n\n");
 }
 
@@ -167,13 +222,77 @@ function vitalsForFamily(f: CareFacts): string | undefined {
   return lines.join(" ");
 }
 
+/** The family greeting: who is writing, that it is automated, and the day. */
+export function familyGreeting(f: CareFacts, contacts: CareContacts): string {
+  const name = f.patient.preferredName;
+  return `Hi ${contacts.emergencyContact.name}. This is ${name}'s daily check-in assistant. I'm an automated assistant, not a person. Here is ${name}'s update for ${f.day}.`;
+}
+
+export const FAMILY_CLOSING = "If you have a question about today's update, you can reply here.";
+
+/**
+ * What the emergency contact may see of the day's extra data, by her sharing level (as her family's
+ * Relay status does): symptoms below level 3, her notes, visit questions, medicine reminders and label
+ * photos only at "all"; a refill only at "all" or when she asked us to tell her family. Anything at
+ * level 3 or more is always included (her words only at "all"), as red flags always are.
+ */
+export function familyVisible(f: CareFacts) {
+  const all = f.patient.sharing === "all";
+  const m = f.medicines;
+  return {
+    urgent: f.severity.symptoms.filter((s) => s.level >= 3).map((s) => ({ ...s, words: all ? s.words : null })),
+    symptoms: all ? f.severity.symptoms.filter((s) => s.level < 3) : [],
+    notes: all ? f.notes : [],
+    visitQuestions: all ? f.visitQuestions : [],
+    doses: all ? m.doses : [],
+    labelMismatches: all ? m.labelMismatches : [],
+    refills: all ? m.refills : m.refills.filter((r) => r.familyTold),
+  };
+}
+
+/**
+ * The fixed paragraph about anything urgent today, or undefined: her red-flag answers (always), then
+ * anything else at level 3 or more (a typed symptom, a safety screen hit). Never written by a model.
+ */
+export function familyAttention(f: CareFacts, contacts: CareContacts): string | undefined {
+  const name = f.patient.preferredName;
+  const doctor = contacts.doctor;
+  const parts: string[] = [];
+  if (f.redFlags.length > 0) {
+    const which = f.redFlags.map((r) => `"${r.answer}" to "${r.question}"`);
+    parts.push(`One thing needs attention: ${name} answered ${listJoin(which)}. I asked ${name} to call her doctor today.`);
+  }
+  const covered = new Set(f.redFlags.map((r) => r.questionId));
+  const others = familyVisible(f).urgent.filter((s) => !covered.has(s.topic));
+  if (others.some((s) => s.level >= 4)) parts.push(`${name} told me about something urgent today, and I gave her the emergency numbers.`);
+  for (const s of others.filter((x) => x.level === 3))
+    parts.push(`${name} mentioned ${s.about} today${s.words ? ` ("${s.words}")` : ""}, and I asked her to call her doctor today.`);
+  if (parts.length === 0) return undefined;
+  parts.push(`Please call ${name} today to check on her. If you have questions about what this means, ${doctor.name} can be reached at ${displayPhone(doctor.phone)}.`);
+  return parts.join(" ");
+}
+
+/** The day's extra data for the family, in plain words, cut by her sharing level (familyVisible). */
+export function familyDayLines(f: CareFacts): string[] {
+  const name = f.patient.preferredName;
+  const v = familyVisible(f);
+  const sections: string[] = [];
+  const small = v.symptoms.map((s) => `- ${s.about}${s.level === 2 ? " (we're keeping an eye on it)" : " (noted for her doctor)"}${s.words ? `: "${s.words}"` : ""}`);
+  if (small.length > 0) sections.push([`${name} also mentioned:`, ...small].join("\n"));
+  if (v.notes.length > 0) sections.push([`${name} wrote these down for her doctor:`, ...v.notes.map((n) => `- ${n.about}: "${n.text}"`)].join("\n"));
+  if (v.visitQuestions.length > 0) sections.push([`Questions ${name} wants to ask at her next visit:`, ...v.visitQuestions.map((q) => `- ${q}`)].join("\n"));
+  const meds = [
+    ...v.doses.map((d) => `- ${d.slot === "morning" ? "Morning" : "Evening"} medicines: ${d.status === "taken" ? "she said she took them" : "not confirmed"}.`),
+    ...v.labelMismatches.map((l) => `- A medicine label she photographed (${l.label}) didn't match her list, so I asked her to check with her pharmacist.`),
+    ...v.refills.map((r) => `- ${r.medicine} runs out around ${r.runsOut}${r.status === "asked" ? "; she says she has asked for a refill" : "; I reminded her to ask for a refill"}.`),
+  ];
+  if (meds.length > 0) sections.push([`${name}'s medicines today:`, ...meds].join("\n"));
+  return sections;
+}
+
 export function familySummary(f: CareFacts, contacts: CareContacts): string {
   const name = f.patient.preferredName;
-  const ec = contacts.emergencyContact;
-  const doctor = contacts.doctor;
-  const sections: string[] = [
-    `Hi ${ec.name}. This is ${name}'s daily check-in assistant. I'm an automated assistant, not a person. Here is ${name}'s update for ${f.day}.`,
-  ];
+  const sections: string[] = [familyGreeting(f, contacts)];
 
   const c = f.checkin;
   if (c.outcome === "checked_in") {
@@ -192,13 +311,9 @@ export function familySummary(f: CareFacts, contacts: CareContacts): string {
     sections.push(`There was no check-in with ${name} today.`);
   }
 
-  if (f.redFlags.length > 0) {
-    const which = f.redFlags.map((r) => `"${r.answer}" to "${r.question}"`);
-    sections.push(
-      `One thing needs attention: ${name} answered ${listJoin(which)}. I asked ${name} to call her doctor today. Please call ${name} today to check on her. ` +
-        `If you have questions about what this means, ${doctor.name} can be reached at ${displayPhone(doctor.phone)}.`,
-    );
-  }
+  const attention = familyAttention(f, contacts);
+  if (attention) sections.push(attention);
+  sections.push(...familyDayLines(f));
 
   const vitals = vitalsForFamily(f);
   if (vitals) sections.push(vitals);
@@ -215,7 +330,7 @@ export function familySummary(f: CareFacts, contacts: CareContacts): string {
 
   if (f.memories.length > 0) sections.push([`From ${name}'s call today:`, ...f.memories.map((m) => `- ${m}`)].join("\n"));
 
-  sections.push("If you have a question about today's update, you can reply here.");
+  sections.push(FAMILY_CLOSING);
   return sections.join("\n\n");
 }
 

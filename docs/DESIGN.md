@@ -275,13 +275,15 @@ For calls, the packet goes to ElevenLabs as dynamic variables through the bridge
 
 When a day ends, the engine's optional `onDayFinished` hook fires. A day ends when she checks in, says "Not today", or the noon job marks the check-in missed. The noon job also covers a check-in she started but didn't finish. The care service (`src/care/`) then:
 
-1. Builds `CareFacts` from the database (`buildCareFacts`): the check-in answers, red flags recomputed from them by `evaluateRedFlag`, the day's camera vitals, open flags with their evidence, labs, medications, conditions and the day's memories.
+1. Builds `CareFacts` from the database (`buildCareFacts`): the check-in answers, red flags recomputed from them by `evaluateRedFlag`, the day's camera vitals, open flags with their evidence, labs, medications, conditions and the day's memories. Also the day's severity ladder (every topic at level 1 and up, highest first, from `symptom_observations`), her notes for the doctor (`checkin_notes`, by topic), the visit questions she asked that day, medicine adherence (`med_doses`: morning and evening, taken or not confirmed), label photos that didn't match her list (`med_label_checks`) and refills reminded or asked about (`med_refills`), and her sharing level.
 2. Freezes the facts in `care_summaries`.
-3. Texts two summaries over Photon Spectrum (iMessage):
-   - `doctorSummary` to the doctor: labelled data sections.
-   - `familySummary` to the emergency contact: plain words, and only flags Harriet has already heard (told or noted).
+3. Texts two summaries over Photon Spectrum (iMessage), worded by Gemini through the shared `LlmClient.writeCareMessage` (`src/care/writer.ts`) inside fixed parts:
+   - to the doctor: a few overview lines from Gemini on top of the fixed data sections of `doctorSummary` (header, check-in, RED FLAGS, SYMPTOMS by level, her notes, visit questions, medicines today, vitals, record flags, labs, medications, conditions, footer). The data lines stay fixed: in a live test a model writing the whole summary left out a level-3 follow-up.
+   - to the emergency contact: the fixed greeting (it says it is an automated assistant), the fixed paragraph about anything urgent (red-flag answers, and anything else at level 3 or more), Gemini's body, the fixed closing. Only flags Harriet has already heard (told or noted).
 
-The emergency contact always gets the full plain-language summary, whatever Harriet's Relay sharing level (team decision).
+The emergency contact gets the check-in answers whatever Harriet's Relay sharing level (team decision in PR #6). The day's extra data follows her sharing level, as her family's Relay status does (`familyVisible`): symptoms below level 3, her notes, visit questions, medicine reminders and label photos only at "all"; a refill at "all" or when she asked us to tell her family. Anything at level 3 or more is always there (her words only at "all"). Gemini only ever sees what the reader may see (`doctorView`, `familyView`), with times in her time zone and numbers rounded.
+
+Every written text is checked (`checkWritten`): no long dashes, markdown cleaned, not too long, no dosing advice, no diagnosis words, no 911 (only fixed copy says 911), and no number above 20 that isn't in the facts it was written from. No LLM, a failed call or a failed check: the fixed template goes out (`doctorSummary`, `familySummary`). A retry sends exactly the text first planned.
 
 Contacts come from `care-contacts.json` (`src/care/contacts.ts`). It holds personal data, not a secret, so it is a gitignored file rather than `.env`. Placeholder 555-01xx numbers leave the step off.
 
@@ -291,7 +293,7 @@ Replies arrive on the same Photon stream and are matched to a contact by phone n
 - a dose question from the family is sent to the doctor;
 - the doctor asking the assistant to act gets "can't act", plus the emergency contact's number.
 
-Everything else is answered from the frozen facts. Claude words the answer (`ClaudeReplyWriter`): professional for the doctor, warm but plain for the family, and never beyond the facts. `guardReply` then rejects dosing language, markdown and dashes, and anything too long. Without a key, or if Claude fails, template answers go out instead.
+Everything else is answered from the frozen facts, the summary as that contact received it, and the thread. Gemini words the answer (`GeminiCareWriter`, the app's one LLM provider): professional and data-only for the doctor, warm but plain for the family, and never beyond the facts. `checkWritten` and `guardReply` then reject dosing language, diagnosis words, invented numbers, markdown and dashes, and anything too long. Without an LLM, or if Gemini fails, template answers go out instead.
 
 Each outbound text is planned in `care_messages` under a stable key before it is sent:
 - `care:<patient>:<day>:<trigger>:<audience>` for summaries;

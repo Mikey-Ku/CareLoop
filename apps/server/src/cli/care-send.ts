@@ -1,22 +1,25 @@
 import { parseArgs } from "node:util";
 import { loadCareConfig } from "../care/config.ts";
 import { EXAMPLE_CONTACTS_PATH, CareContactsError, loadCareContacts, parseCareContacts } from "../care/contacts.ts";
-import { doctorSummary, familySummary } from "../care/copy.ts";
 import { buildCareFacts } from "../care/facts.ts";
 import { connectCareRuntime } from "../care/runtime.ts";
 import { DAY_TRIGGER } from "../care/service.ts";
+import { GeminiCareWriter, composeSummary } from "../care/writer.ts";
+import { createLlmClient } from "../llm/index.ts";
 import { loadConfig } from "../config.ts";
 import { openDatabase } from "../db/index.ts";
 import { loadRxNavCache } from "../finchnode/fixtures.ts";
 import { readFileSync } from "node:fs";
 
-// npm run care:send -- [--day YYYY-MM-DD] [--patient id] [--db path] [--dry-run]
+// npm run care:send -- [--day YYYY-MM-DD] [--patient id] [--db path] [--dry-run] [--templates]
 // Texts a day's care summary to the doctor and the emergency contact over Photon, from
 // what the app database holds for that day (the agent does this on its own when a
 // check-in ends). Sending twice for a day is a no-op. --dry-run prints both texts and
 // sends and stores nothing; it uses the example contacts when care-contacts.json is absent.
+// The texts are worded by the app's LLM (Gemini, GEMINI_API_KEY) inside their fixed parts,
+// with the fixed templates as the fallback; --templates uses the templates only.
 
-const USAGE = "usage: npm run care:send -- [--day YYYY-MM-DD] [--patient id] [--db path] [--dry-run]";
+const USAGE = "usage: npm run care:send -- [--day YYYY-MM-DD] [--patient id] [--db path] [--dry-run] [--templates]";
 
 async function main(argv: string[]): Promise<number> {
   let values;
@@ -28,6 +31,7 @@ async function main(argv: string[]): Promise<number> {
         patient: { type: "string" },
         db: { type: "string" },
         "dry-run": { type: "boolean", default: false },
+        templates: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
     }));
@@ -64,13 +68,19 @@ async function main(argv: string[]): Promise<number> {
       const loaded = loadCareContacts(careConfig.contactsPath);
       const contacts = loaded.kind === "missing" ? parseCareContacts(readFileSync(EXAMPLE_CONTACTS_PATH, "utf8"), EXAMPLE_CONTACTS_PATH) : loaded.contacts;
       const facts = buildCareFacts(db, { patientId, day, trigger: DAY_TRIGGER, rxnav: loadRxNavCache() });
-      console.log(`--- to ${contacts.doctor.name} (doctor) ---\n${doctorSummary(facts, contacts)}\n`);
-      console.log(`--- to ${contacts.emergencyContact.name} (emergency contact) ---\n${familySummary(facts, contacts)}`);
+      const llm = values.templates ? undefined : createLlmClient(config, { logger: () => {} });
+      const writer = llm ? new GeminiCareWriter(llm) : undefined;
+      const log = (line: string) => console.error(line);
+      const doctor = await composeSummary(writer, { audience: "doctor", facts, contacts }, log);
+      const family = await composeSummary(writer, { audience: "family", facts, contacts }, log);
+      console.log(`--- to ${contacts.doctor.name} (doctor, ${doctor.by === "writer" ? "worded by the LLM" : "template"}) ---\n${doctor.text}\n`);
+      console.log(`--- to ${contacts.emergencyContact.name} (emergency contact, ${family.by === "writer" ? "worded by the LLM" : "template"}) ---\n${family.text}`);
       return 0;
     }
 
     const clock = { now: () => new Date().toISOString() };
-    const care = await connectCareRuntime({ config: careConfig, db, patientId, clock, log: (line) => console.log(line) });
+    const llm = values.templates ? undefined : createLlmClient(config);
+    const care = await connectCareRuntime({ config: careConfig, db, patientId, clock, log: (line) => console.log(line), llm });
     if (!care) return 1;
     try {
       const result = await care.service.sendSummaries(day);

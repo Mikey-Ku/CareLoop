@@ -63,10 +63,10 @@ The assistant answers their replies, grounded in that summary. If the emergency 
 
 1. Copy `care-contacts.example.json` to `care-contacts.json` at the repo root. The real file is gitignored.
 2. Put in the doctor's and the emergency contact's names and phone numbers. Any common format works, for example `(734) 555-1234` or `+17345551234`. A 10-digit number is taken as US or Canada.
-3. In `.env`, set `SPECTRUM_PROJECT_ID` and `SPECTRUM_PROJECT_SECRET` from the Photon dashboard. Optionally set `ANTHROPIC_API_KEY` so Claude words the follow-up answers; without it, template answers are sent.
+3. In `.env`, set `SPECTRUM_PROJECT_ID` and `SPECTRUM_PROJECT_SECRET` from the Photon dashboard. With `GEMINI_API_KEY` set, Gemini words the summaries and the follow-up answers inside fixed parts; without it, the fixed templates are sent.
 4. Have both contacts text the Photon line once before the first summary. Apple flags cold messages as junk.
 
-`npm run agent` turns the summaries on by itself when the file holds real numbers and the Photon variables are set. Otherwise it logs why they are off. To preview the two texts for a day: `npm run care:send -- --day 2026-09-01 --dry-run`.
+`npm run agent` turns the summaries on by itself when the file holds real numbers and the Photon variables are set. Otherwise it logs why they are off. To preview the two texts for a day: `npm run care:send -- --day 2026-09-01 --dry-run` (add `--templates` for the fixed templates only).
 
 ## Usage
 
@@ -77,7 +77,7 @@ All commands run in `apps/server`.
 | `npm test` | Runs the test suite (vitest). |
 | `npm run lint` | Typechecks the project (`tsc --noEmit`). |
 | `npm run packet -- patient-demo-polypharmacy` | Prints Harriet's context packet built from the recorded fixtures. Add `--live` to read the FinchNode demo API instead. |
-| `npm run care:send -- [--day YYYY-MM-DD] [--dry-run]` | Texts a day's care summaries to the doctor and the emergency contact over Photon (once per day; `--dry-run` only prints them). |
+| `npm run care:send -- [--day YYYY-MM-DD] [--dry-run] [--templates]` | Texts a day's care summaries to the doctor and the emergency contact over Photon (once per day; `--dry-run` only prints them; `--templates` skips Gemini). |
 | `npm run record-fixtures` | Re-records the fixtures in `fixtures/` from the FinchNode demo API. |
 | `npm run dev` | Starts the server on `PORT` (default 3000). For now it serves only `GET /health`; `/webhooks/relay` answers 501 until run 2. |
 | `npm run relay:check` | Checks your Relay setup: token, no webhook subscriptions, who has messaged the agent. |

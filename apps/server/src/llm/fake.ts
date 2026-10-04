@@ -1,5 +1,6 @@
 import type {
   AnswerMapping,
+  CareMessageInput,
   CheckinExtraction,
   ClassifyInput,
   ExtractCheckinInput,
@@ -24,6 +25,7 @@ export type FakeLlmScript = {
   classifyMessage?: (input: ClassifyInput) => MessageClassification | Error;
   extractCheckin?: (input: ExtractCheckinInput) => CheckinExtraction | Error;
   readImage?: (input: ReadImageInput) => ImageReading | Error;
+  writeCareMessage?: (input: CareMessageInput) => string | Error;
 };
 
 export type FakeLlmCall =
@@ -31,7 +33,8 @@ export type FakeLlmCall =
   | { method: "smallTalk"; input: SmallTalkInput }
   | { method: "classifyMessage"; input: ClassifyInput }
   | { method: "extractCheckin"; input: ExtractCheckinInput }
-  | { method: "readImage"; input: ReadImageInput };
+  | { method: "readImage"; input: ReadImageInput }
+  | { method: "writeCareMessage"; input: CareMessageInput };
 
 export class FakeLlmClient implements LlmClient {
   readonly provider = "fake";
@@ -104,6 +107,16 @@ export class FakeLlmClient implements LlmClient {
     return cloneReading(result);
   }
 
+  /** Unscripted: unavailable, so the caller sends its fixed template. */
+  async writeCareMessage(input: CareMessageInput, options?: LlmCallOptions): Promise<string> {
+    this.calls.push({ method: "writeCareMessage", input });
+    throwIfAborted(options);
+    if (!this.script.writeCareMessage) throw new LlmUnavailableError("fake: no writeCareMessage script");
+    const result = this.script.writeCareMessage(input);
+    if (result instanceof Error) throw result;
+    return result;
+  }
+
   /** Inputs of the mapAnswer calls only, in order. */
   get mapAnswerCalls(): MapAnswerInput[] {
     return this.calls.flatMap((c) => (c.method === "mapAnswer" ? [c.input] : []));
@@ -122,6 +135,11 @@ export class FakeLlmClient implements LlmClient {
   /** Inputs of the extractCheckin calls only, in order. */
   get extractCalls(): ExtractCheckinInput[] {
     return this.calls.flatMap((c) => (c.method === "extractCheckin" ? [c.input] : []));
+  }
+
+  /** Inputs of the writeCareMessage calls only, in order. */
+  get careMessageCalls(): CareMessageInput[] {
+    return this.calls.flatMap((c) => (c.method === "writeCareMessage" ? [c.input] : []));
   }
 
   /** Inputs of the readImage calls only, in order. */

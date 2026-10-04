@@ -203,3 +203,17 @@ Retest on the phone with `FOLLOW_UP_DELAY_MINUTES=2`; add a second phone as fami
 **Recommended next step:** Create the Photon project, fill in `care-contacts.json`, have both contacts text the line once, then `npm run care:send -- --dry-run` and `npm run agent -- --checkin-now`.
 
 **Open questions:** `FEEDBACK.md` (Photon setup).
+
+## Lane A (check-in and medicines): 2026-10-03, merge PR #6 and care summaries on Gemini
+
+**Goal of this run:** Merge Griz-Bit's care summaries over Photon (PR #6) with the medication helper, word them with Gemini (one LLM provider), and add the day's new data to them.
+
+**What was built:**
+- Merge: PR #6's migration is migration 11 (after the medication helper's 10). The engine's `onDayFinished` hook fires at the new finish points (finishCheckedIn, notToday, runMissedCheckin), after delivery, errors swallowed. Simulator keeps `--llm`, `/as` and the meds commands with `--photon`, `/summary`, `/doctor`, `/family`.
+- `LlmClient.writeCareMessage` (Gemini adapter, FakeLlmClient scripted). `src/care/writer.ts` (`GeminiCareWriter`) replaces `claude-writer.ts`; `@anthropic-ai/sdk` removed. Doctor: Gemini overview lines over the fixed data sections. Family: fixed greeting (AI disclosure), fixed urgent paragraph, Gemini body, fixed closing. Replies: Gemini from the facts, the summary as sent and the thread. `checkWritten` rejects dashes, dosing advice, diagnosis words, 911 and numbers not in the facts; any failure sends the template.
+- Care facts: severity ladder by topic, her notes, visit questions, medicine doses, label mismatches, refills, sharing level. Doctor template gets them as data lines; family template and Gemini's family view only what the sharing level allows (level 3 and up always).
+
+**What was skipped or changed from spec:** In a live test Gemini writing the whole doctor summary left out a level-3 follow-up, so the doctor's data lines stay fixed and Gemini writes only the overview. Visit questions, label checks and refills are matched to the day by their UTC date.
+
+**Open questions:** `FEEDBACK.md` (emergency contact and the sharing level).
+

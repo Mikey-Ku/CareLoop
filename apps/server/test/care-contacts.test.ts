@@ -130,25 +130,22 @@ describe("the contacts file", () => {
 });
 
 describe("care config and the runtime's preconditions", () => {
-  it("reads Photon and Anthropic settings, keeping secrets out of printed config", () => {
+  it("reads Photon settings, keeping the secret out of printed config", () => {
     const config = loadCareConfig({
       SPECTRUM_PROJECT_ID: "proj_1",
       SPECTRUM_PROJECT_SECRET: "spectrum_SECRET",
-      ANTHROPIC_API_KEY: "sk-ant-SECRET",
       CARE_CONTACTS_PATH: "/tmp/x.json",
     });
     expect(config.photon?.projectId).toBe("proj_1");
     expect(config.photon?.projectSecret).toBe("spectrum_SECRET");
-    expect(config.anthropic?.apiKey).toBe("sk-ant-SECRET");
-    expect(config.anthropic?.model).toBe("claude-sonnet-4-5");
     expect(config.contactsPath).toBe("/tmp/x.json");
     expect(JSON.stringify(config)).not.toMatch(/SECRET/);
+    expect(Object.keys(config)).toEqual(["contactsPath", "photon"]); // no provider key of its own: the app's LLM words the texts
   });
 
-  it("is off without both Photon variables, and uses templates without an Anthropic key", () => {
-    const config = loadCareConfig({ SPECTRUM_PROJECT_ID: "proj_1", SPECTRUM_PROJECT_SECRET: "", ANTHROPIC_API_KEY: "  " });
+  it("is off without both Photon variables", () => {
+    const config = loadCareConfig({ SPECTRUM_PROJECT_ID: "proj_1", SPECTRUM_PROJECT_SECRET: "" });
     expect(config.photon).toBeUndefined();
-    expect(config.anthropic).toBeUndefined();
     expect(config.contactsPath).toBe(DEFAULT_CONTACTS_PATH);
   });
 

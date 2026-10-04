@@ -171,6 +171,32 @@ export class ImageRejectedError extends Error {
   }
 }
 
+/** Who a care message is for: her doctor (data) or her emergency contact (plain words). */
+export type CareMessageAudience = "doctor" | "family";
+
+/**
+ * One text to her doctor or her emergency contact over Photon (src/care). The model only words what
+ * `facts` hold; fixed rules decided everything in them. Without `question` it writes the body of the
+ * day's summary (the app adds the fixed greeting, red-flag lines and closing); with one, a reply.
+ */
+export type CareMessageInput = {
+  audience: CareMessageAudience;
+  /** Who reads it, as named in the text ("Dr. Patel", "Sarah"). */
+  recipientName: string;
+  seniorName: string;
+  /** Everything the text may say, as plain data. Already cut to what this reader may see. */
+  facts: unknown;
+  /** A text they sent; absent: write the day's summary body. */
+  question?: string | undefined;
+  /** For a reply: the summary as they received it. */
+  summaryText?: string | undefined;
+  /** For a reply: the conversation so far, oldest first, without `question`. */
+  thread?: { from: "assistant" | "contact"; text: string }[] | undefined;
+};
+
+/** The model said this message needs no reply (an acknowledgment, a thank-you). */
+export const CARE_NO_REPLY = "NO_REPLY";
+
 export type LlmCallOptions = {
   /** Aborts the whole call, including retries and model fallbacks. */
   signal?: AbortSignal;
@@ -187,6 +213,12 @@ export interface LlmClient {
   extractCheckin(input: ExtractCheckinInput, options?: LlmCallOptions): Promise<CheckinExtraction>;
   /** Read a photo she sent: a medicine label (read as printed, never interpreted) or discharge papers. */
   readImage(input: ReadImageInput, options?: LlmCallOptions): Promise<ImageReading>;
+  /**
+   * Word one text to her doctor or emergency contact from the given facts (src/care). Returns the text
+   * (CARE_NO_REPLY when a reply isn't needed). Throws LlmUnavailableError when it is empty, too long or
+   * has a long dash; the caller then sends its fixed template.
+   */
+  writeCareMessage(input: CareMessageInput, options?: LlmCallOptions): Promise<string>;
 }
 
 /** Every model in the chain failed or the time budget ran out. Callers fall back to buttons or a template. */

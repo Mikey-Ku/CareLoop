@@ -7,7 +7,9 @@ import {
   latestSentSummary,
   markOutboundFailed,
   markOutboundSent,
+  outboundForKey,
   planOutbound,
+  sentSummaryText,
   recordInbound,
   type CareSummaryRow,
 } from "../db/care.ts";
@@ -15,9 +17,10 @@ import type { Db } from "../db/index.ts";
 import type { RxNavCache } from "../finchnode/rxnav.ts";
 import type { CareInbound, CareMessenger } from "../photon/care-messenger.ts";
 import { contactForPhone, maskPhone, type CareAudience, type CareContact, type CareContacts } from "./contacts.ts";
-import { doctorSummary, familySummary, noSummaryReply } from "./copy.ts";
+import { noSummaryReply } from "./copy.ts";
 import { buildCareFacts } from "./facts.ts";
 import { classifyInbound, fixedReply, writeReply, type ReplyWriter } from "./replies.ts";
+import { composeSummary, templateSummary } from "./writer.ts";
 
 // After a check-in (or, once lanes 2 and 3 land, a call) the day's facts are frozen into a
 // care summary and texted over Photon: a data summary to her doctor and a plain-language
@@ -42,7 +45,7 @@ export type CareServiceDeps = {
   messenger: CareMessenger;
   clock: Clock;
   rxnav: () => RxNavCache;
-  /** Words follow-up answers. Without one, template answers are sent. */
+  /** Words the summaries' bodies and follow-up answers (src/care/writer.ts, Gemini). Without one, templates are sent. */
   writer?: ReplyWriter;
   log?: (line: string) => void;
 };
@@ -54,8 +57,18 @@ export function createCareService(deps: CareServiceDeps) {
   const log = deps.log ?? ((line: string) => console.log(line));
 
   const contactFor = (audience: CareAudience): CareContact => (audience === "doctor" ? contacts.doctor : contacts.emergencyContact);
-  const renderFor = (summary: CareSummaryRow, audience: CareAudience) =>
-    audience === "doctor" ? doctorSummary(summary.facts, contacts) : familySummary(summary.facts, contacts);
+  /** The summary as this reader got it (written or template); the template when none went out yet. */
+  const sentText = (summary: CareSummaryRow, audience: CareAudience) =>
+    sentSummaryText(db, summary.id, audience) ?? templateSummary(audience, summary.facts, contacts);
+
+  /** The text for a summary not planned yet: written by the writer inside the fixed parts, else the template. */
+  async function summaryText(summary: CareSummaryRow, audience: CareAudience, key: string): Promise<string> {
+    const planned = outboundForKey(db, key);
+    if (planned) return planned.text; // a retry sends exactly what was planned
+    const { text, by } = await composeSummary(deps.writer, { audience, facts: summary.facts, contacts }, log);
+    log(`[care] ${audience} summary ${by === "writer" ? "worded by the LLM" : "from the template"}`);
+    return text;
+  }
 
   /** Send one planned text unless it already went out. Never throws. */
   async function deliver(input: {
@@ -86,8 +99,8 @@ export function createCareService(deps: CareServiceDeps) {
       getCareSummary(db, patientId, day, trigger) ??
       insertCareSummary(db, { patientId, day, trigger, facts: buildCareFacts(db, { patientId, day, trigger, rxnav: deps.rxnav() }), createdAt: clock.now() });
     const keyFor = (audience: CareAudience) => `care:${patientId}:${day}:${trigger}:${audience}`;
-    const doctor = await deliver({ audience: "doctor", kind: "summary", summaryId: summary.id, key: keyFor("doctor"), text: renderFor(summary, "doctor") });
-    const family = await deliver({ audience: "family", kind: "summary", summaryId: summary.id, key: keyFor("family"), text: renderFor(summary, "family") });
+    const doctor = await deliver({ audience: "doctor", kind: "summary", summaryId: summary.id, key: keyFor("doctor"), text: await summaryText(summary, "doctor", keyFor("doctor")) });
+    const family = await deliver({ audience: "family", kind: "summary", summaryId: summary.id, key: keyFor("family"), text: await summaryText(summary, "family", keyFor("family")) });
     return { summaryId: summary.id, doctor, family };
   }
 
@@ -123,7 +136,7 @@ export function createCareService(deps: CareServiceDeps) {
                 contact,
                 contacts,
                 facts: summary.facts,
-                summaryText: renderFor(summary, audience),
+                summaryText: sentText(summary, audience),
                 thread: thread.map((m) => ({ from: m.direction === "outbound" ? "assistant" : "contact", text: m.text })),
                 message: message.text,
               },

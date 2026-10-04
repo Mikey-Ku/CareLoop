@@ -1,14 +1,15 @@
 import type { Clock } from "../checkin/engine-types.ts";
 import type { DayFinished } from "../checkin/engine.ts";
 import type { Db } from "../db/index.ts";
+import type { LlmClient } from "../llm/types.ts";
 import { loadRxNavCache } from "../finchnode/fixtures.ts";
 import type { CareInboundSource, CareMessenger } from "../photon/care-messenger.ts";
 import { PhotonMessenger, connectPhoton } from "../photon/photon-messenger.ts";
-import { ClaudeReplyWriter } from "./claude-writer.ts";
 import type { CareConfig } from "./config.ts";
 import { loadCareContacts, type CareContacts } from "./contacts.ts";
 import type { ReplyWriter } from "./replies.ts";
 import { createCareService, type CareService } from "./service.ts";
+import { GeminiCareWriter } from "./writer.ts";
 
 // The care summaries as the agent runs them: the service, its Photon listener for replies,
 // and the two hooks the agent calls (a check-in ended; the noon job ran). startCareRuntime
@@ -82,8 +83,8 @@ export function startCareRuntime(deps: CareRuntimeDeps): CareRuntime {
 }
 
 /**
- * The real runtime for `npm run agent`: contacts file, Photon and (optionally) Claude from
- * CareConfig. Returns undefined, with a log line saying why, when the file or the Photon
+ * The real runtime for `npm run agent`: contacts file and Photon from CareConfig, and the
+ * app's LlmClient (Gemini) to word the texts when there is one. Returns undefined, with a log line saying why, when the file or the Photon
  * credentials are missing or the file still holds the example numbers.
  */
 export async function connectCareRuntime(input: {
@@ -92,6 +93,8 @@ export async function connectCareRuntime(input: {
   patientId: string;
   clock: Clock;
   log: (line: string) => void;
+  /** The app's LLM (Gemini). Without one, the fixed templates go out. */
+  llm?: LlmClient | undefined;
 }): Promise<CareRuntime | undefined> {
   const { config, log } = input;
   const loaded = loadCareContacts(config.contactsPath);
@@ -109,8 +112,8 @@ export async function connectCareRuntime(input: {
   }
   const port = await connectPhoton(config.photon);
   const photon = new PhotonMessenger(port, log);
-  const writer = config.anthropic ? new ClaudeReplyWriter({ apiKey: config.anthropic.apiKey, model: config.anthropic.model }) : undefined;
-  log(`[care] Photon connected; summaries go to the doctor and the emergency contact; replies ${writer ? "worded by Claude" : "from templates (no ANTHROPIC_API_KEY)"}`);
+  const writer = input.llm ? new GeminiCareWriter(input.llm) : undefined;
+  log(`[care] Photon connected; summaries go to the doctor and the emergency contact; texts ${writer ? `worded by ${input.llm?.provider ?? "the LLM"}, templates as the fallback` : "from templates (no LLM configured)"}`);
   return startCareRuntime({
     db: input.db,
     patientId: input.patientId,

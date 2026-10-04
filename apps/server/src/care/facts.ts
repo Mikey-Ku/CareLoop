@@ -3,10 +3,12 @@ import { QUESTION_BANK, isWorryingAnswer } from "../context/questions.ts";
 import { evaluateRedFlag } from "../checkin/red-flags.ts";
 import { getCheckin, getCheckinPatient, type CheckinRow } from "../db/checkins.ts";
 import { familyChats } from "../db/family.ts";
-import { latestSnapshot, type Db } from "../db/index.ts";
+import { getSharing, latestSnapshot, type Db, type SharingLevel } from "../db/index.ts";
+import { checkinNotes } from "../db/notes.ts";
 import { normalizeHealthRecord } from "../finchnode/normalize.ts";
 import type { RxNavCache } from "../finchnode/rxnav.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
+import { plainName } from "../meds/schedule.ts";
 import type { Evidence, RuleId, Severity } from "../rules/index.ts";
 
 // The facts behind one care summary: what she said in the day's check-in (and, once
@@ -15,11 +17,47 @@ import type { Evidence, RuleId, Severity } from "../rules/index.ts";
 // from SQLite and the latest stored snapshot only; nothing here calls FinchNode, Relay
 // or an LLM. Red flags are recomputed from her stored answers with the same fixed rule
 // the check-in used (evaluateRedFlag), so the summary never decides what is urgent.
+//
+// Also the day's data from the rest of the app: the severity ladder's levels and topics
+// (symptom_observations), her notes for the doctor (checkin_notes), her visit questions,
+// medicine adherence (med_doses), label photos that didn't match her list (med_label_checks)
+// and refills reminded or asked about (med_refills). Everything is plain data; what the
+// emergency contact may see of it is cut by her sharing level in src/care/copy.ts.
 
 export type CheckinOutcome = "checked_in" | "not_today" | "missed" | "in_progress" | "none";
 
+/** Ladder levels (docs/DESIGN.md "Severity ladder") in plain words. */
+export const LEVEL_WORDS: Record<number, string> = {
+  1: "small, everyday",
+  2: "worth watching",
+  3: "call the doctor today",
+  4: "emergency",
+  5: "crisis",
+};
+
+/** One thing the ladder levelled today, 1 and up. */
+export type CareSymptom = {
+  level: number;
+  /** The ladder's topic: a question id, a safety kind, or her own topic words. */
+  topic: string;
+  /** The topic in plain words ("breathing when lying flat", "knee pain", "a medicine label check"). */
+  about: string;
+  /** Her words for it, when she typed them. */
+  words: string | null;
+  /** How it came in: a tap, her typed words, a follow-up answer, the safety screen or a label photo. */
+  source: string;
+};
+
 export type CareFacts = {
-  patient: { id: string; preferredName: string; fullName: string | null; age: number | null; timezone: string | null };
+  patient: {
+    id: string;
+    preferredName: string;
+    fullName: string | null;
+    age: number | null;
+    timezone: string | null;
+    /** Her sharing level when the summary was built; cuts what the emergency contact sees of the day's extra data. */
+    sharing: SharingLevel;
+  };
   /** Check-in date (YYYY-MM-DD) the summary is about. */
   day: string;
   /** What sent it: "day" (check-in ended or noon), "call:<id>", "manual:<n>". */
@@ -57,7 +95,52 @@ export type CareFacts = {
   recentLabs: ContextPacket["recentLabs"];
   /** Things she told the voice companion that day, newest first (memories, lane 2). */
   memories: string[];
+  /** The day's severity ladder: everything at level 1 and up, highest first (symptom_observations). */
+  severity: { highest: CareSymptom | null; symptoms: CareSymptom[] };
+  /** Her own words kept for her doctor in the day's check-in, by topic (checkin_notes). */
+  notes: { about: string; text: string }[];
+  /** Questions she asked today, for her next visit (visit_questions). */
+  visitQuestions: string[];
+  medicines: {
+    /** The day's medicines reminders: "taken" after her tap, else "not confirmed". */
+    doses: { slot: "morning" | "evening"; status: "taken" | "not confirmed" }[];
+    /** Label photos today that didn't match her list. */
+    labelMismatches: { outcome: "strength_differs" | "not_on_list"; label: string; onHerList: string | null }[];
+    /** Refills she was reminded about today, or said she asked for today. */
+    refills: { medicine: string; runsOut: string; status: "reminded" | "asked" | "snoozed"; familyTold: boolean }[];
+  };
 };
+
+/** Topic words for the doctor and family: a question's subject, a safety kind, or her own topic words. */
+const TOPIC_ABOUT: Record<string, string> = {
+  "hf-ankle-swelling": "ankle swelling",
+  "hf-breathing-lying-flat": "breathing when lying flat",
+  "anticoagulant-bleeding": "bruising or bleeding",
+  "dizzy-on-standing": "dizziness on standing",
+  "morning-medicines": "morning medicines",
+  mood: "mood",
+  crisis: "a crisis (safety screen)",
+  urgent_symptom: "an urgent symptom (safety screen)",
+  "medicine check": "a medicine label that didn't match her list",
+  general: "a general follow-up",
+};
+
+/** A topic in plain words: from the table, else her own short topic words, else "another symptom". */
+export function topicAbout(topic: string): string {
+  const known = TOPIC_ABOUT[topic];
+  if (known) return known;
+  const words = topic.replace(/\s+/g, " ").trim().toLowerCase();
+  return words && words.length <= 40 && /^[a-z][a-z' -]*$/.test(words) ? words : "another symptom";
+}
+
+/** Her words, one line, at most 200 characters. */
+function oneLine(text: string | null | undefined): string | null {
+  const t = (text ?? "").replace(/\s+/g, " ").trim();
+  if (!t) return null;
+  return t.length > 200 ? `${t.slice(0, 200).trimEnd()}...` : t;
+}
+
+type ObservationRow = { topic: string; level: number; source: string; words: string | null };
 
 export type BuildCareFactsInput = { patientId: string; day: string; trigger: string; rxnav: RxNavCache };
 
@@ -128,6 +211,51 @@ export function buildCareFacts(db: Db, input: BuildCareFactsInput): CareFacts {
       .all(patientId, day) as { text: string }[]
   ).map((m) => m.text);
 
+  // The severity ladder: one entry per topic at its highest level today, highest first.
+  const observed = db
+    .prepare(`SELECT topic, level, source, words FROM symptom_observations WHERE patient_id = ? AND day = ? AND level >= 1 ORDER BY level DESC, id`)
+    .all(patientId, day) as ObservationRow[];
+  const seenTopics = new Set<string>();
+  const symptoms: CareSymptom[] = [];
+  for (const o of observed) {
+    if (seenTopics.has(o.topic)) continue;
+    seenTopics.add(o.topic);
+    symptoms.push({ level: o.level, topic: o.topic, about: topicAbout(o.topic), words: oneLine(o.words), source: o.source });
+  }
+
+  const notes = checkin ? checkinNotes(db, checkin.id).map((n) => ({ about: topicAbout(n.questionId ?? n.topic), text: oneLine(n.text) ?? "" })).filter((n) => n.text) : [];
+  const visitQuestions = (
+    db.prepare(`SELECT text FROM visit_questions WHERE patient_id = ? AND substr(created_at, 1, 10) = ? ORDER BY created_at, id`).all(patientId, day) as { text: string }[]
+  ).flatMap((q) => oneLine(q.text) ?? []);
+
+  const doses = (
+    db.prepare(`SELECT slot, status FROM med_doses WHERE patient_id = ? AND day = ? ORDER BY CASE slot WHEN 'morning' THEN 0 ELSE 1 END`).all(patientId, day) as {
+      slot: "morning" | "evening";
+      status: string;
+    }[]
+  ).map((d) => ({ slot: d.slot, status: d.status === "taken" ? ("taken" as const) : ("not confirmed" as const) }));
+  const meds = record?.medications ?? [];
+  const labelMismatches = (
+    db
+      .prepare(
+        `SELECT outcome, medication_key AS medicationKey, label_medicine AS labelMedicine, label_strength AS labelStrength FROM med_label_checks
+         WHERE patient_id = ? AND substr(created_at, 1, 10) = ? AND outcome IN ('strength_differs', 'not_on_list') ORDER BY id`,
+      )
+      .all(patientId, day) as { outcome: "strength_differs" | "not_on_list"; medicationKey: string | null; labelMedicine: string | null; labelStrength: string | null }[]
+  ).map((l) => {
+    const listed = l.medicationKey ? meds.find((m) => m.key === l.medicationKey) : undefined;
+    const label = [l.labelMedicine ?? "a medicine", l.labelStrength].filter(Boolean).join(" ");
+    return { outcome: l.outcome, label, onHerList: listed ? plainName(listed) : null };
+  });
+  const refills = (
+    db
+      .prepare(
+        `SELECT name, run_out AS runOut, status, family_told_at AS familyToldAt FROM med_refills
+         WHERE patient_id = ? AND (last_reminded_day = ? OR substr(updated_at, 1, 10) = ?) ORDER BY run_out, id`,
+      )
+      .all(patientId, day, day) as { name: string; runOut: string; status: "reminded" | "asked" | "snoozed"; familyToldAt: string | null }[]
+  ).map((r) => ({ medicine: r.name, runsOut: r.runOut, status: r.status, familyTold: r.familyToldAt !== null }));
+
   return {
     patient: {
       id: patientId,
@@ -135,6 +263,7 @@ export function buildCareFacts(db: Db, input: BuildCareFactsInput): CareFacts {
       fullName: record?.demographics.name ?? null,
       age: packet?.patient.age ?? null,
       timezone: (db.prepare(`SELECT timezone FROM patients WHERE id = ?`).get(patientId) as { timezone: string | null }).timezone,
+      sharing: getSharing(db, patientId) ?? "status",
     },
     day,
     trigger: input.trigger,
@@ -155,5 +284,9 @@ export function buildCareFacts(db: Db, input: BuildCareFactsInput): CareFacts {
     medications: packet?.medications ?? [],
     recentLabs: packet?.recentLabs ?? [],
     memories,
+    severity: { highest: symptoms[0] ?? null, symptoms },
+    notes,
+    visitQuestions,
+    medicines: { doses, labelMismatches, refills },
   };
 }

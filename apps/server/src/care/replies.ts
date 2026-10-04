@@ -8,7 +8,7 @@ import type { CareFacts } from "./facts.ts";
 //     symptom) gets the fixed doctor-first reply, never generated text;
 //   - the emergency contact asking about doses or changing a medicine is sent to the doctor;
 //   - the doctor asking the assistant to act (call 911, send her in) gets a fixed "can't act".
-// Everything else is a question or statement about the summary: a ReplyWriter (Claude)
+// Everything else is a question or statement about the summary: a ReplyWriter (Gemini, src/care/writer.ts)
 // words an answer from the stored facts only, in the audience's tone; its text is checked
 // by guardReply, and the template answer is used when there is no writer or it fails.
 
@@ -70,6 +70,8 @@ export type ReplyRequest = {
 export interface ReplyWriter {
   /** The reply text, or null when the message needs no reply. Throws on failure; the caller falls back. */
   write(request: ReplyRequest): Promise<string | null>;
+  /** The body of the day's summary for one reader (src/care/writer.ts). Throws on failure; the caller sends the template. */
+  writeSummary?(request: { audience: CareAudience; facts: CareFacts; contacts: CareContacts }): Promise<string>;
 }
 
 export const MAX_REPLY_CHARS: Record<CareAudience, number> = { doctor: 1200, family: 800 };

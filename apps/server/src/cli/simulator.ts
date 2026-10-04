@@ -33,6 +33,7 @@ import type { InboundMessage, SentMessage } from "../relay/messenger.ts";
 import type { ExtractedPaper } from "../rules/paper-diff.ts";
 import { EXAMPLE_CONTACTS_PATH, parseCareContacts } from "../care/contacts.ts";
 import { startCareRuntime } from "../care/runtime.ts";
+import { GeminiCareWriter } from "../care/writer.ts";
 import { FakeCareMessenger, type FakeCareText } from "../photon/fake-care-messenger.ts";
 import { CARE_HELP_LINES, HELP_LINES, clockTime, painter, renderMessage, renderTable, type Painter, type Style } from "./sim-render.ts";
 
@@ -232,7 +233,8 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
       if (event.kind === "set") note(`${chatLabel(event.chatId)} shows "${event.label}".`);
     },
   });
-  // Care summaries over Photon, faked: the example contacts, template replies (no Claude).
+  // Care summaries over Photon, faked: the example contacts. With --llm the texts are worded by the
+  // LLM (src/care/writer.ts) inside their fixed parts; without it, the fixed templates.
   const careContacts = parseCareContacts(readFileSync(EXAMPLE_CONTACTS_PATH, "utf8"), EXAMPLE_CONTACTS_PATH);
   const photonLabel = (phone: string) =>
     phone === careContacts.doctor.phone
@@ -251,6 +253,7 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     contacts: careContacts,
     clock,
     messenger: photon,
+    ...(options.llm ? { writer: new GeminiCareWriter(options.llm) } : {}),
     log: (line) => note(line.replace(/^\[care\] /, "Photon: ")),
   });
   let photonCount = 0;
@@ -283,6 +286,7 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
       if (next) return next;
       return options.llm ? options.llm.readImage(input, o) : Promise.reject(new LlmUnavailableError("sim: no /photo --as reading left"));
     },
+    writeCareMessage: (input, o) => (options.llm ? options.llm.writeCareMessage(input, o) : Promise.reject(new LlmUnavailableError("sim: no LLM"))),
   };
   const deps: EngineDeps = {
     db,

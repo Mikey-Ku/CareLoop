@@ -107,7 +107,7 @@ export type AgentDeps = {
    * Care summaries over Photon (src/care/runtime.ts), built once the patient id is known.
    * Undefined (or returning undefined) leaves them off.
    */
-  care?: (ctx: { patientId: string; db: Db; clock: Clock; log: (line: string) => void }) => Promise<CareRuntime | undefined>;
+  care?: (ctx: { patientId: string; db: Db; clock: Clock; log: (line: string) => void; llm: LlmClient | undefined }) => Promise<CareRuntime | undefined>;
 };
 
 export type RunningAgent = {
@@ -191,7 +191,8 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   // 3a. Care summaries to her doctor and emergency contact over Photon, when configured.
   let care: CareRuntime | undefined;
   try {
-    care = await deps.care?.({ patientId, db, clock, log });
+    // The care texts are worded by the same LLM as the check-in (Gemini), templates as the fallback.
+    care = await deps.care?.({ patientId, db, clock, log, llm: deps.llm });
   } catch (error) {
     log(`[agent] care summaries over Photon are off: ${errorSummary(error)}`);
   }

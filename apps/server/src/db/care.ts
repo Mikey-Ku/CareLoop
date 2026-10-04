@@ -128,3 +128,16 @@ export function careThread(db: Db, patientId: string, audience: CareAudience, li
 export function careMessages(db: Db, patientId: string): CareMessageRow[] {
   return db.prepare(`SELECT ${MESSAGE_COLUMNS} FROM care_messages WHERE patient_id = ? ORDER BY id`).all(patientId) as CareMessageRow[];
 }
+
+/** The outbound text planned under this key, if any (sent or not). */
+export function outboundForKey(db: Db, key: string): CareMessageRow | undefined {
+  return db.prepare(`SELECT ${MESSAGE_COLUMNS} FROM care_messages WHERE idempotency_key = ?`).get(key) as CareMessageRow | undefined;
+}
+
+/** The summary text as it went to `audience` (written or template), if it went out. */
+export function sentSummaryText(db: Db, summaryId: number, audience: CareAudience): string | undefined {
+  const row = db
+    .prepare(`SELECT text FROM care_messages WHERE summary_id = ? AND audience = ? AND kind = 'summary' AND sent_at IS NOT NULL ORDER BY id DESC LIMIT 1`)
+    .get(summaryId, audience) as { text: string } | undefined;
+  return row?.text;
+}

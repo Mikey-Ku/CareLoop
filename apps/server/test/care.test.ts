@@ -2,12 +2,14 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MISSED_JOB, startAgent, type AgentDeps, type RunningAgent } from "../src/agent.ts";
-import { ClaudeReplyWriter, NO_REPLY, systemPrompt } from "../src/care/claude-writer.ts";
 import { parseCareContacts, type CareContacts } from "../src/care/contacts.ts";
 import { doctorSummary, familySummary } from "../src/care/copy.ts";
 import { buildCareFacts, type CareFacts } from "../src/care/facts.ts";
 import { classifyInbound, guardReply, type ReplyRequest, type ReplyWriter } from "../src/care/replies.ts";
 import { startCareRuntime, type CareRuntime } from "../src/care/runtime.ts";
+import { GeminiCareWriter, checkWritten, doctorView, familyView } from "../src/care/writer.ts";
+import { CARE_NO_REPLY, FakeLlmClient, LlmUnavailableError, type CareMessageInput } from "../src/llm/index.ts";
+import { careMessageSystemPrompt } from "../src/llm/gemini.ts";
 import { createCheckinEngine, type DayFinished } from "../src/checkin/engine.ts";
 import type { CheckinEngine } from "../src/checkin/engine-types.ts";
 import { parseScript, runSimulation, snapshotLoader } from "../src/cli/simulator.ts";
@@ -15,7 +17,11 @@ import { loadConfig } from "../src/config.ts";
 import { careMessages, latestSentSummary } from "../src/db/care.ts";
 import { getCheckin } from "../src/db/checkins.ts";
 import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
-import { openDatabase, upsertPatient, type Db } from "../src/db/index.ts";
+import { openDatabase, setSharing, upsertPatient, type Db } from "../src/db/index.ts";
+import { insertDose, insertLabelCheck, markRefillReminded, setDoseStatus } from "../src/db/meds.ts";
+import { addCheckinNote, addVisitQuestion } from "../src/db/notes.ts";
+import { addObservation } from "../src/db/observations.ts";
+import { normalizeHealthRecord } from "../src/finchnode/normalize.ts";
 import { REPO_ROOT, loadRxNavCache, loadSnapshot } from "../src/finchnode/fixtures.ts";
 import { FakeCareMessenger } from "../src/photon/fake-care-messenger.ts";
 import { PhotonMessenger, type PhotonPort, type PortMessage } from "../src/photon/photon-messenger.ts";
@@ -151,6 +157,84 @@ describe("care facts", () => {
     expect(facts().checkin.outcome).toBe("in_progress");
     await engine.runMissedCheckin(P, DAY1);
     expect(facts().checkin.outcome).toBe("missed");
+  });
+});
+
+describe("care facts: the day's severity, notes and medicines", () => {
+  beforeEach(() => setup());
+
+  /** A day with a little of everything: a level-1 and a level-3 typed symptom, a note, a visit question, medicines. */
+  async function busyDay(): Promise<void> {
+    await checkIn();
+    const c = getCheckin(db, P, DAY1)!;
+    const at = `${DAY1}T14:00:00.000Z`;
+    addObservation(db, { patientId: P, checkinId: c.id, day: DAY1, topic: "knee pain", level: 1, source: "typed", words: "my knee aches", createdAt: at });
+    addObservation(db, { patientId: P, checkinId: c.id, day: DAY1, topic: "knee pain", level: 1, source: "typed", words: "still the knee", createdAt: at });
+    addObservation(db, { patientId: P, checkinId: c.id, day: DAY1, topic: "chest tightness", level: 3, source: "typed", words: "tight chest this morning", createdAt: at });
+    addCheckinNote(db, { patientId: P, checkinId: c.id, questionId: "dizzy-on-standing", text: "only when I get up fast", createdAt: at });
+    addVisitQuestion(db, { patientId: P, text: "Can I take Tylenol with my water pill?", createdAt: at });
+    const morning = insertDose(db, { patientId: P, day: DAY1, slot: "morning", sentAt: `${DAY1}T12:00:00.000Z` })!;
+    setDoseStatus(db, morning, "taken", at);
+    insertDose(db, { patientId: P, day: DAY1, slot: "evening", sentAt: `${DAY1}T22:00:00.000Z` });
+    const apixaban = normalizeHealthRecord(loadSnapshot(SUBJECT), { rxnav }).medications.find((m) => /apixaban/i.test(m.name))!;
+    insertLabelCheck(db, { patientId: P, attachmentId: "att_1", outcome: "strength_differs", medicationKey: apixaban.key, labelMedicine: "Apixaban", labelStrength: "2.5 mg", createdAt: at });
+    insertLabelCheck(db, { patientId: P, attachmentId: "att_2", outcome: "match", medicationKey: apixaban.key, labelMedicine: "Apixaban", labelStrength: "5 mg", createdAt: at });
+    markRefillReminded(db, { patientId: P, medicationKey: apixaban.key, fillDate: "2026-08-02", name: "apixaban 5 mg", runOut: "2026-09-04", day: DAY1, at });
+  }
+
+  it("gathers the ladder by topic (highest first), her notes, visit questions, doses, label mismatches and refills", async () => {
+    await busyDay();
+    const f = facts();
+    expect(f.severity.highest).toMatchObject({ level: 3, about: "chest tightness", words: "tight chest this morning" });
+    expect(f.severity.symptoms.map((x) => [x.level, x.about])).toEqual([
+      [3, "chest tightness"],
+      [1, "knee pain"],
+    ]);
+    expect(f.notes).toEqual([{ about: "dizziness on standing", text: "only when I get up fast" }]);
+    expect(f.visitQuestions).toEqual(["Can I take Tylenol with my water pill?"]);
+    expect(f.medicines.doses).toEqual([
+      { slot: "morning", status: "taken" },
+      { slot: "evening", status: "not confirmed" },
+    ]);
+    expect(f.medicines.labelMismatches).toEqual([{ outcome: "strength_differs", label: "Apixaban 2.5 mg", onHerList: "apixaban 5 mg" }]);
+    expect(f.medicines.refills).toEqual([{ medicine: "apixaban 5 mg", runsOut: "2026-09-04", status: "reminded", familyTold: false }]);
+  });
+
+  it("the doctor gets all of it as data lines", async () => {
+    await busyDay();
+    const text = doctorSummary(facts(), CONTACTS);
+    expect(text).toContain("SYMPTOMS (severity ladder; highest today L3, call the doctor today)");
+    expect(text).toContain('- L3 call the doctor today: chest tightness, "tight chest this morning" (typed)');
+    expect(text).toContain('- L1 small, everyday: knee pain, "my knee aches" (typed)');
+    expect(text).toContain('HER NOTES FOR YOU\n- dizziness on standing: "only when I get up fast"');
+    expect(text).toContain("VISIT QUESTIONS (asked today)\n- Can I take Tylenol with my water pill?");
+    expect(text).toContain("- Morning medicines reminder: taken.\n- Evening medicines reminder: not confirmed.");
+    expect(text).toContain("- Label photo: Apixaban 2.5 mg; her list has apixaban 5 mg (strength differs");
+    expect(text).toContain("- Refill: apixaban 5 mg, runs out 2026-09-04; reminded.");
+    expect(DASHES.test(text)).toBe(false);
+  });
+
+  it("the family sees the level-3 item at every sharing level, the rest only at 'all'", async () => {
+    await busyDay();
+    const status = familySummary(facts(), CONTACTS);
+    expect(status).toContain("Harriet mentioned chest tightness today, and I asked her to call her doctor today. Please call Harriet today to check on her.");
+    expect(status).not.toMatch(/tight chest this morning|knee|Tylenol|get up fast|Morning medicines|Apixaban|apixaban/);
+    setSharing(db, P, "all");
+    const all = familySummary(facts(), CONTACTS);
+    expect(all).toContain('Harriet mentioned chest tightness today ("tight chest this morning")');
+    expect(all).toContain("- knee pain (noted for her doctor): \"my knee aches\"");
+    expect(all).toContain('- dizziness on standing: "only when I get up fast"');
+    expect(all).toContain("- Can I take Tylenol with my water pill?");
+    expect(all).toContain("- Morning medicines: she said she took them.\n- Evening medicines: not confirmed.");
+    expect(all).toContain("- A medicine label she photographed (Apixaban 2.5 mg) didn't match her list");
+    expect(all).toContain("- apixaban 5 mg runs out around 2026-09-04; I reminded her to ask for a refill.");
+    expect(DASHES.test(all) || /\b911\b/.test(all)).toBe(false);
+  });
+
+  it("a safety-screen hit (level 4) is always said as something urgent, never in her words below 'all'", async () => {
+    await checkIn();
+    addObservation(db, { patientId: P, day: DAY1, topic: "urgent_symptom", level: 4, source: "safety", createdAt: `${DAY1}T14:00:00.000Z` });
+    expect(familySummary(facts(), CONTACTS)).toContain("Harriet told me about something urgent today, and I gave her the emergency numbers. Please call Harriet today");
   });
 });
 
@@ -443,43 +527,110 @@ describe("replies to the doctor and the emergency contact", () => {
   });
 });
 
-describe("ClaudeReplyWriter", () => {
-  beforeEach(() => setup());
-
-  async function request(audience: "doctor" | "family"): Promise<ReplyRequest> {
-    await checkIn();
-    const summary = latestSentSummary(db, P, audience)!;
-    const contact = audience === "doctor" ? CONTACTS.doctor : CONTACTS.emergencyContact;
-    return { contact, contacts: CONTACTS, facts: summary.facts, summaryText: "the summary", thread: [], message: "How is she?" };
+describe("GeminiCareWriter (the shared LlmClient words the care texts)", () => {
+  /** A writer over a FakeLlmClient answering every care text with `answer(input)`. */
+  function geminiWriter(answer: (input: CareMessageInput) => string | Error) {
+    const llm = new FakeLlmClient({ writeCareMessage: answer });
+    return { llm, writer: new GeminiCareWriter(llm) };
   }
 
-  it("sends the tone and the grounding rules, and the facts, to the model", async () => {
-    const calls: { model: string; system: string; messages: { role: string; content: string }[] }[] = [];
-    const writer = new ClaudeReplyWriter({
-      model: "claude-test",
-      create: async (params) => {
-        calls.push(params as never);
-        return { content: [{ type: "text", text: "  She checked in.  " }] } as never;
-      },
-    });
-    const req = await request("family");
-    expect(await writer.write(req)).toBe("She checked in.");
-    expect(calls[0]?.model).toBe("claude-test");
-    expect(calls[0]?.messages[0]?.content).toContain('"preferredName":"Harriet"');
-    expect(calls[0]?.messages[0]?.content).toContain("How is she?");
-    expect(systemPrompt(req)).not.toBe(systemPrompt({ ...req, contact: CONTACTS.doctor }));
+  it("summaries: the written body inside the fixed header, red-flag lines and footer; family facts cut to what they may see", async () => {
+    const { llm, writer } = geminiWriter((input) =>
+      input.audience === "doctor" ? "CHECK-IN: completed 09:00 to 09:04.\nSYMPTOMS: L3 breathing when lying flat." : "Harriet did her check-in this morning and answered all three questions.",
+    );
+    setup({ writer });
+    await checkIn(["Yes, it was hard", "No", "No"]);
+    const doctor = toDoctor()[0] ?? "";
+    expect(doctor).toMatch(/^Daily check-in summary for Harriet Lindqvist, 78/);
+    expect(doctor).toContain("CHECK-IN: completed 09:00 to 09:04.");
+    expect(doctor).toMatch(/RED FLAGS: 1\n- How was your breathing last night when you lay down\? "Yes, it was hard"/);
+    expect(doctor).toMatch(/Emergency contact: Sarah \(daughter\), \+1 313-555-0187/);
+    const family = toFamily()[0] ?? "";
+    expect(family).toMatch(/^Hi Sarah\. This is Harriet's daily check-in assistant\. I'm an automated assistant, not a person\./);
+    // The urgent paragraph is fixed and comes right after the greeting; the model's body follows.
+    expect(family.indexOf("One thing needs attention")).toBeLessThan(family.indexOf("Harriet did her check-in this morning"));
+    expect(family).toMatch(/Please call Harriet today to check on her\. If you have questions about what this means, Dr\. Patel can be reached at \+1 734-555-0142\./);
+    const [d, f] = llm.careMessageCalls;
+    expect(d).toMatchObject({ audience: "doctor", recipientName: "Dr. Patel", seniorName: "Harriet" });
+    expect(JSON.stringify(d?.facts)).toContain("Glomerular");
+    // The family's model never sees labs, the medication list or record flags she hasn't heard.
+    expect(f).toMatchObject({ audience: "family", recipientName: "Sarah" });
+    expect(JSON.stringify(f?.facts)).not.toMatch(/Glomerular|metformin|apixaban|R1/);
+    expect(f?.facts).toMatchObject({ somethingUrgentToday: true });
+    expect(DASHES.test(doctor + family)).toBe(false);
   });
 
-  it("NO_REPLY or nothing means no reply", async () => {
-    const req = await request("doctor");
-    for (const text of [NO_REPLY, "  "]) {
-      const writer = new ClaudeReplyWriter({ create: async () => ({ content: [{ type: "text", text }] }) as never });
-      expect(await writer.write(req)).toBeNull();
+  it("falls back to the fixed templates when the model fails, writes a dash, an invented number, 911 or dosing advice", async () => {
+    for (const bad of [
+      new LlmUnavailableError("down"),
+      "Harriet is fine \u2014 nothing to report.",
+      "Her heart rate was 143 bpm.",
+      "If it gets worse, call 911.",
+      "She should stop taking her metformin.",
+      "This could be heart failure getting worse.",
+    ]) {
+      const { writer } = geminiWriter(() => bad);
+      setup({ writer });
+      await checkIn();
+      expect(toDoctor()[0]).toBe(doctorSummary(facts(), CONTACTS));
+      expect(toFamily()[0]).toBe(familySummary(facts(), CONTACTS));
+      expect(logs.some((l) => /summary writer failed/.test(l))).toBe(true);
+      await care.stop();
+      db.close();
     }
   });
 
-  it("needs a key without an injected client", () => {
-    expect(() => new ClaudeReplyWriter({})).toThrow(/ANTHROPIC_API_KEY/);
+  it("a retry sends exactly the text first planned, without asking the model again", async () => {
+    let n = 0;
+    const { llm, writer } = geminiWriter(() => `Written body number ${++n}.`);
+    setup({ writer });
+    photon.failFor.add(DOCTOR_PHONE);
+    await checkIn();
+    const planned = careMessages(db, P).find((m) => m.kind === "summary" && m.audience === "doctor")?.text;
+    photon.failFor.delete(DOCTOR_PHONE);
+    await care.service.sendSummaries(DAY1);
+    expect(toDoctor()[0]).toBe(planned);
+    expect(llm.careMessageCalls).toHaveLength(2);
+  });
+
+  it("replies: worded from the summary as sent and the thread; NO_REPLY means none; a failed check sends the template", async () => {
+    const answers: (string | Error)[] = ["Body.", "Body.", "She answered all three questions this morning.", CARE_NO_REPLY, "Her potassium was 9.9 today."];
+    const { llm, writer } = geminiWriter(() => answers.shift() ?? new LlmUnavailableError("no more"));
+    setup({ writer });
+    await checkIn();
+    await text(FAMILY_PHONE, "How did she do this morning?");
+    expect(toFamily().at(-1)).toBe("She answered all three questions this morning.");
+    const reply = llm.careMessageCalls.at(-1);
+    expect(reply?.question).toBe("How did she do this morning?");
+    expect(reply?.summaryText).toBe(toFamily()[0]); // the summary exactly as she got it
+    await text(DOCTOR_PHONE, "Noted, see you Tuesday at the clinic");
+    expect(toDoctor()).toHaveLength(1); // NO_REPLY: nothing sent
+    await text(DOCTOR_PHONE, "What were her latest labs?");
+    expect(toDoctor().at(-1)).toMatch(/^Open flags: R1 \(new\)/); // 9.9 isn't in her facts: the template answer
+  });
+
+  it("checkWritten keeps numbers from the facts and rejects others", () => {
+    const view = { hr: 74, egfr: "31 mL/min" };
+    expect(checkWritten("Heart rate about 74; eGFR 31 on 2 readings.", "doctor", view)).toBe("Heart rate about 74; eGFR 31 on 2 readings.");
+    expect(checkWritten("Heart rate about 75.", "doctor", view)).toBeUndefined();
+    expect(checkWritten("Great news!", "family", view)).toBe("Great news.");
+    expect(checkWritten("**CHECK-IN** done", "doctor", view)).toBe("CHECK-IN done");
+  });
+
+  it("the prompts differ by reader and kind, and carry the grounding rules", async () => {
+    setup();
+    await checkIn();
+    const f = facts();
+    expect(JSON.stringify(doctorView(f, CONTACTS))).toContain("Glomerular");
+    expect(JSON.stringify(familyView(f, CONTACTS))).not.toContain("Glomerular");
+    const base = { recipientName: "Dr. Patel", seniorName: "Harriet" };
+    const doctorSummaryPrompt = careMessageSystemPrompt({ ...base, audience: "doctor" });
+    const familyReplyPrompt = careMessageSystemPrompt({ ...base, recipientName: "Sarah", audience: "family", question: "How is she?" });
+    expect(doctorSummaryPrompt).toMatch(/data-only/);
+    expect(doctorSummaryPrompt).toMatch(/never suggest starting, stopping, skipping or changing any medicine or dose/);
+    expect(familyReplyPrompt).toMatch(/warm, plain/);
+    expect(familyReplyPrompt).toContain(CARE_NO_REPLY);
+    expect(doctorSummaryPrompt + familyReplyPrompt).not.toMatch(DASHES);
   });
 });
 

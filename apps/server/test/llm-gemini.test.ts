@@ -659,3 +659,49 @@ describe("FakeLlmClient.classifyMessage", () => {
     expect(fake.classifyCalls).toHaveLength(2);
   });
 });
+
+describe("writeCareMessage (care texts to the doctor and the emergency contact)", () => {
+  const facts = { seniorName: "Harriet", checkin: { outcome: "checked_in" } };
+
+  it("sends the reader's prompt and the facts as data, and returns the cleaned text", async () => {
+    const { llm, calls } = client([ok({ text: "  Harriet checked in this morning.\n\n\n- All three questions answered.  " })]);
+    const text = await llm.writeCareMessage({ audience: "family", recipientName: "Sarah", seniorName: "Harriet", facts });
+    expect(text).toBe("Harriet checked in this morning.\n\n- All three questions answered.");
+    const body = calls[0]!.body;
+    expect(body.systemInstruction.parts[0].text).toMatch(/writing to Sarah, Harriet's emergency contact/);
+    expect(body.systemInstruction.parts[0].text).toMatch(/no em dashes or en dashes/);
+    expect(JSON.parse(body.contents[0].parts[0].text)).toEqual({ FACTS: facts });
+    expect(body.generationConfig.responseSchema.required).toEqual(["text"]);
+  });
+
+  it("a reply carries the summary as sent, the thread and the new message", async () => {
+    const { llm, calls } = client([ok({ text: "NO_REPLY" })]);
+    const text = await llm.writeCareMessage({
+      audience: "doctor",
+      recipientName: "Dr. Patel",
+      seniorName: "Harriet",
+      facts,
+      question: "Thanks, noted",
+      summaryText: "the summary",
+      thread: [{ from: "assistant", text: "the summary" }],
+    });
+    expect(text).toBe("NO_REPLY");
+    const user = JSON.parse(calls[0]!.body.contents[0].parts[0].text);
+    expect(user).toMatchObject({ SUMMARY: "the summary", NEW_MESSAGE: "Thanks, noted", THREAD: [{ from: "assistant", text: "the summary" }] });
+    expect(calls[0]!.body.systemInstruction.parts[0].text).toMatch(/professional, concise and data-only/);
+  });
+
+  it("a long dash, an empty or an over-long text is unavailable, so the caller sends its template", async () => {
+    for (const bad of [{ text: "Fine — all good." }, { text: "   " }, { text: "x".repeat(2001) }, "not json"]) {
+      const { llm } = client([ok(bad)], { models: ["model-a"] });
+      await expect(llm.writeCareMessage({ audience: "doctor", recipientName: "Dr. Patel", seniorName: "Harriet", facts })).rejects.toBeInstanceOf(LlmUnavailableError);
+    }
+  });
+
+  it("FakeLlmClient: unscripted is unavailable; scripted answers are recorded", async () => {
+    await expect(new FakeLlmClient().writeCareMessage({ audience: "family", recipientName: "Sarah", seniorName: "Harriet", facts })).rejects.toBeInstanceOf(LlmUnavailableError);
+    const fake = new FakeLlmClient({ writeCareMessage: (input) => `Hello ${input.recipientName}.` });
+    expect(await fake.writeCareMessage({ audience: "family", recipientName: "Sarah", seniorName: "Harriet", facts })).toBe("Hello Sarah.");
+    expect(fake.careMessageCalls).toHaveLength(1);
+  });
+});
