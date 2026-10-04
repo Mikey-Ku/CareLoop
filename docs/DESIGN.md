@@ -196,7 +196,7 @@ Every typed message goes through a fixed phrase screen first (`src/safety/screen
 | urgent_symptom | 911 if it's happening now, then her doctor; family alert like a red flag; check-in paused; follow-up later |
 | answer | Mapped onto the question's buttons as before. On a red-flag question an explicit typed yes counts as her Yes; a no still gets the one-tap confirm |
 | more_detail | Her words saved as a note on the pending question (family sees notes at "all"; kept for the visit-prep sheet), then the question's buttons again |
-| medicine_question | Fixed "ask your doctor or pharmacist" reply; saved to her visit questions |
+| medicine_question | Fixed "ask your doctor or pharmacist" reply; saved to her visit questions. Symptoms in it (or in her words after "I have a question") get their ladder level first, as in chat |
 | feeling_low | Fixed warm reply suggesting she call someone close; saved as a memory |
 | family_message | Forwarded to every family chat ("Harriet asked me to pass this on: ...") |
 | chat | LLM small talk. Symptoms she mentions get a ladder level instead: level 1 "Sorry to hear about your knee pain. I've made a note for your doctor.", level 2 "Let's keep an eye on that" plus a follow-up, level 3 and up as in the ladder. No 911 below level 3 |

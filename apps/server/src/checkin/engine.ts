@@ -330,6 +330,7 @@ import {
 //      - medicine_question: fixed reply, saved for her next visit (visit_questions).
 //      - feeling_low: fixed warm reply, saved as a memory, no alert.
 //      - family_message: her message passed on to every linked family chat (or kept until one links).
+//      Symptoms in any of these three (or after "I have a question") get their level's reply first, as in chat.
 //      - chat: the model's small talk. Symptoms she mentions get a fixed reply by level instead (1:
 //        symptomNotedReply, 2: keepAnEyeReply and a follow-up, 3: the red-flag reply and alert); a
 //        complaint with no symptom read gets complaintReply (level-1 wording). While a check-in
@@ -1120,7 +1121,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     const leveled = mentions.map((m) => ({ m, ...levelFor({ source: "typed", mention: m }, history) }));
     for (const t of leveled) observe(patient, day, c, t, { source: "typed", amount: t.m.amount, change: t.m.change, words: t.m.words });
     const top = highest(leveled);
-    const key = `${patient.id}:reply:${msg.messageId}`;
+    const key = `${patient.id}:symptoms:${msg.messageId}`; // not :reply:, which a kind's own reply may use
     if (!top || top.level === 0) return [];
     if (top.level >= 3) return levelThree(patient, c, top.topic, msg.chatId, `${patient.id}:red-flag:${msg.messageId}`, { words: msg.text.trim() }).sends;
     if (top.level === 2) {
@@ -1461,8 +1462,14 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
 
     if (cls?.kind === "crisis" || cls?.kind === "urgent_symptom") return { sends: planSafety(patient, msg, cls.kind) };
     if (cls) addMemories(db, patient.id, [...cls.memories, ...cls.complaints], clock.now());
+    // Symptoms she mentions get their fixed reply by level (see "Severity ladder" above) whatever the kind,
+    // before that kind's own reply.
+    const levelled = (): Send[] =>
+      cls && chatBasis(cls) === "symptoms"
+        ? planSymptoms(patient, msg, ctx.at === "question" || ctx.at === "step" ? ctx.c : pendingCheckin(patient.id), cls.symptoms ?? [])
+        : [];
     // Her words after "I have a question" (see "Latest prompt wins"): her medicine question.
-    if (ctx.at === "meds_question") return { sends: planMedsQuestion(patient, msg, text, cls) };
+    if (ctx.at === "meds_question") return { sends: [...levelled(), ...planMedsQuestion(patient, msg, text, cls)] };
 
     // An explicit yes on a red-flag question is her "Yes": a fixed rule, with or without the LLM.
     if (ctx.at === "question" && redFlagYes !== undefined && !stale) {
@@ -1507,21 +1514,20 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       }
       case "medicine_question":
         addVisitQuestion(db, { patientId: patient.id, text, createdAt: clock.now() });
-        return { sends: [reply(medicineQuestionReply(name)), ...again(patient, ctx, msg)] };
+        return { sends: [...levelled(), reply(medicineQuestionReply(name)), ...again(patient, ctx, msg)] };
       case "feeling_low":
         addMemories(db, patient.id, [text], clock.now());
-        return { sends: [reply(feelingLowReply(name)), ...again(patient, ctx, msg)] };
+        return { sends: [...levelled(), reply(feelingLowReply(name)), ...again(patient, ctx, msg)] };
       case "family_message":
-        return { sends: [...planFamilyRelay(patient, msg, text), ...again(patient, ctx, msg)] };
+        return { sends: [...levelled(), ...planFamilyRelay(patient, msg, text), ...again(patient, ctx, msg)] };
       case "small_talk": {
         const talk = understood?.smallTalk;
         if (talk) addMemories(db, patient.id, [...talk.memories, ...talk.complaints], clock.now());
         const basis = chatBasis(cls);
-        // Symptoms she mentioned: a fixed reply by level (see "Severity ladder" above), never the model's words.
+        // Symptoms she mentioned: a fixed reply by level, never the model's words.
         if (basis === "symptoms") {
-          const c = ctx.at === "question" || ctx.at === "step" ? ctx.c : pendingCheckin(patient.id);
           if (explaining && about) saveNote(patient, about, text);
-          return { sends: [...planSymptoms(patient, msg, c, cls.symptoms ?? []), ...again(patient, ctx, msg)] };
+          return { sends: [...levelled(), ...again(patient, ctx, msg)] };
         }
         if (explaining) return { sends: noted() };
         const complaints = basis === "complaint" ? cls.complaints : (talk?.complaints ?? []);
