@@ -12,13 +12,19 @@ All data in this project is synthetic.
 
 ## Setup
 
-Requires Node 22.18 or newer: the server runs its `.ts` files directly through Node's built-in type stripping, with no build step.
+Use Node 24 LTS for the demo (Node 24.19.0 verified), or Node 22.22.3 or newer in the Node 22 line. The package requires at least 22.22.3; Vitest does not support Node 23 or 25. The server runs its `.ts` files directly through Node's built-in type stripping, with no build step.
 
 ```sh
 cd apps/server
-npm install
+npm ci
 cp ../../.env.example ../../.env   # optional for run 1
 ```
+
+See [the three-minute demo](docs/DEMO.md) and [QA gates](docs/QA.md) before presenting. Offline fixture rehearsals need no `.env` or API keys.
+
+For the complete voice demo, configure `RELAY_AGENT_TOKEN`, `PATIENT_RELAY_HANDLE`, `GEMINI_API_KEY`, `ELEVENLABS_API_KEY`, and `ELEVENLABS_VOICE_ID`. `PRESAGE_API_KEY` enables camera estimates; `FAMILY_RELAY_HANDLES` enables family delivery. From `apps/server`, `npm run demo:check` checks configuration and synthetic fixtures without network requests or exposing keys. Exit `0` means configured, `2` means optional capabilities missing, and `1` means required setup missing. Presence, including placeholder values, does not prove authentication.
+
+Verify providers separately: `relay:check` reads provider settings and chats, may migrate the local database, and prints handles; `llm:check` sends synthetic text and labels to Gemini. `content:eval` consumes quota and overwrites `docs/content-eval.md`. Phone calls, camera readings and family delivery require a live synthetic rehearsal.
 
 The `.env` file lives at the repo root. Run 1 needs no keys: the FinchNode demo API is open and every other value has a default.
 
