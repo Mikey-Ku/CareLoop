@@ -30,7 +30,7 @@ export const MAX_WRITTEN_CHARS: Record<CareAudience, number> = { doctor: 1200, f
 /** Longest doctor's overview, in characters (about 4 lines). */
 export const MAX_DOCTOR_OVERVIEW_CHARS = 600;
 
-const DOSING_ADVICE = [
+export const DOSING_ADVICE = [
   /\b(you|she|harriet|they|he) (should|could|can|must|needs? to|ought to) (take|stop|start|increase|decrease|double|skip|halve|reduce|cut)\b/i,
   /\b(increase|decrease|double|halve|reduce|raise|lower|cut|adjust|skip|stop)\s+(her|the|his|your)\s+(dose|dosage|medication|medicine|metformin|apixaban|pills?)\b/i,
   /\b(stop|start)\s+(taking|her|the)\s+\w+/i,

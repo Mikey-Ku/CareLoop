@@ -1,4 +1,5 @@
 import { buildDigest, renderDigest, storedRecord, type Digest } from "../context/digest.ts";
+import { guardSmallTalk } from "../context/guard.ts";
 import {
   LET_ME_EXPLAIN,
   QUESTION_BANK,
@@ -450,6 +451,8 @@ type FreeTextResult = {
   smallTalk: SmallTalkReply | undefined;
   /** The understanding pass's reading (a question was waiting); undefined when not asked for or it failed. */
   extraction?: CheckinExtraction | undefined;
+  /** The context digest small talk was written from: its reply may only state what this and her message say (checkedSmallTalk). */
+  facts?: string | undefined;
 };
 
 /** Her open reply (typed while the greeting waits), which needs the LLM's extraction first. */
@@ -504,11 +507,16 @@ export const MAX_SMALL_TALK_REPLY = 500;
 /** Longest family message passed on, in characters. */
 export const MAX_FAMILY_RELAY = 500;
 
-/** The model's small-talk text if it is fit to send as is, else undefined (the caller sends a template). */
-export function checkedSmallTalk(text: string): string | undefined {
+/**
+ * The model's small-talk text if it is fit to send as is, else undefined (the caller sends a template). With `known`
+ * (the digest it was written from, and her message) it must also pass guardSmallTalk: no dosing words, nothing
+ * medical she should do, no number, medicine or condition name that is in neither. Without it, no such name or
+ * number may appear at all.
+ */
+export function checkedSmallTalk(text: string, known: { digest?: string | undefined; message: string } = { message: "" }): string | undefined {
   const one = text.replace(/[ \t]+/g, " ").trim();
   if (!one || one.length > MAX_SMALL_TALK_REPLY || /[\u2013\u2014]/.test(one)) return undefined;
-  return one;
+  return guardSmallTalk(one, known);
 }
 
 /** Only high and medium confidence answers are recorded. */
@@ -823,16 +831,18 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       classification = { ...classification, kind: "chat", answer: undefined, confidence: "low" };
     const reads = extraction !== undefined && extract !== undefined && extractionReads(extraction, extract.questions);
     let smallTalk: SmallTalkReply | undefined;
+    let facts: string | undefined;
     const wantsSmallTalk =
       !steering && !need.noSmallTalk && !reads && reactionFor(classification, need.at) === "small_talk" && chatBasis(classification) === "talk";
     if (wantsSmallTalk) {
       try {
         smallTalk = await llm.smallTalk(need.smallTalk);
+        facts = need.smallTalk.context;
       } catch {
         smallTalk = undefined; // the fixed fallback reply
       }
     }
-    return { kind: "classify", context: need.context, about: need.about, classification, smallTalk, extraction };
+    return { kind: "classify", context: need.context, about: need.about, classification, smallTalk, extraction, facts };
   }
 
   function requirePatient(patientId: string): CheckinPatient {
@@ -1567,7 +1577,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         if (explaining) return { sends: noted() };
         const complaints = basis === "complaint" ? cls.complaints : (talk?.complaints ?? []);
         if (complaints.length > 0) noteComplaints(patient, ctx, complaints);
-        const said = complaints.length > 0 ? complaintReply(name) : talk ? checkedSmallTalk(talk.text) : undefined;
+        const said = complaints.length > 0 ? complaintReply(name) : talk ? checkedSmallTalk(talk.text, { digest: understood?.facts, message: text }) : undefined;
         if (said === undefined && ctx.at !== "none")
           return { sends: [withButtons(patient, ctx, msg, typedReplyUnavailable(answersOf(ctx)), "typed-unavailable")] };
         return { sends: [reply(said ?? smallTalkFallback(name)), ...again(patient, ctx, msg)] };
