@@ -9,11 +9,17 @@ const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 export const DEFAULT_RELAY_API_URL = "https://api.relayapp.im";
 export const DEFAULT_FINCHNODE_SUBJECT = "patient-demo-polypharmacy";
 export const DEFAULT_TIMEZONE = "America/Detroit";
-/** Tried in order. Measured 2026-10-03: flash-latest is fast but often 503s; flash-lite is slow (7 to 11 s) but answers. */
-// Lite models only: the cheapest tier, and enough for mapping a reply onto buttons and a short reply.
-// Several of them, because load moves between models: on 2026-10-03 one returned 503 for minutes
-// while others answered in under a second. A busy model is skipped at once (src/llm/fallback.ts).
-export const DEFAULT_GEMINI_MODELS = ["gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"];
+/**
+ * Tried in order. gemini-3.6-flash first: measured 2026-10-04 with the context digest in the prompt (10 calls
+ * each, thinkingLevel minimal), a classify call took p50 1.2 s, p95 1.4 s, against 0.8 s and 0.9 s for
+ * gemini-flash-lite-latest, and it read her messages best in the content eval (docs/content-eval.md).
+ * gemini-3.7-flash, gemini-3.8-flash and gemini-flash-latest answer 400 to thinkingLevel minimal, so they
+ * can't be used until the client asks for another level.
+ */
+// The lite models after it, the cheapest tier, as fallbacks: load moves between models (on 2026-10-03 one
+// returned 503 for minutes while others answered in under a second), and a busy model is skipped at once
+// (src/llm/fallback.ts).
+export const DEFAULT_GEMINI_MODELS = ["gemini-3.6-flash", "gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"];
 /** One try at one model; leaves budget for the next model when one hangs. */
 export const DEFAULT_LLM_ATTEMPT_TIMEOUT_MS = 4_000;
 export const DEFAULT_LLM_TIMEOUT_MS = 12_000;
