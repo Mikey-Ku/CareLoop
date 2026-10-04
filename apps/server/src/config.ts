@@ -95,6 +95,7 @@ export const KNOWN_ENV_NAMES: ReadonlySet<string> = new Set([
   "FOLLOW_UP_DELAY_MINUTES", // src/agent.ts
   "SPECTRUM_PROJECT_ID", "SPECTRUM_PROJECT_SECRET", "CARE_CONTACTS_PATH", // src/care/config.ts
   "NO_COLOR", // src/cli/sim-render.ts
+  "CAMERA_CHECK_PYTHON", // src/calls/camera-callback.ts
 ]);
 
 export type RelayConfig = {
