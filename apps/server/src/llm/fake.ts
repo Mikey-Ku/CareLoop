@@ -2,6 +2,8 @@ import type {
   AnswerMapping,
   CallScreeningLlmInput,
   CallScreeningLlmOutput,
+  CallTurnLlmInput,
+  CallTurnLlmOutput,
   CareMessageInput,
   CheckinExtraction,
   ClassifyInput,
@@ -29,6 +31,7 @@ export type FakeLlmScript = {
   readImage?: (input: ReadImageInput) => ImageReading | Error;
   writeCareMessage?: (input: CareMessageInput) => string | Error;
   screenCall?: (input: CallScreeningLlmInput) => CallScreeningLlmOutput | Error;
+  callTurn?: (input: CallTurnLlmInput) => CallTurnLlmOutput | Error;
 };
 
 export type FakeLlmCall =
@@ -38,7 +41,8 @@ export type FakeLlmCall =
   | { method: "extractCheckin"; input: ExtractCheckinInput }
   | { method: "readImage"; input: ReadImageInput }
   | { method: "writeCareMessage"; input: CareMessageInput }
-  | { method: "screenCall"; input: CallScreeningLlmInput };
+  | { method: "screenCall"; input: CallScreeningLlmInput }
+  | { method: "callTurn"; input: CallTurnLlmInput };
 
 export class FakeLlmClient implements LlmClient {
   readonly provider = "fake";
@@ -129,6 +133,21 @@ export class FakeLlmClient implements LlmClient {
     const result = this.script.screenCall(input);
     if (result instanceof Error) throw result;
     return { ...result, symptoms: result.symptoms.map((m) => ({ ...m })), finchEvidence: result.finchEvidence.map((e) => ({ ...e })), uncertainty: [...result.uncertainty] };
+  }
+
+  async callTurn(input: CallTurnLlmInput, options?: LlmCallOptions): Promise<CallTurnLlmOutput> {
+    this.calls.push({ method: "callTurn", input });
+    throwIfAborted(options);
+    if (!this.script.callTurn) throw new LlmUnavailableError("fake: no callTurn script");
+    const result = this.script.callTurn(input);
+    if (result instanceof Error) throw result;
+    return {
+      ...result,
+      informationCollected: [...result.informationCollected],
+      missingInformation: [...result.missingInformation],
+      evidence: result.evidence.map((e) => ({ ...e })),
+      uncertainty: [...result.uncertainty],
+    };
   }
 
   /** Inputs of the mapAnswer calls only, in order. */

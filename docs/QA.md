@@ -23,12 +23,12 @@ Do "Try it on your phone" in the [README](../README.md#try-it-on-your-phone-abou
 | `RELAY_AGENT_TOKEN` | The Relay agent (the README's step 3 fills it) | Yes, for any phone test |
 | `PATIENT_RELAY_HANDLE` | Which Relay handle plays Harriet (your own handle) | Yes, for any phone test |
 | `FAMILY_RELAY_HANDLES` | Family chats, comma separated (second phone plays Sarah) | Optional, needed for family tests |
-| `GEMINI_API_KEY` | Reading typed messages, label and paper photos, small talk, call understanding, Photon wording | Optional, but most tests need it. Without it: buttons only, and photos get "I can't read photos yet" |
+| `GEMINI_API_KEY` | Reading typed messages, label and paper photos, small talk, adaptive call turns, Photon wording | Optional for non-call use; required for model-led call turns |
 | `LLM_PROVIDER` | Keep `gemini`, the only adapter. Any other value stops the agent with a config error (PR #8) | Leave as is |
 | `GEMINI_MODELS`, `LLM_TIMEOUT_MS`, `LLM_ATTEMPT_TIMEOUT_MS` | Model list and time budget | Leave defaults |
-| `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` | The video check-in call | Needed for calls |
-| `ELEVENLABS_TOOL_SECRET` | Auth for the three call tools: the server answers 401 to every tool call without it | Needed for calls |
-| `PRESAGE_API_KEY` | Heart rate during the call | Optional (without it the voice says it can't see the camera) |
+| `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | Realtime transcription and spoken replies inside the Relay call | Needed for calls |
+| `ELEVENLABS_STT_MODEL`, `ELEVENLABS_TTS_MODEL`, `ELEVENLABS_TTS_OUTPUT_FORMAT` | Direct ElevenLabs API model and audio format settings | Defaults are suitable for the current adapters |
+| `PRESAGE_API_KEY` | Pulse and breathing estimates from Relay video frames | Optional; without it the call skips the camera reading |
 | `CALL_QUIET_MEASUREMENT_MS` | Length of the quiet reading, 30000 to 45000 | Optional |
 | `CALL_MAX_MINUTES`, `VITALS_MIN_CONFIDENCE` | Server ends the call after N minutes (default 4); lowest camera confidence used (default 1) (PR #8) | Optional |
 | `SPECTRUM_PROJECT_ID`, `SPECTRUM_PROJECT_SECRET` plus `care-contacts.json` | Photon (iMessage) care summaries to the doctor and the emergency contact. Off unless set; not part of the MVP | Optional |
@@ -100,24 +100,20 @@ npm run simulate -- --reset --db :memory: --day 2026-09-01 --sharing all --famil
 | Record consent ended | Simulator: `npm run simulate -- patient-demo-consent-revoked --reset --db :memory:` | "..., the link to your health record has ended. I've stopped reading it and deleted my copy. Our chats are still here. You can ask to have them deleted too." Sarah: "The link to ...'s health record has ended. The app has stopped reading it and deleted its copy." | Works in the simulator. The name shows as the subject id ("patient-demo-consent-revoked") because the record can't be read. Polish only |
 | Tests and content eval | `npm test`, `npm run lint`, `npm run content:eval` (live Gemini) | All pass; eval writes `docs/content-eval.md` | Last eval: safety 37 of 37 caught, 0 of 11 idiom false alarms, answer mapping 84% (target 90%) |
 
-### 1. Video check-in call
+### 1. Relay video symptom-screening call
 
-Most of this arrives with PR #8. Needs ElevenLabs keys, the ElevenLabs agent set up per `docs/CALLS.md` (prompt, dashboard settings, three tools), an HTTPS tunnel to `PORT` (`cloudflared tunnel --url http://localhost:3000` or `ngrok http 3000`), and `ELEVENLABS_TOOL_SECRET`.
+Needs server-side keys and voice configuration in `docs/CALLS.md`, Relay call permissions for the agent and patient, and the backend running. There is no ElevenLabs agent/dashboard prompt, webhook tool, HTTPS tunnel, or API key on the phone.
 
 | Capability | How to trigger | What should happen | What to look for |
 | --- | --- | --- | --- |
-| Answer the call | Harriet starts a video call to the agent from the Relay app | Answered; log `[calls] call_answered` | Pass: within 10 seconds (Relay's hard limit is 32), 3 tries. Without ElevenLabs keys: log `call_skipped_not_configured` |
-| AI disclosure | First thing the voice says | "Hi Harriet, I'm an AI check-in assistant. This will take about three minutes. How are you feeling today?" (PR #8) | Fail: no "AI". |
-| Today's questions | Let her talk | Voice asks only today's unanswered check-in questions, one at a time, and may mention yesterday or a memory | Fail: medical questions outside today's list, or interviewing her |
-| Quiet reading | Agree to the reading | "Rest your phone so I can see your face, and I'll stay quiet for half a minute." Voice stays silent | Fail: voice talks during the window |
-| Heart rate back | After the window | "Your heart rate is about N beats a minute. This is a camera estimate, not a medical test." Breathing may be said too. No usual-range words for Harriet (AFib). Never blood pressure or HRV | No reading: "I couldn't get a clear reading this time. That's okay, we can try again another day." No Presage key or no video: "I can't see your camera right now, so we'll skip the reading today." Write down the number next to Presage's own app (DoD: within 5 bpm, 3 of 3) |
-| Medicine question on the call | Say "Should I stop my aspirin?" | "That's one for your doctor or pharmacist. I'll add it to your list." | Her question before the reply goes on her visit list after the call, and shows in the doctor report |
-| Safety during the call | Say "I have chest pain" or "I want to end my life" | Voice reads the fixed 911 or 988 reply; her chat and every family chat get the safety messages at once | Sarah's phone gets the urgent or crisis alert during the call (PR #8) |
-| Recorded like text | Say "my ankles are a bit puffy" | After the call, the ankle answer is stored via "voice" at level 1, like a typed answer | `checkins` and `symptom_observations` rows after the call |
-| Post-call message | Hang up or say goodbye | One message: "Here's what I noted from our call: ... Is that right?" with heart rate as "a camera estimate", [That's right] [Something's wrong] (PR #8) | That's right: the next question she didn't cover, or "Thank you, Harriet. I'll check in again tomorrow." Something's wrong: "Go ahead, Harriet. Tell me in your own words." |
-| Goodbye and length | End of call | "Thank you for talking with me, Harriet. Maybe give Sarah a call today. Take care." Server ends the call after `CALL_MAX_MINUTES` (default 4) | The goodbye depends on the ElevenLabs prompt using `{{closing_line}}`. check |
-| Wrong caller | Call the agent from a handle that is not Harriet's | "Sorry, I can only take check-in calls from the person I'm set up for. Goodbye." in the caller's chat, call ended (PR #8) | Fail: the voice talks about Harriet |
-| Voice style | Listen | Warm stock voice, speed about 0.9, patient turn taking (dashboard settings in `docs/CALLS.md`) | check: these live in the ElevenLabs dashboard, not in code |
+| Answer the call | Patient starts a Relay video call | Backend connects Relay transport and ElevenLabs STT/TTS; logs `[calls] call_answered` | Must answer within Relay's 32-second deadline. Missing credentials produce a safe failure |
+| AI disclosure | First sentence | "Hi Harriet, I'm an AI check-in assistant. This will take about three minutes. How are you feeling today?" | Fail if no AI disclosure |
+| Adaptive interview | Patient describes a symptom | Committed transcript reaches Gemini with bounded FinchNode context; one relevant follow-up at a time is spoken through TTS | Must adapt to the patient's response, avoid repeated/answered questions, and not diagnose or advise medication changes |
+| TTS interruption | Talk while TTS is speaking | Partial transcript cancels active TTS; only committed transcript is stored or sent to Gemini | No raw audio or partial transcript in SQLite |
+| Quiet reading | Give explicit consent to the camera estimate | Explains purpose, requests face and upper-chest framing, then a quiet 30–45 second window | Never begins without permission; speech, rejected frames, or zero confidence cannot become a confident reading |
+| Vitals and records | Reading completes or FinchNode lookup fails | Structured evidence and uncertainty inform Gemini; approved response is spoken by TTS | No diagnosis, medication advice, BP/HRV, or invented missing data |
+| Safety during call | On a synthetic test patient, say an urgent phrase | Fixed urgent/crisis response takes precedence immediately; existing caregiver alerts run | Must not wait for Gemini or use model-generated emergency wording |
+| Call cleanup | Hang up, Relay interruption, or time limit | Presage stops/destroys; STT/TTS and Relay resources close; permitted transcript/structured data persists | No raw audio/video persistence; repeated end events are safe |
 | Call counts as checking in | Call (even one that records no answers), then let the noon job run | No "hasn't answered" alert to Sarah (PR #8) | Fail: Sarah gets the missed alert after a call |
 
 ### 2. Text check-in

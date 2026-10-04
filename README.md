@@ -1,12 +1,12 @@
 # Mhacks_2026
 
-A daily check-in companion for older adults living alone with several chronic conditions, built on FinchNode, Relay Messenger, ElevenLabs and Presage.
+A daily check-in companion for older adults living alone with several chronic conditions, built on FinchNode, Relay Messenger, Gemini, ElevenLabs speech APIs, and Presage.
 
 **Status:** in progress (MHacks 2026)
 
 ## What it does
 
-Each morning a Relay agent starts a short, friendly chat with at most three questions picked from the senior's FinchNode health record. She can choose a voice call to talk or a video call that compares her heart rate with her usual range from clinic visits and records her breathing rate. Photos of hospital papers are checked against her medication list, and each family member follows along in their own Relay chat with the agent.
+Each morning a Relay agent starts a short, friendly chat with at most three questions picked from the senior's FinchNode health record. She can choose a video call to describe symptoms conversationally: Relay carries the call, ElevenLabs transcribes and speaks, Gemini contextualizes the committed transcript with structured FinchNode records, and Presage can provide consented pulse and breathing estimates from video. Photos of hospital papers are checked against her medication list, and each family member follows along in their own Relay chat with the agent.
 
 All data in this project is synthetic.
 
