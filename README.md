@@ -119,7 +119,7 @@ npm run simulate -- [subject] [--day YYYY-MM-DD] [--db path] [--reset] [--live] 
 
 ### Doctor report
 
-A printable summary of one week for her doctor (US letter, two pages), laid out like a clinical summary for a visit: her identifiers and active problems, the week at a glance, what she reported by severity level with dates and her own words (Subjective), camera wellness estimates and labs from her record (Objective), her medications as a reconciliation table with this week's label photos, refills and hospital-paper differences, items for clinician review (rule flags R1 to R6 with their evidence), and her questions for the visit. Fixed wording from the data only: no diagnosis, no dosing advice. Example: [docs/examples/doctor-report-example.html](docs/examples/doctor-report-example.html) (synthetic).
+A printable summary of one week for her doctor (US letter, two pages). Page 1 says at a glance what was collected: six tiles (check-ins answered, what she reported, medicine reminders and label photos, camera estimates, record flags, her record), an "In brief" list, the week day by day, the record flags for review with their status, what she reported by level with the day and her own words, and her questions for the visit. Page 2 has the camera estimates and labs from her record, her medicines with this week's label photos, refills and hospital-paper differences, her problem list, the evidence behind each flag and what the report was made from. Fixed wording from the data only: no diagnosis, no dosing advice. Print it from the browser with Background graphics on. An example from the simulated week is in `docs/examples/doctor-report-example.html`.
 
 From a simulated week (`scripts/demo/harriet-week.txt`, Aug 26 to Sep 1, 2026):
 
@@ -152,4 +152,4 @@ DATABASE_PATH=../../data/simulator.db npm run dev
 
 ## License
 
-MIT
+MIT, see `LICENSE`. Third-party services keep their own terms: Presage SmartSpectra (the SDK is installed from npm under Presage's terms and is not redistributed here; it bundles LGPL FFmpeg), Gemini on the free tier (so only synthetic data is used), the FinchNode demo API and NLM RxNav. Camera readings are a wellness estimate, not a medical measurement.

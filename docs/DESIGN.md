@@ -21,7 +21,7 @@ Backend parts:
 | `context` builder | One "context packet" per reply or call: record + our notes |
 | `rules` engine | Medication checks, red flags, paper discrepancies. Deterministic, unit tested |
 | `db` | SQLite tables below |
-| `relay` agent | Webhook server, check-in messages, buttons, family chats, photos, voice memos, scheduled jobs |
+| `relay` agent | WebSocket inbox, check-in messages, buttons, family chats, photos, voice memos, scheduled jobs |
 | `calls` handler | Relay call lifecycle, ElevenLabs STT/TTS, adaptive Gemini turns, video frames to Presage |
 | `llm` | Gemini contextualizes transcript and structured evidence. Deterministic rules retain safety precedence |
 
@@ -38,7 +38,7 @@ Backend parts:
 | Relay | `@relaymessenger/sdk`, CLI `npx relaymessenger` | Chat, buttons, calls, media, voice memos |
 | Voice | ElevenLabs realtime STT + streaming TTS APIs | Transcript enters Gemini; approved text is spoken into the Relay call |
 | LLM | Gemini (free tier) through its REST API, behind a provider-neutral `LlmClient` (`src/llm/`) | Reads free-text replies, writes small talk, reads paper photos. Free tier: synthetic data only, and Google may use prompts to improve its products. Decided 2026-10-03 |
-| Vitals | Presage SmartSpectra C++ SDK with custom frame input, as a sidecar in `services/presage-bridge/` | Takes raw frames from the Relay video call. Final choice after the spike |
+| Vitals | Presage SmartSpectra Node SDK (`@smartspectra/node-sdk`) with custom frame input, in the server process (`src/calls/video.ts`) | Takes frames from the Relay video call during a consented quiet window; a recorded clip can be read with `npm run vitals:video` |
 | Drug names | NLM RxNav REST API (no key) | Map free-text medication names to RxNorm codes. Exact normalized-name match only (`rxcui.json?search=2`); approximate search guesses wrong drugs |
 | Package manager | npm | Default with Node |
 
@@ -56,11 +56,13 @@ Mhacks_2026/
 │   ├── src/context/          # context packet builder, question picker
 │   ├── src/rules/            # medication rules, red flags, paper diff
 │   ├── src/db/               # schema, migrations, queries
-│   ├── src/relay/            # webhook server, messages, jobs
+│   ├── src/relay/            # WebSocket inbox, messages, jobs
 │   ├── src/calls/            # ElevenLabs bridge, video frames
-│   ├── src/llm/              # Claude prompts
+│   ├── src/llm/              # Gemini prompts
+│   ├── src/report/           # doctor report
+│   ├── src/care/             # optional Photon care summaries
+│   ├── src/vitals/           # Presage adapters
 │   └── test/
-├── services/presage-bridge/  # vitals sidecar (after spike)
 ├── fixtures/                 # recorded FinchNode responses, answer key, synthetic papers
 └── scripts/                  # spikes and dev helpers
 ```

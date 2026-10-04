@@ -1,6 +1,8 @@
 .DS_Store
 .env
-.env.local
+.env.*
+!.env.example
+.claude/worktrees/
 care-contacts.json
 .idea/
 .vscode/
