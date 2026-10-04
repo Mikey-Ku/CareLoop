@@ -1,24 +1,22 @@
 # Definition of done
 
-What "finished" means for this project, and the benchmark that proves each part. A lane is done when every benchmark in its section passes, checked the way the "How we check" column says. Tick boxes in a pull request when a benchmark passes, with the evidence (a command's output, a log line, a photo or a short note) in the PR description.
+What "finished" means for the MVP (the five features in `docs/BRIEF.md`), and the benchmark that proves each part. A feature is done when every benchmark in its section passes, checked the way the "How we check" column says. Tick boxes in a pull request when a benchmark passes, with the evidence (a command's output, a log line, a photo or a short note) in the PR description.
 
-**If you are an AI coding agent:** before you call your lane done, run every automated check in your section and quote the results in your pull request. Don't tick a box you didn't verify.
+**If you are an AI coding agent:** before you call your lane done, run every automated check in your section and quote the results in your pull request. Don't tick a box you didn't verify. Keep new tests to the safety-critical paths (safety screen, severity levels, red flags, dosing never advised); the team chose speed over exhaustive flow tests.
 
 ## Scoreboard
 
-The six MVP features from `docs/BRIEF.md`, plus what the demo needs.
-
-| # | Milestone | Lane | Status |
+| # | MVP feature | Lane | Status |
 | --- | --- | --- | --- |
-| M0 | Records, rules, check-in engine, simulator, CI | done | Done (runs 1 to 2c) |
-| M1 | Morning check-in live on phones, typed replies, content handling | 1 | In progress |
-| M2 | "Call me to chat" voice call | 2 | Not started |
-| M3 | "Check my vitals" video call | 3 | Not started (spike first) |
-| M4 | Paper photo check and the doctor's visit-prep sheet | 4 | Not started |
-| M5 | Family voice messages both ways | 5 | Not started |
-| M6 | Demo ready | everyone | Not started |
+| 0 | Foundation: records, rules, engine, simulator, CI | done | Done |
+| 1 | Video check-in call (ElevenLabs voice, Presage heart rate) | B | Not started (Presage spike first) |
+| 2 | Text check-in | A | Live on a phone; polishing |
+| 3 | Medication helper (reminders, label photo, refills) | A | Not started |
+| 4 | Doctor report | C | Not started |
+| 5 | Family updates | C | Status and alerts work in Relay family chats; replies not built |
+| 6 | Demo ready | everyone | Not started |
 
-Order: M1 unblocks real-phone testing for M2 and M5. M3 and M4 can run in parallel from the start against mocks. M6 starts when M2 to M5 are done or cut (see "Cut list").
+Order: 2 is nearly done; 1 and 3 run in parallel; 4 can start now from simulated data; 6 starts when 1 to 5 are done or cut (see "Cut list").
 
 ## Benchmarks
 
@@ -31,7 +29,7 @@ Order: M1 unblocks real-phone testing for M2 and M5. M3 and M4 can run in parall
 | [ ] No em dashes and no dosing advice in anything a person reads | `test/copy.test.ts` |
 | [ ] Synthetic data only | Only FinchNode demo subjects and `fixtures/` |
 
-### M0: Records and rules (done)
+### Foundation: records and rules (done)
 
 | Benchmark | How we check |
 | --- | --- |
@@ -41,7 +39,20 @@ Order: M1 unblocks real-phone testing for M2 and M5. M3 and M4 can run in parall
 | [x] Packet for Harriet: age 78, usual range 65 to 91 kept but not compared (AFib), open flags R1, R3, R4 | `npm run packet -- patient-demo-polypharmacy` |
 | [x] All scripted demos run offline | every `scripts/demo/*.txt` exits 0 |
 
-### M1: Check-in live on phones (lane 1)
+### 1. Video check-in call (lane B)
+
+| Benchmark | How we check |
+| --- | --- |
+| [ ] Presage spike result written in `FEEDBACK.md` (Node SDK on Relay frames, or the fallback scan screen) | The file |
+| [ ] Call answered within 10 seconds of tapping "Call me" (Relay's hard limit is 32) | Live, 3 tries |
+| [ ] First sentence says it's an AI assistant; never gives medical or dosing advice ("should I stop my aspirin?" gets "ask your doctor") | Live |
+| [ ] Covers today's check-in questions in conversation and mentions something from her day (a memory or yesterday's check-in) | Live, 3 tries |
+| [ ] Guides her through a reading and says the heart rate back as an estimate; for AFib no usual-range comparison; never blood pressure or HRV | Live |
+| [ ] Heart rate within 5 bpm of Presage's own app, same person, same minute, 3 of 3 tries | Side by side, numbers written down |
+| [ ] After the call, her answers are recorded through the same extraction and severity ladder as text (a spoken "ankles a bit puffy" becomes a level-1 ankle answer) | `checkins`, `symptom_observations` rows after a live call |
+| [ ] Ends within about 3 minutes by pointing her to a real person | Live |
+
+### 2. Text check-in (lane A)
 
 | Benchmark | How we check |
 | --- | --- |
@@ -59,66 +70,58 @@ Order: M1 unblocks real-phone testing for M2 and M5. M3 and M4 can run in parall
 | [ ] Answer mapping at least 90% (model alone) | Second run after the graded labels: 84% (27 of 32). All 5 misses end safely in the app (3 red-flag readings go back to her for a one-tap confirm, 2 hedges get the buttons again), but the model itself is below target: tune the hedge and "slept in my recliner" cases |
 | [x] Gemini down: typed replies fall back to buttons with honest wording | `test/free-text.test.ts` (`typedReplyUnavailable`) |
 | [ ] Today's breathing conversation replays correctly (her "more info" saved, typed "Yes" counted, no flag offer after, follow-up later) | `scripts/demo/harriet-red-flag-typed.txt` and live |
+| [ ] A natural one-message check-in on a good day ("feeling fine, ankles ok, slept well") closes with no extra questions it already answered | Live |
+| [ ] Bundled replies understood: answers and extra symptoms recorded under the right topics, with the "Got it" line | Live, the Oct 7 cases |
 
-### M2: Voice call (lane 2)
-
-| Benchmark | How we check |
-| --- | --- |
-| [ ] Call answered within 10 seconds of tapping "Call me to chat" (Relay's hard limit is 32) | Live, 3 tries |
-| [ ] First sentence says it's an AI assistant | Live recording or transcript |
-| [ ] Mentions at least one thing from her day (a memory or today's check-in) | Live, 3 tries |
-| [ ] Never gives medical or dosing advice; a medicine question gets "ask your doctor" | Live: ask "should I stop my aspirin?" |
-| [ ] Ends within about 3 minutes by pointing her to a real person | Live |
-| [ ] What she shared is saved and shows in the next day's packet | `memories` table, `npm run packet` |
-
-### M3: Vitals (lane 3)
+### 3. Medication helper (lane A)
 
 | Benchmark | How we check |
 | --- | --- |
-| [ ] Spike result written in `FEEDBACK.md` (Node SDK on frames, or the fallback scan screen) | The file |
-| [ ] Heart rate within 5 bpm of Presage's own app, same person, same minute, 3 of 3 tries | Side by side, written down with the numbers |
-| [ ] Reading spoken back as an estimate, no "usual range" comparison for AFib | Live |
-| [ ] Breathing rate recorded, never compared | `vitals_readings` row |
-| [ ] Never shows blood pressure or HRV | Code search and live |
-| [ ] Family sees it at "status_vitals" and "all" only | Live, two sharing levels |
+| [ ] Morning reminder lists exactly the medicines her record says she takes in the morning, with the label instructions read back unchanged | Compare with `npm run packet` medications |
+| [ ] "Do you remember how many?" confirms or gently corrects by reading the instructions back; never a new instruction | Live and a copy test |
+| [ ] Photo of a bottle or label: medicine and strength read correctly and matched against her record, 3 of 3 photos | Live with a printed synthetic label |
+| [ ] Mismatch between photo and record: "please check with your pharmacist", never "take this instead" | Live and a test |
+| [ ] Refill reminder a few days before a fill runs out (fill date plus days supply), with a ready-to-read request and an offer to tell her family | Simulator with `CLOCK_DATE` near a run-out date |
+| [ ] No dosing advice anywhere: no "take more", "skip", "double", "stop" in any reply | Copy scan test |
 
-### M4: Paper photo and visit-prep sheet (lane 4)
-
-| Benchmark | How we check |
-| --- | --- |
-| [ ] Photo of the printed discharge sheet: at least 13 of 14 medicines read correctly | 3 photos, compared with `fixtures/papers/harriet-discharge.extracted.json` |
-| [ ] Aspirin stop caught 3 of 3 times, after she confirms the read-back | Live |
-| [ ] R6 flag goes new, told, noted | `flags` table |
-| [ ] Visit-prep sheet: noted flags with evidence (record and date), her notes, her visit questions, heart-rate readings, on one printed page | Print it |
-| [ ] Never prints a dosing instruction | Read the sheet; copy test |
-
-### M5: Family voice messages (lane 5)
+### 4. Doctor report (lane C)
 
 | Benchmark | How we check |
 | --- | --- |
-| [ ] Voice memo from Harriet reaches every family chat in under 10 seconds | Live |
-| [ ] Voice memo from family reaches Harriet | Live |
-| [ ] "Tell Sarah I love her" (typed) is passed on | Live |
+| [ ] One printed page: patient and conditions, the week's symptoms by severity level with dates and her words, vitals, her visit questions, flags with evidence, medicines and refill status | Print it from a simulated week |
+| [ ] Every number and date in it matches the database and her FinchNode record | Spot-check 5 items |
+| [ ] Shareable link served locally | Open it on a phone |
+| [ ] Never prints dosing advice or a diagnosis | Read it; copy test |
 
-### M6: Demo ready (everyone)
+### 5. Family updates (lane C)
 
 | Benchmark | How we check |
 | --- | --- |
-| [ ] `docs/DEMO.md`: a 3-minute script built on R1 (falling kidney numbers on metformin, flag, "I'll ask my doctor", visit-prep sheet) | The file |
+| [ ] Daily status and alerts reach every linked family chat on a second phone | Live |
+| [ ] Red flag reaches the family chat in under 5 seconds | Live |
+| [ ] A family member's reply is passed on to Harriet ("Sarah says: ...") | Live |
+| [ ] "Tell Sarah I love her" is passed on | Live |
+
+### 6. Demo ready (everyone)
+
+| Benchmark | How we check |
+| --- | --- |
+| [ ] `docs/DEMO.md`: a 3-minute script across the five features | The file |
 | [ ] The script runs start to finish twice in a row with no manual fixes | Rehearsal |
-| [ ] Backups: simulator script of the demo, a screen recording of a good run, a paid LLM key or Claude credits in `.env` | All three exist |
+| [ ] Backups: a simulator script of the demo, a screen recording of a good run, a paid LLM key | All three exist |
 | [ ] A teammate sets up from a fresh clone with the README in under 10 minutes | Someone who didn't build it |
 | [ ] Every claim in the pitch is backed by a benchmark above; nothing from "Claims we will not make" in `docs/BRIEF.md` | Read the slides against this file |
-| [ ] Prize tracks checked and each sponsor's part named in the pitch | `FEEDBACK.md` |
+| [ ] Prize tracks checked and each sponsor's part named in the pitch (FinchNode, Relay, ElevenLabs, Presage, Gemini if there's a track) | `FEEDBACK.md` |
 
 ## Cut list
 
 If time runs short, cut in this order and say so in the pitch rather than faking it:
 
-1. Weekly family summary (never started).
-2. Family voice memos from family to Harriet (keep Harriet to family).
-3. Vitals on the Relay call: use the fallback scan screen.
-4. Breathing rate (keep heart rate).
-5. Small talk (keep typed answers, safety and fixed replies).
+1. SMS or iMessage for family (not in the MVP anyway).
+2. Weekly family summary and family replies.
+3. FHIR export of the doctor report.
+4. Heart rate on the Relay call: use the fallback scan screen.
+5. "Do you remember how many?" (keep the reminder and the photo check).
+6. Refill reminders.
 
-Never cut: the check-in, red flags reaching the family, the safety screen, the paper check, the visit-prep sheet. Those carry the story.
+Never cut: the text check-in with the safety screen, the voice part of the video call, the morning medication reminder, the doctor report. Those carry the story.
