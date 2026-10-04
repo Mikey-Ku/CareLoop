@@ -47,12 +47,20 @@ Before a Presage reading, explain that a quiet camera measurement is needed, ask
 Use a caring, respectful, concise tone. The patient should feel heard and valued. You are not a clinician and must not imply otherwise.
 ```
 
-Configure two ElevenLabs server tools that send JSON containing only identifiers and structured control data:
+Configure two ElevenLabs server tools that send JSON containing only identifiers and structured control data. The Relay bridge provides these dynamic variables when it connects:
+
+* `call_id`: the active Relay call ID.
+* `patient_id`: the authenticated local patient ID.
+* `patient_name`: the patient's preferred name.
+
+Use `{{call_id}}` in the tool body. Do not ask the patient for an ID and do not use a phone number as an identifier.
 
 * `POST /integrations/elevenlabs/screen-symptoms`, body `{ "callId": "..." }`.
 * `POST /integrations/elevenlabs/quiet-measurement`, body `{ "callId": "...", "permissionGranted": true }`.
 
 Both endpoints require `Authorization: Bearer $ELEVENLABS_TOOL_SECRET`. Put the public HTTPS URL of this server in the tool configuration. Do not put audio, video, or a full FinchNode record in tool arguments.
+
+Configure the screening webhook to wait for its response before the agent continues. The endpoint deliberately returns only `{ "patientResponseText": "..." }`; the full screening result remains backend-only. This keeps concern level, FinchNode evidence, and caregiver-only details out of the patient voice channel.
 
 ## Runtime flow
 

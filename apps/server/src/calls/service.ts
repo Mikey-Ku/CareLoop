@@ -182,7 +182,12 @@ export class CallService implements CallEventHandler {
           apiKey: this.#options.config.calls.elevenLabsApiKey,
           agentId: this.#options.config.calls.elevenLabsAgentId,
           initiationData: {
-            dynamic_variables: { patient_name: patient.preferredName, screening_operation: "screen_symptoms" },
+            dynamic_variables: {
+              call_id: call.id,
+              patient_id: patient.id,
+              patient_name: patient.preferredName,
+              screening_operation: "screen_symptoms",
+            },
             conversation_config_override: { agent: { first_message: `Hello ${patient.preferredName}. I’m here to listen and help organize what you are experiencing for your care team.` } },
           },
         },

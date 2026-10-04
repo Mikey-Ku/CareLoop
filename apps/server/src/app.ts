@@ -69,7 +69,8 @@ function callToolRouter(calls: NonNullable<AppDeps["calls"]>): express.Router {
       return;
     }
     try {
-      res.json(await calls.screen(callId));
+      const result = await calls.screen(callId) as { patientResponseText?: unknown };
+      res.json({ patientResponseText: typeof result.patientResponseText === "string" ? result.patientResponseText : "A member of your care team will review what you shared." });
     } catch (error) {
       next(error);
     }
