@@ -209,4 +209,4 @@ Re-record a well-lit face-and-chest clip longer than 30 seconds, set `PRESAGE_AP
 - Added the `apps/server/src/calls/` lifecycle, interview, deterministic emergency precedence, quiet measurement, Gemini screening contract, ElevenLabs bridge, Relay VideoStream to Presage adapter, backend tool routes, cleanup, and diagnostics.
 - Added schema migration 9 for call metadata and bounded transcript turns. No raw audio or video columns are present.
 - Added `docs/CALLS.md` with setup, agent prompt, tool routes, phone test steps, SDK versions, and Presage limitations.
-- Verification: `pnpm lint` passed. The complete `pnpm test` suite passed with 39 files and 1,349 tests after allowing the existing app and agent tests to bind ephemeral loopback ports.
+- Verification: `pnpm lint` passed. The complete `pnpm test` suite passed with 40 files and 1,364 tests after allowing the existing app and agent tests to bind ephemeral loopback ports.
