@@ -1,3 +1,4 @@
+# npm run simulate -- --reset --day 2026-07-28 --sharing all --family sarah --script ../../scripts/demo/hackathon-demo.txt
 # Offline fallback: synthetic fixtures and explicitly scripted image readings.
 # Start --day 2026-07-28 --sharing all --family sarah with a NEW temporary --db.
 # Text check-in: fixed buttons, calm day, record-backed flag deferred.

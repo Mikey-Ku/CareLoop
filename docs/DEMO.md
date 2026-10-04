@@ -1,6 +1,6 @@
 # Three-minute hackathon demo
 
-Use only Harriet's synthetic FinchNode record. The five features are video check-in, text check-in, medication helper, doctor report, and family updates. Readiness is tracked in [DEMO_READINESS.md](DEMO_READINESS.md), not inferred from this script.
+Use only Harriet's synthetic FinchNode record. The five features are video check-in, text check-in, medication helper, doctor report, and family updates. Use the acceptance gates in [QA.md](QA.md) and [DEFINITION_OF_DONE.md](DEFINITION_OF_DONE.md); this script does not prove live readiness.
 
 ## Before the timer
 
