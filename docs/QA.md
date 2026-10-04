@@ -27,6 +27,7 @@ Do "Try it on your phone" in the [README](../README.md#try-it-on-your-phone-abou
 | `GEMINI_MODELS`, `LLM_TIMEOUT_MS`, `LLM_ATTEMPT_TIMEOUT_MS` | Model list and time budget | Leave defaults |
 | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | Realtime transcription and spoken replies inside the Relay call (no ElevenLabs agent, tool secret or tunnel) | Needed for calls |
 | `ELEVENLABS_STT_MODEL`, `ELEVENLABS_TTS_MODEL`, `ELEVENLABS_TTS_OUTPUT_FORMAT` | Direct ElevenLabs model and audio format | Leave defaults |
+| `ELEVENLABS_TTS_GAIN` | How loud the voice is: a soft limiter, 1 to 4 (default 1.6; 1 leaves it untouched) | Optional; raise it if the voice sounds quiet |
 | `PRESAGE_API_KEY` | Pulse and breathing estimates from Relay video frames | Optional; without it the call skips the camera reading |
 | `CALL_QUIET_MEASUREMENT_MS` | Length of the quiet reading, 30000 to 45000 | Optional |
 | `CALL_MAX_MINUTES`, `VITALS_MIN_CONFIDENCE` | Server ends the call after N minutes (default 4); lowest camera confidence used (default 1) | Optional |

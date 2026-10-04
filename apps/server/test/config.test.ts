@@ -199,4 +199,12 @@ describe("direct ElevenLabs call settings", () => {
     expect(JSON.stringify(config)).not.toContain(presageKey);
     expect(() => loadConfig({ ELEVENLABS_TTS_OUTPUT_FORMAT: "pcm_24000" })).toThrow("ELEVENLABS_TTS_OUTPUT_FORMAT");
   });
+
+  it("voice gain defaults to 1.6; 1 means untouched; values outside 1 to 4 are refused", () => {
+    expect(loadConfig({}).calls.elevenLabsTtsGain).toBe(1.6);
+    expect(loadConfig({ ELEVENLABS_TTS_GAIN: "" }).calls.elevenLabsTtsGain).toBe(1.6);
+    expect(loadConfig({ ELEVENLABS_TTS_GAIN: "1" }).calls.elevenLabsTtsGain).toBe(1);
+    expect(loadConfig({ ELEVENLABS_TTS_GAIN: "2.5" }).calls.elevenLabsTtsGain).toBe(2.5);
+    for (const bad of ["0.5", "0", "-1", "9", "loud"]) expect(() => loadConfig({ ELEVENLABS_TTS_GAIN: bad }), bad).toThrow("ELEVENLABS_TTS_GAIN");
+  });
 });

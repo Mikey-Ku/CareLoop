@@ -63,6 +63,8 @@ const ConfigSchema = z.object({
   ELEVENLABS_STT_MODEL: z.string().default("scribe_v2_realtime"),
   ELEVENLABS_TTS_MODEL: z.string().default("eleven_flash_v2_5"),
   ELEVENLABS_TTS_OUTPUT_FORMAT: z.string().default("pcm_48000").pipe(z.literal("pcm_48000")),
+  /** Soft limiter on the voice (src/calls/audio.ts softLimit). 1 leaves it untouched; 1.6 lifts a quiet voice about 4.7 dB without clipping. */
+  ELEVENLABS_TTS_GAIN: z.coerce.number().min(1, "must be 1 (untouched) or more").max(4, "must be 4 or less").default(1.6),
   CALL_QUIET_MEASUREMENT_MS: z.coerce.number().int().min(30_000).max(45_000).default(30_000),
   /** Longest call; the server ends the ElevenLabs session after it (Relay's 32 s is only the time to answer). */
   CALL_MAX_MINUTES: z.coerce.number().positive().max(30).default(4),
@@ -112,6 +114,8 @@ export type CallsConfig = {
   elevenLabsSttModel: string;
   elevenLabsTtsModel: string;
   elevenLabsTtsOutputFormat: string;
+  /** ELEVENLABS_TTS_GAIN: the voice's soft limiter gain, 1 to 4 (1 untouched). */
+  elevenLabsTtsGain: number;
   /** SmartSpectra key. Non-enumerable and never logged. */
   presageApiKey: string | undefined;
   /** SmartSpectra's minimum quiet window for breathing. */
@@ -172,6 +176,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     elevenLabsSttModel: c.ELEVENLABS_STT_MODEL.trim(),
     elevenLabsTtsModel: c.ELEVENLABS_TTS_MODEL.trim(),
     elevenLabsTtsOutputFormat: c.ELEVENLABS_TTS_OUTPUT_FORMAT.trim(),
+    elevenLabsTtsGain: c.ELEVENLABS_TTS_GAIN,
     presageApiKey: undefined,
     quietMeasurementMs: c.CALL_QUIET_MEASUREMENT_MS,
     maxMinutes: c.CALL_MAX_MINUTES,

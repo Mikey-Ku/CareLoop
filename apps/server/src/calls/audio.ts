@@ -160,11 +160,26 @@ export class ElevenLabsRealtimeStt {
   }
 }
 
+/**
+ * A soft limiter for the voice: y = tanh(g * x) / tanh(g) on samples scaled to [-1, 1]. Quiet speech is
+ * raised (about 4.7 dB at g = 1.6) and loud peaks are rounded off instead of clipped, so the result never
+ * leaves the int16 range. A gain of 1 (or less) returns the samples untouched.
+ */
+export function softLimit(samples: Int16Array, gain: number): Int16Array {
+  if (!(gain > 1)) return samples;
+  const scale = 32_768 / Math.tanh(gain);
+  const output = new Int16Array(samples.length);
+  for (let i = 0; i < samples.length; i += 1) output[i] = Math.max(-32_768, Math.min(32_767, Math.round(Math.tanh((gain * (samples[i] ?? 0)) / 32_768) * scale)));
+  return output;
+}
+
 export type ElevenLabsTtsOptions = {
   apiKey: string;
   voiceId: string;
   modelId?: string;
   outputFormat?: string;
+  /** ELEVENLABS_TTS_GAIN: the soft limiter's gain on the voice (softLimit). Absent or 1: untouched. */
+  gain?: number;
   log?: AudioLogger;
   fetch?: typeof fetch;
 };
@@ -231,7 +246,7 @@ export class ElevenLabsTts {
           remainder = bytes.slice(usableLength);
           if (usableLength === 0) continue;
           const samples = new Int16Array(bytes.buffer, bytes.byteOffset, usableLength / 2);
-          await this.#transport.writeAudio({ samples, sampleRate: 48_000, channelCount: 1 });
+          await this.#transport.writeAudio({ samples: softLimit(samples, this.#options.gain ?? 1), sampleRate: 48_000, channelCount: 1 });
         }
         if (!controller.signal.aborted) await this.#transport.waitForPlayout();
       } finally {

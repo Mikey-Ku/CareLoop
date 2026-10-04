@@ -1,6 +1,7 @@
 import type { Call, CallWebhookEvent } from "@relaymessenger/sdk";
 import type { RelayCallTransport } from "@relaymessenger/sdk/calls";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ElevenLabsRealtimeStt, ElevenLabsTts } from "../src/calls/audio.ts";
 import { callClosing } from "../src/calls/copy.ts";
 import { CallService } from "../src/calls/service.ts";
 import { crisisReply, urgentReply } from "../src/checkin/copy.ts";
@@ -74,9 +75,12 @@ let transport: FakeTransport;
 let stt: FakeStt;
 let tts: FakeTts;
 let llm: FakeLlmClient;
+/** What the service handed the voice and the transcriber when the last call was answered. */
+let ttsOptions: ConstructorParameters<typeof ElevenLabsTts>[1] | undefined;
+let sttOptions: ConstructorParameters<typeof ElevenLabsRealtimeStt>[0] | undefined;
 let relay: { calls: { end: ReturnType<typeof vi.fn> }; chats: { messages: { send: ReturnType<typeof vi.fn> } } };
 
-function setup(options: { wallNow?: () => string; callTurn?: (input: Parameters<NonNullable<FakeLlmClient["callTurn"]>>[0]) => CallTurnLlmOutput | Error } = {}) {
+function setup(options: { wallNow?: () => string; callTurn?: (input: Parameters<NonNullable<FakeLlmClient["callTurn"]>>[0]) => CallTurnLlmOutput | Error; env?: Record<string, string> } = {}) {
   transport = new FakeTransport();
   stt = new FakeStt();
   tts = new FakeTts();
@@ -84,7 +88,7 @@ function setup(options: { wallNow?: () => string; callTurn?: (input: Parameters<
   llm = new FakeLlmClient({ callTurn: options.callTurn });
   const service = new CallService({
     db,
-    config: loadConfig({ ELEVENLABS_API_KEY: "test-key", ELEVENLABS_VOICE_ID: "voice-test", PATIENT_TIMEZONE: "America/Detroit" }),
+    config: loadConfig({ ELEVENLABS_API_KEY: "test-key", ELEVENLABS_VOICE_ID: "voice-test", PATIENT_TIMEZONE: "America/Detroit", ...options.env }),
     relay: relay as never,
     loadSnapshot: async (subject) => loadSnapshot(subject),
     llm,
@@ -92,8 +96,8 @@ function setup(options: { wallNow?: () => string; callTurn?: (input: Parameters<
     now: () => NOW,
     wallNow: options.wallNow ?? (() => NOW),
     transportFactory: () => transport as unknown as RelayCallTransport,
-    sttFactory: () => stt as never,
-    ttsFactory: () => tts as never,
+    sttFactory: (options) => ((sttOptions = options), stt as never),
+    ttsFactory: (_transport, options) => ((ttsOptions = options), tts as never),
   });
   return service;
 }
@@ -186,6 +190,15 @@ const modelPlan = (overrides: Partial<CallTurnLlmOutput> = {}): CallTurnLlmOutpu
   evidence: [],
   uncertainty: [],
   ...overrides,
+});
+
+describe("the voice and the transcriber are set up from the configuration", () => {
+  it("the voice gets the soft limiter gain: 1.6 unless ELEVENLABS_TTS_GAIN says otherwise", async () => {
+    await start(setup());
+    expect(ttsOptions?.gain).toBe(1.6);
+    await start(setup({ env: { ELEVENLABS_TTS_GAIN: "2.2" } }), relayCall("harriet", "call-2"));
+    expect(ttsOptions?.gain).toBe(2.2);
+  });
 });
 
 describe("what a call says at its end and in an emergency is fixed copy", () => {

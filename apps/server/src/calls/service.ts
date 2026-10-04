@@ -247,6 +247,7 @@ export class CallService implements CallEventHandler {
         voiceId: calls.elevenLabsVoiceId,
         modelId: calls.elevenLabsTtsModel,
         outputFormat: calls.elevenLabsTtsOutputFormat,
+        gain: calls.elevenLabsTtsGain,
         log: (event, fields) => this.#log(event, { call_id: call.id, ...fields }),
       };
       const tts = (this.#options.ttsFactory ?? ((target, options) => new ElevenLabsTts(target, options)))(transport, ttsOptions);
