@@ -154,6 +154,7 @@ Before each: agent running with a fresh `CLOCK_DATE` (or fresh database), `FOLLO
 - Expect: answered within 10 seconds; first sentence says it is an AI; asks today's questions; quiet prompt; heart rate as a camera estimate with no usual-range words; a medicine question gets a pointer to her doctor or pharmacist, never advice (this is Gemini's wording on a call, so check it); the same fixed goodbye naming Sarah, with no advice and no question (never Gemini's own closing); ends by about 3 minutes (cut at 4). Then one "Here's what I noted from our call: ..." message with [That's right] [Something's wrong].
 4. Second call: say "I have chest pain". Expect the 911 reply and Sarah alerted during the call.
 5. Write down the heart rate next to Presage's own app, same person, same minute.
+- No camera offer: look for `call_video_changed` and `call_camera_offer_skipped` in the agent log (`[calls]`). Start the call with the video icon in Relay and allow camera access.
 
 **S13. Ask about her own history**
 1. After the medicines reminder and a check-in, type "did I take my pills today?", then "what did Sarah say?" (Sarah must have sent something), then "when does my refill run out?".
