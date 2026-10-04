@@ -32,13 +32,6 @@ describe("npm run llm:check", () => {
     expect(output).toContain("GEMINI_API_KEY");
   });
 
-  it("asks for gemini when another provider is set", async () => {
-    const { code, output } = await run({ LLM_PROVIDER: "anthropic", GEMINI_API_KEY: KEY });
-    expect(code).toBe(1);
-    expect(output).toContain("LLM_PROVIDER=gemini");
-    expect(output).not.toContain(KEY);
-  });
-
   it("runs the samples, small talk, classification and extraction, printing results, models and timings, never the key", async () => {
     const fetch: FetchLike = async (url, init) => {
       const body = JSON.parse(String(init.body));

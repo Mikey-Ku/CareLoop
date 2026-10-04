@@ -60,7 +60,6 @@ export function createApp(deps: AppDeps): Express {
       }
     });
 
-  app.use("/webhooks/relay", relayWebhookRouter());
 
   const notFound: RequestHandler = (_req, res) => {
     res.status(404).json({ error: "not_found" });
@@ -148,14 +147,6 @@ function sameSecret(received: string, expected: string): boolean {
  * Placeholder for the Relay webhook (docs/DESIGN.md "Relay"). The body is kept raw
  * because the Standard Webhooks signature check in run 2 must run on the exact bytes.
  */
-function relayWebhookRouter(): express.Router {
-  const router = express.Router();
-  router.use(express.raw({ type: "*/*", limit: "1mb" }));
-  router.all("/", (_req, res) => {
-    res.status(501).json({ error: "not_implemented", message: "not implemented until run 2" });
-  });
-  return router;
-}
 
 function hostOf(url: string): string {
   try {

@@ -166,7 +166,6 @@ export function describeClassification(c: MessageClassification): string {
 /** What .env needs before the check can call anything. Empty when ready. */
 export function missingSetup(config: Config): string[] {
   const missing: string[] = [];
-  if (config.llm.provider !== "gemini") missing.push(`LLM_PROVIDER=gemini (it is ${config.llm.provider}, which has no adapter yet)`);
   if (!config.llm.geminiApiKey) missing.push("GEMINI_API_KEY (a free key from https://aistudio.google.com/apikey, in the repo-root .env)");
   if (config.llm.geminiModels.length === 0) missing.push("GEMINI_MODELS (or leave it unset for the defaults)");
   return missing;

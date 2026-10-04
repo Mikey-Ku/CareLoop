@@ -374,10 +374,8 @@ describe("createLlmClient", () => {
     expect(describeLlm(config)).toContain("GEMINI_API_KEY is not set");
   });
 
-  it("is undefined for anthropic, which has no adapter yet", () => {
-    const config = loadConfig({ LLM_PROVIDER: "anthropic", GEMINI_API_KEY: KEY });
-    expect(createLlmClient(config)).toBeUndefined();
-    expect(describeLlm(config)).toContain("anthropic");
+  it("rejects a provider with no adapter", () => {
+    expect(() => loadConfig({ LLM_PROVIDER: "anthropic", GEMINI_API_KEY: KEY })).toThrow(/LLM_PROVIDER must be gemini/);
   });
 
   it("builds a Gemini client from the config or its llm section, using the configured models", async () => {

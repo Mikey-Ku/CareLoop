@@ -9,14 +9,14 @@ What "finished" means for the MVP (the five features in `docs/BRIEF.md`), and th
 | # | MVP feature | Lane | Status |
 | --- | --- | --- | --- |
 | 0 | Foundation: records, rules, engine, simulator, CI | done | Done |
-| 1 | Video check-in call (ElevenLabs voice, Presage heart rate) | B | Not started (Presage spike first) |
+| 1 | Video check-in call (ElevenLabs voice, Presage heart rate) | B | Built and tested offline (AI disclosure, ladder, call shape, post-call text, vitals saved); not yet tried on a live call |
 | 2 | Text check-in | A | Live on a phone; polishing |
-| 3 | Medication helper (reminders, label photo, refills) | A | Not started |
-| 4 | Doctor report | C | Not started |
-| 5 | Family updates | C | Status and alerts work in Relay family chats; replies not built |
+| 3 | Medication helper (reminders, label photo, refills) | A | Built (reminders, memory check, label photo, refills, discharge-paper notes); live label-photo test pending |
+| 4 | Doctor report | C | Built: two pages, clinical format, served by the agent at `/report/<patient id>`; phone and spot-check pending |
+| 5 | Family updates | C | Status, alerts and replies ("Sarah says: ...") built in Relay family chats; second-phone test pending |
 | 6 | Demo ready | everyone | Not started |
 
-Order: 2 is nearly done; 1 and 3 run in parallel; 4 can start now from simulated data; 6 starts when 1 to 5 are done or cut (see "Cut list").
+Order (Oct 4): everything is built; what is left is live testing on phones (`docs/QA.md`), the live call with ElevenLabs and Presage, then 6.
 
 ## Benchmarks
 
@@ -91,7 +91,7 @@ Order: 2 is nearly done; 1 and 3 run in parallel; 4 can start now from simulated
 | [ ] Two printed pages, page 1 standing alone (flags, symptoms, her questions; labs and medicines on page 2): patient and conditions, the week's symptoms by severity level with dates and her words, vitals, her visit questions, flags with evidence, medicines and refill status | Print it from a simulated week |
 | [ ] Every number and date in it matches the database and her FinchNode record | Spot-check 5 items |
 | [ ] Shareable link served locally | Open it on a phone |
-| [ ] Never prints dosing advice or a diagnosis | Read it; copy test |
+| [x] Never prints dosing advice or a diagnosis | Read it; copy test: `test/report.test.ts` scans the rendered report (no dosing words, no Do Not Use abbreviations, no trailing zeros), Oct 4 |
 
 ### 5. Family updates (lane C)
 

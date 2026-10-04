@@ -1,4 +1,4 @@
-// What the app needs from any LLM provider (Gemini today, Claude possible).
+// What the app needs from any LLM provider (Gemini today).
 // The LLM only reads and words. It never decides what is medically risky:
 // fixed rules act on the answer she taps or that the mapping picks, and a
 // red-flag question always goes back to her for a one-tap confirm.
@@ -224,7 +224,7 @@ export type CallScreeningLlmOutput = {
 };
 
 export interface LlmClient {
-  /** "gemini", "anthropic" or "fake". */
+  /** "gemini" or "fake". */
   readonly provider: string;
   mapAnswer(input: MapAnswerInput, options?: LlmCallOptions): Promise<AnswerMapping>;
   smallTalk(input: SmallTalkInput, options?: LlmCallOptions): Promise<SmallTalkReply>;

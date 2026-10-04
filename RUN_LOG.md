@@ -259,3 +259,18 @@ Re-record a well-lit face-and-chest clip longer than 30 seconds, set `PRESAGE_AP
 - Added schema migration 9 for call metadata and bounded transcript turns. No raw audio or video columns are present.
 - Added `docs/CALLS.md` with setup, agent prompt, tool routes, phone test steps, SDK versions, and Presage limitations.
 - Verification: `pnpm lint` passed. The complete `pnpm test` suite passed with 40 files and 1,364 tests after allowing the existing app and agent tests to bind ephemeral loopback ports.
+
+## Lane A integration: 2026-10-04 (branch laneA/meds-and-care, combined PR)
+
+**Merged:** PR #6 (care summaries, on Gemini), PR #7 (video call), the medication helper, and three fix branches:
+- `laneA/fix-calls`: PR #7 review fixes. The call says it's an AI first; the rules (not Gemini) set the call's level through the same ladder as text; each spoken turn is screened; family alerts on level 3+; only pulse and breathing rate are requested from SmartSpectra, with no usual-range readback for AFib; readings saved to `vitals_readings`; wrong callers get a text and nothing else. Call shape about 3 minutes (`CALL_MAX_MINUTES`, default 4), yesterday's notes and memories as context, one post-call text ("Here's what I noted from our call") with "That's right" / "Something's wrong". `docs/CALLS.md` rewritten with the agent prompt, dashboard settings and tunnel setup.
+- `laneA/fix-text-meds`: typed text goes to the latest open prompt (the live "I have a question" bug); a medicine her discharge papers stopped keeps its reminder line, with "please check with your pharmacist" (R6); family messages reach her as `Sarah says: "..."` after the safety screen; care-summary items match by her local day. Migration 13 (`waiting_prompts`).
+- `laneA/doctor-report`: `npm run report` and `GET /report/:patientId`, a week as a clinical summary (Subjective, Objective, Medications, Items for clinician review; SNOMED CT, LOINC, RxNorm, UCUM; ISMP-safe medicine names). Two printed pages; page 1 stands alone (flags, symptoms, her questions), labs and medicines on page 2.
+
+**Integration fixes:** a video call counts as checking in (no "hasn't checked in" alert after a call with no answers); `npm run agent` serves the report and logs its link.
+
+**Cleanup:** removed the `/webhooks/relay` 501 placeholder (delivery is WebSocket, ADR 0002); `LLM_PROVIDER` is gemini only (the anthropic option had no adapter); Photon summaries marked optional in README and `.env.example`; DESIGN diagram and migration comments corrected; DoD scoreboard updated.
+
+**Migrations:** 10 medication helper, 11 care summaries, 12 call sessions, 13 waiting prompts. Anyone who ran `photon/care-summaries` or `lane3/presage-spike` has those tables under other numbers: delete `data/*.db` and `apps/server/data/*.db` once (synthetic data only).
+
+**Verification:** `tsc --noEmit` clean; full suite passes; all 13 `scripts/demo/*.txt` exit 0 with the flags in their headers. Not verified live: the call (needs the ElevenLabs agent and an HTTPS tunnel), label photos, a second phone as Sarah.

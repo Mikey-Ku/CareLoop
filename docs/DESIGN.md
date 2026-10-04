@@ -7,9 +7,9 @@ Plan doc with diagrams: https://claude.ai/code/artifact/3b6c7a92-f524-40dc-85cf-
 ```
 Harriet (Relay iOS app) --\                         /--> FinchNode demo API (record, read-only)
                            >-- Relay API -- our backend --> ElevenLabs Agent (voice, via Relay bridge)
-Sarah (her own Relay chat) -/   (webhooks,     |         \--> Presage SmartSpectra SDK (vitals from frames)
+Sarah (her own Relay chat) -/   (WebSocket,    |         \--> Presage SmartSpectra SDK (vitals from frames)
                                  calls)        |
-                                               +--> Anthropic Claude (chat wording, reading paper photos)
+                                               +--> Gemini (reads typed replies and photos, words texts)
                                                +--> SQLite (our database)
 ```
 
@@ -37,7 +37,7 @@ Backend parts:
 | Lint | `tsc --noEmit` (`npm run lint`) | Typecheck only; no ESLint dependency |
 | Relay | `@relaymessenger/sdk`, `@relaymessenger/elevenlabs`, CLI `npx relaymessenger` | Chat, buttons, calls, media, voice memos |
 | Voice | ElevenLabs Agent (configured in the ElevenLabs dashboard) | Warm voice; context passed at call start |
-| LLM | Gemini (free tier) through its REST API, behind a provider-neutral `LlmClient` (`src/llm/`); Claude possible via `LLM_PROVIDER=anthropic` | Reads free-text replies, writes small talk, reads paper photos. Free tier: synthetic data only, and Google may use prompts to improve its products. Decided 2026-10-03 |
+| LLM | Gemini (free tier) through its REST API, behind a provider-neutral `LlmClient` (`src/llm/`) | Reads free-text replies, writes small talk, reads paper photos. Free tier: synthetic data only, and Google may use prompts to improve its products. Decided 2026-10-03 |
 | Vitals | Presage SmartSpectra C++ SDK with custom frame input, as a sidecar in `services/presage-bridge/` | Takes raw frames from the Relay video call. Final choice after the spike |
 | Drug names | NLM RxNav REST API (no key) | Map free-text medication names to RxNorm codes. Exact normalized-name match only (`rxcui.json?search=2`); approximate search guesses wrong drugs |
 | Package manager | npm | Default with Node |

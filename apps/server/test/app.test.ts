@@ -9,6 +9,7 @@ let base: string;
 beforeAll(async () => {
   const app = createApp({
     config: { finchnode: { baseUrl: "https://api.finchnode.com/demo/v1", apiKey: "ck_test_secret" } },
+    calls: { screen: async () => ({}), beginQuietMeasurement: async () => ({}), toolSecret: "tool_test_secret" },
     logError: () => {},
   });
   server = await new Promise<Server>((resolve) => {
@@ -31,42 +32,12 @@ describe("GET /health", () => {
   });
 });
 
-describe("/webhooks/relay", () => {
-  it("returns 501 for a JSON body", async () => {
-    const res = await fetch(`${base}/webhooks/relay`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "message.created" }),
-    });
-    expect(res.status).toBe(501);
-    expect(await res.json()).toMatchObject({ error: "not_implemented" });
-  });
-
-  it("accepts a non-JSON body without a parse error", async () => {
-    const res = await fetch(`${base}/webhooks/relay`, {
-      method: "POST",
-      headers: { "content-type": "text/plain" },
-      body: "{not json",
-    });
-    expect(res.status).toBe(501);
-  });
-
-  it("accepts malformed JSON labelled as JSON, since the body stays raw", async () => {
-    const res = await fetch(`${base}/webhooks/relay`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: "{not json",
-    });
-    expect(res.status).toBe(501);
-  });
-});
-
 describe("error handler", () => {
   it("answers a body-parser error with JSON and no stack trace", async () => {
-    const res = await fetch(`${base}/webhooks/relay`, {
+    const res = await fetch(`${base}/integrations/elevenlabs/screen-symptoms`, {
       method: "POST",
-      headers: { "content-type": "application/octet-stream" },
-      body: new Uint8Array(1024 * 1024 + 1),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ callId: "x".repeat(33 * 1024) }),
     });
     expect(res.status).toBe(413);
     const text = await res.text();

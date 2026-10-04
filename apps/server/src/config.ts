@@ -45,7 +45,7 @@ const ConfigSchema = z.object({
     .string()
     .default("gemini")
     .transform((v) => v.trim().toLowerCase())
-    .pipe(z.enum(["gemini", "anthropic"], "LLM_PROVIDER must be gemini or anthropic")),
+    .pipe(z.enum(["gemini"], "LLM_PROVIDER must be gemini (the only adapter)")),
   GEMINI_MODELS: z.string().optional(),
   LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(DEFAULT_LLM_TIMEOUT_MS),
   LLM_ATTEMPT_TIMEOUT_MS: z.coerce.number().int().min(500).max(120_000).default(DEFAULT_LLM_ATTEMPT_TIMEOUT_MS),
@@ -76,10 +76,10 @@ export type PatientConfig = {
   timezone: string;
 };
 
-export type LlmProvider = "gemini" | "anthropic";
+export type LlmProvider = "gemini";
 
 export type LlmConfig = {
-  /** LLM_PROVIDER. Only "gemini" has an adapter so far; "anthropic" leaves free text off (buttons only). */
+  /** LLM_PROVIDER. Only "gemini" has an adapter; LlmClient stays provider-neutral for another one. */
   provider: LlmProvider;
   /** GEMINI_API_KEY. Non-enumerable, so it never shows up when the config is printed or serialized. */
   geminiApiKey: string | undefined;

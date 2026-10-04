@@ -2,7 +2,7 @@ import type { CareAudience } from "../care/contacts.ts";
 import type { CareFacts } from "../care/facts.ts";
 import type { Db } from "./index.ts";
 
-// Care summaries and the Photon threads with her doctor and emergency contact (migration 6).
+// Care summaries and the Photon threads with her doctor and emergency contact (migration 11).
 
 export type CareSummaryRow = { id: number; patientId: string; day: string; trigger: string; facts: CareFacts; createdAt: string };
 

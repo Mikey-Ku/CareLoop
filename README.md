@@ -53,7 +53,9 @@ Each person runs their own agent: two programs on the same agent token take each
 
 The commands above are for macOS (`sed -i ''`, zsh `read`). Your conversation is stored in `apps/server/data/app.db` (not in git).
 
-### Care summaries over Photon (doctor and emergency contact)
+### Optional: care summaries over Photon (doctor and emergency contact)
+
+Optional and off by default. The MVP's family updates go through Relay family chats; iMessage is not in the MVP (`docs/BRIEF.md`). Skip this section unless you want to try it.
 
 After each check-in, the doctor and the emergency contact each get a text over [Photon](https://photon.codes/docs/spectrum-ts/getting-started) (iMessage):
 - the doctor gets a data summary;
