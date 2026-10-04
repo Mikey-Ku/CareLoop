@@ -79,7 +79,8 @@ All commands run in `apps/server`.
 | `npm run packet -- patient-demo-polypharmacy` | Prints Harriet's context packet built from the recorded fixtures. Add `--live` to read the FinchNode demo API instead. |
 | `npm run care:send -- [--day YYYY-MM-DD] [--dry-run] [--templates]` | Texts a day's care summaries to the doctor and the emergency contact over Photon (once per day; `--dry-run` only prints them; `--templates` skips Gemini). |
 | `npm run record-fixtures` | Re-records the fixtures in `fixtures/` from the FinchNode demo API. |
-| `npm run dev` | Starts the server on `PORT` (default 3000). For now it serves only `GET /health`; `/webhooks/relay` answers 501 until run 2. |
+| `npm run dev` | Starts the server on `PORT` (default 3000): `GET /health`, and the doctor report at `GET /report/<patientId>[?day=YYYY-MM-DD]` from `DATABASE_PATH`. `/webhooks/relay` answers 501. |
+| `npm run report -- [--day YYYY-MM-DD] [--db path] [--out file.html]` | Writes the doctor report for the 7 days ending on `--day` (default her latest check-in) and prints its path (default `data/report-<day>.html`). See "Doctor report". |
 | `npm run relay:check` | Checks your Relay setup: token, no webhook subscriptions, who has messaged the agent. |
 | `npm run agent` | Runs the Relay agent (WebSocket, daily scheduler, free text through Gemini). `--checkin-now` sends today's check-in right away. |
 | `npm run llm:check` | One live call of each Gemini job, with timings. |
@@ -101,6 +102,27 @@ npm run simulate -- [subject] [--day YYYY-MM-DD] [--db path] [--reset] [--live] 
   - With `--photon`, the summaries also go out on their own when a day ends, as in the agent.
   - Demo: `npm run simulate -- --reset --photon --script ../../scripts/demo/harriet-care-summary.txt`.
 - `--script file` runs one input per line (`#` comments) and exits, non-zero if any input failed. Demo backups live in `scripts/demo/`, for example `npm run simulate -- --reset --script ../../scripts/demo/harriet-day1.txt`.
+
+### Doctor report
+
+A printable summary of one week for her doctor (US letter, two pages), laid out like a clinical summary for a visit: her identifiers and active problems, the week at a glance, what she reported by severity level with dates and her own words (Subjective), camera wellness estimates and labs from her record (Objective), her medications as a reconciliation table with this week's label photos, refills and hospital-paper differences, items for clinician review (rule flags R1 to R6 with their evidence), and her questions for the visit. Fixed wording from the data only: no diagnosis, no dosing advice. Example: [docs/examples/doctor-report-example.html](docs/examples/doctor-report-example.html) (synthetic).
+
+From a simulated week (`scripts/demo/harriet-week.txt`, Aug 26 to Sep 1, 2026):
+
+```
+npm run simulate -- --reset --day 2026-08-26 --script ../../scripts/demo/harriet-week.txt
+npm run report -- --db ../../data/simulator.db
+# -> data/report-2026-09-01.html; open it and print (Background graphics on)
+```
+
+The shareable link, served locally from the same database:
+
+```
+DATABASE_PATH=../../data/simulator.db npm run dev
+# -> http://localhost:3000/report/harriet (or ?day=2026-08-30 for another week)
+```
+
+`--patient <id>` picks a patient when the database has several (default: the first). The report reads the database and her stored record copy only; nothing is sent anywhere.
 
 ## How it works
 
