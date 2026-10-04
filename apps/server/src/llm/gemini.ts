@@ -893,15 +893,30 @@ export function parseCallScreening(text: string): CallScreeningLlmOutput {
   };
 }
 
+/** Statements are spoken as given; any sentence with a question mark is dropped, since the one question lives in nextQuestion. */
+function withoutQuestions(text: string): string {
+  return text.split(/(?<=[.!?？])\s+/).filter((sentence) => !/[?？]/.test(sentence)).join(" ").trim();
+}
+
+/** The first question in `text`, when the model asked several. */
+function firstQuestion(text: string): string {
+  const sentences = text.split(/(?<=[.!?？])\s+/);
+  return (sentences.find((sentence) => /[?？]/.test(sentence)) ?? text).trim();
+}
+
+/**
+ * The model often slips a question into a statement or asks two at once. The caller was heard fine, so these
+ * are repaired (the extra question dropped), never turned into "I did not catch that". Only a reply that
+ * isn't the expected JSON, or a follow-up with no question at all, is refused.
+ */
 export function parseCallTurn(text: string): CallTurnLlmOutput {
   const parsed = CallTurnReplySchema.safeParse(parseJson(text));
   if (!parsed.success) throw new LlmUnavailableError("callTurn: the model's reply was not the expected JSON");
-  const acknowledgment = cleanSpokenText(parsed.data.acknowledgment, 280);
-  const patientResponseText = cleanSpokenText(parsed.data.patientResponseText, 700);
-  const nextQuestion = parsed.data.nextQuestion === null ? null : cleanSpokenText(parsed.data.nextQuestion, 300);
-  if (!acknowledgment || !patientResponseText) throw new LlmUnavailableError("callTurn: empty response text");
-  if (/[?？]/.test(patientResponseText)) throw new LlmUnavailableError("callTurn: acknowledgment must not contain a question");
-  if (nextQuestion && (!["ask_follow_up", "request_measurement_permission"].includes(parsed.data.nextAction) || (nextQuestion.match(/[?？]/g)?.length ?? 0) > 1)) throw new LlmUnavailableError("callTurn: invalid follow-up question");
+  const acknowledgment = withoutQuestions(cleanSpokenText(parsed.data.acknowledgment, 280)) || "Thank you for telling me.";
+  const patientResponseText = withoutQuestions(cleanSpokenText(parsed.data.patientResponseText, 700)) || acknowledgment;
+  const asks = ["ask_follow_up", "request_measurement_permission"].includes(parsed.data.nextAction);
+  const rawQuestion = parsed.data.nextQuestion === null ? "" : cleanSpokenText(parsed.data.nextQuestion, 300);
+  const nextQuestion = asks && rawQuestion ? firstQuestion(rawQuestion) : null;
   if (parsed.data.nextAction === "ask_follow_up" && !nextQuestion) throw new LlmUnavailableError("callTurn: follow-up action requires one question");
   return {
     acknowledgment,

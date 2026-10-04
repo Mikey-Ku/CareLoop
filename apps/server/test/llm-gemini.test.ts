@@ -811,10 +811,19 @@ describe("Gemini adaptive call-turn validation", () => {
     }))).toMatchObject({ nextAction: "ask_follow_up", nextQuestion: "When did it begin?", informationCollected: ["New dizziness"] });
   });
 
-  it("rejects multiple questions and questions hidden in the response text", () => {
-    const base = { acknowledgment: "Thank you.", patientResponseText: "I understand.", nextAction: "ask_follow_up", nextQuestion: "When did it start? How severe is it?" };
-    expect(() => parseCallTurn(JSON.stringify(base))).toThrow(LlmUnavailableError);
-    expect(() => parseCallTurn(JSON.stringify({ ...base, patientResponseText: "What happened?", nextQuestion: "When did it begin?" }))).toThrow(LlmUnavailableError);
+  const turn = { acknowledgment: "Thank you.", patientResponseText: "I understand.", nextAction: "ask_follow_up", nextQuestion: "When did it begin?", informationCollected: [], missingInformation: [], evidence: [], uncertainty: [] };
+
+  it("repairs a question slipped into a statement and keeps the first of several questions, instead of failing the turn", () => {
+    expect(parseCallTurn(JSON.stringify({ ...turn, nextQuestion: "When did it start? How severe is it?" })).nextQuestion).toBe("When did it start?");
+    const slipped = parseCallTurn(JSON.stringify({ ...turn, acknowledgment: "I hear you. How long has it been?", patientResponseText: "What happened?" }));
+    expect(slipped).toMatchObject({ acknowledgment: "I hear you.", patientResponseText: "I hear you.", nextQuestion: "When did it begin?" });
+    expect(parseCallTurn(JSON.stringify({ ...turn, acknowledgment: "How are you?", patientResponseText: "Anything else?" })).acknowledgment).toBe("Thank you for telling me.");
+  });
+
+  it("drops a question that comes with an action that asks none, and still refuses a follow-up with no question", () => {
+    expect(parseCallTurn(JSON.stringify({ ...turn, nextAction: "complete_screening", nextQuestion: "Anything else?" })).nextQuestion).toBeNull();
+    expect(() => parseCallTurn(JSON.stringify({ ...turn, nextQuestion: null }))).toThrow(LlmUnavailableError);
+    expect(() => parseCallTurn("not json")).toThrow(LlmUnavailableError);
   });
 });
 
