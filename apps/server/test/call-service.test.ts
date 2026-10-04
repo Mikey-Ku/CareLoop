@@ -7,10 +7,12 @@ vi.mock("@relaymessenger/elevenlabs", () => ({ ElevenLabsCall: { connect: (optio
 import { CallService } from "../src/calls/service.ts";
 import { familyUrgentAlert } from "../src/checkin/copy.ts";
 import { createCheckinEngine } from "../src/checkin/engine.ts";
-import { createCallSession, getCallSession } from "../src/db/calls.ts";
+import { callTranscript, createCallSession, getCallSession } from "../src/db/calls.ts";
 import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import { openDatabase, upsertPatient, type Db } from "../src/db/index.ts";
+import { visitQuestions } from "../src/db/notes.ts";
 import { observationsBetween } from "../src/db/observations.ts";
+import { MEDICINE_QUESTION_REPLY } from "../src/calls/copy.ts";
 import { loadConfig } from "../src/config.ts";
 import { loadRxNavCache, loadSnapshot } from "../src/finchnode/fixtures.ts";
 import { FakeLlmClient } from "../src/llm/fake.ts";
@@ -61,13 +63,13 @@ function relayFake() {
   };
 }
 
-function setup(options: { loadSnapshot?: (subject: string) => Promise<any>; withEngine?: boolean } = {}) {
+function setup(options: { loadSnapshot?: (subject: string) => Promise<any>; withEngine?: boolean; log?: (event: string, fields?: Record<string, unknown>) => void } = {}) {
   const load = options.loadSnapshot ?? (async (s: string) => loadSnapshot(s));
   const llm = new FakeLlmClient({ extractCheckin: () => ({ answers: [], symptoms: [], memories: [] }), classifyMessage: () => ({ kind: "chat", confidence: "low", complaints: [], memories: [] }) });
   const engine = createCheckinEngine({ db, messenger, clock: { now: () => NOW }, loadSnapshot: load, llm }, { rxnav: loadRxNavCache() });
   const relay = relayFake();
   const config = loadConfig({ ELEVENLABS_API_KEY: "test", ELEVENLABS_AGENT_ID: "agent", PATIENT_TIMEZONE: "America/Detroit" });
-  const service = new CallService({ db, config, relay: relay as never, loadSnapshot: load, ...(options.withEngine === false ? {} : { engine }), today: () => DAY, now: () => NOW });
+  const service = new CallService({ db, config, relay: relay as never, loadSnapshot: load, ...(options.withEngine === false ? {} : { engine }), today: () => DAY, now: () => NOW, ...(options.log ? { log: options.log } : {}) });
   return { service, relay, engine, llm };
 }
 
@@ -86,7 +88,10 @@ beforeEach(() => {
   });
 });
 
-const say = (c: Connected, text: string) => c.options.onEvent({ type: "user_transcript", user_transcript_event: { user_transcript: text } });
+// ElevenLabs Agents server events, in the AsyncAPI shapes (src/calls/service.ts AgentEvent).
+const say = (c: Connected, text: string) => c.options.onEvent({ type: "user_transcript", user_transcription_event: { user_transcript: text, event_id: 1 } });
+const agentSays = (c: Connected, text: string) => c.options.onEvent({ type: "agent_response", agent_response_event: { agent_response: text, event_id: 2 } });
+const turns = (callId = "call-1") => callTranscript(db, callId).map((t) => [t.speaker, t.text]);
 
 async function answered(service: CallService, call = callFrom("harriet")): Promise<Connected> {
   await service.handle(created(call));
@@ -157,6 +162,83 @@ describe("CallService", () => {
     await vi.waitFor(() => expect(getCallSession(db, "call-fail")?.error).toMatch(/ElevenLabs websocket unavailable/));
     await vi.waitFor(() => expect(getCallSession(db, "call-fail")?.endedAt).not.toBeNull());
     expect(getCallSession(db, "call-fail")?.status).toBe("failed");
+  });
+
+  describe("ElevenLabs events: only final turns are kept, only hers are screened", () => {
+    it("user_transcript is her turn: stored and screened", async () => {
+      const { service } = setup();
+      const c = await answered(service);
+      say(c, "I have chest pain right now");
+      expect(turns()).toEqual([["patient", "I have chest pain right now"]]);
+      await vi.waitFor(() => expect(messenger.inChat(SARAH)).toHaveLength(1));
+      await service.end("call-1");
+    });
+
+    it("agent_response is the voice's turn: stored, never screened", async () => {
+      const { service } = setup();
+      const c = await answered(service);
+      agentSays(c, "If you ever have chest pain, please call 911.");
+      expect(turns()).toEqual([["agent", "If you ever have chest pain, please call 911."]]);
+      await service.end("call-1");
+      expect(messenger.inChat(SARAH)).toEqual([]);
+      expect(observationsBetween(db, P, DAY, DAY).filter((o) => o.level >= 4)).toEqual([]);
+    });
+
+    it("agent_response_correction rewrites the voice's last turn (stored and in memory), never adds one", async () => {
+      const { service } = setup();
+      const c = await answered(service);
+      say(c, "Can I take my aspirin with the new pill?");
+      agentSays(c, MEDICINE_QUESTION_REPLY);
+      const corrected = "That's one for your doctor or pharmacist.";
+      c.options.onEvent({
+        type: "agent_response_correction",
+        agent_response_correction_event: { original_agent_response: MEDICINE_QUESTION_REPLY, corrected_agent_response: corrected, event_id: 3 },
+      });
+      expect(turns()).toEqual([
+        ["patient", "Can I take my aspirin with the new pill?"],
+        ["agent", corrected],
+      ]);
+      await service.end("call-1");
+      // In memory too: the voice was cut off before "I'll add it to your list", so nothing is added.
+      expect(visitQuestions(db, P)).toEqual([]);
+    });
+
+    it("a correction for a turn that isn't the voice's last one changes nothing", async () => {
+      const { service } = setup();
+      const c = await answered(service);
+      agentSays(c, "How did you sleep?");
+      c.options.onEvent({
+        type: "agent_response_correction",
+        agent_response_correction_event: { original_agent_response: "Something else entirely.", corrected_agent_response: "Something", event_id: 3 },
+      });
+      expect(turns()).toEqual([["agent", "How did you sleep?"]]);
+      await service.end("call-1");
+    });
+
+    it("agent_tool_request and agent_tool_response log the tool name and store nothing", async () => {
+      const log = vi.fn();
+      const { service } = setup({ log });
+      const c = await answered(service);
+      c.options.onEvent({ type: "agent_tool_request", agent_tool_request: { tool_name: "screen_symptoms", tool_call_id: "t1", tool_type: "webhook", event_id: 4 } });
+      c.options.onEvent({ type: "agent_tool_response", agent_tool_response: { tool_name: "screen_symptoms", tool_call_id: "t1", tool_type: "webhook", is_error: false, is_called: true, event_id: 5 } });
+      expect(log).toHaveBeenCalledWith("call_tool_event", { call_id: "call-1", type: "agent_tool_request", tool: "screen_symptoms" });
+      expect(log).toHaveBeenCalledWith("call_tool_event", { call_id: "call-1", type: "agent_tool_response", tool: "screen_symptoms" });
+      expect(turns()).toEqual([]);
+      await service.end("call-1");
+    });
+
+    it("a tentative transcript is never stored or screened, nor are partial or internal agent events", async () => {
+      const { service } = setup();
+      const c = await answered(service);
+      c.options.onEvent({ type: "tentative_user_transcript", tentative_user_transcription_event: { user_transcript: "I have chest pain", event_id: 6 } });
+      c.options.onEvent({ type: "internal_tentative_agent_response", tentative_agent_response_internal_event: { tentative_agent_response: "Call 911 now" } });
+      c.options.onEvent({ type: "agent_chat_response_part", text_response_part: { text: "I want to die", type: "delta" } });
+      c.options.onEvent({ type: "agent_reasoning_response_part", agent_reasoning_response_part: { text: "user mentioned chest pain" } });
+      expect(turns()).toEqual([]);
+      await service.end("call-1");
+      expect(messenger.inChat(SARAH)).toEqual([]);
+      expect(observationsBetween(db, P, DAY, DAY).filter((o) => o.level >= 4)).toEqual([]);
+    });
   });
 
   it("marks an already-ended call complete without media persistence", async () => {

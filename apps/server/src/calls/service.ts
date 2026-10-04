@@ -4,7 +4,7 @@ import { ElevenLabsCall, type ElevenLabsEvent } from "@relaymessenger/elevenlabs
 import type { CheckinEngine, SpokenTurn } from "../checkin/engine-types.ts";
 import type { UnderstoodItem } from "../checkin/copy.ts";
 import type { ContextPacket } from "../context/packet.ts";
-import { getCallSession, addCallTranscript, createCallSession, patchCallSession, callTranscript } from "../db/calls.ts";
+import { getCallSession, addCallTranscript, correctLastAgentTurn, createCallSession, patchCallSession, callTranscript } from "../db/calls.ts";
 import { getCheckinPatient } from "../db/checkins.ts";
 import { familyChats } from "../db/family.ts";
 import { addVisitQuestion } from "../db/notes.ts";
@@ -303,14 +303,37 @@ export class CallService implements CallEventHandler {
     }
   }
 
+  /**
+   * Only final turns are kept: her `user_transcript` (the one event that gets the per-turn safety screen)
+   * and the voice's `agent_response`. A correction rewrites the voice's last turn; it is never a new turn.
+   */
   #onElevenLabsEvent(active: ActiveCall, event: ElevenLabsEvent): void {
-    const transcript = transcriptEvent(event);
-    if (!transcript) return;
+    const read = readAgentEvent(event);
+    if (!read) return;
+    if (read.kind === "tool") {
+      this.#log("call_tool_event", { call_id: active.call.id, type: read.type, tool: read.tool });
+      return;
+    }
+    if (read.kind === "correction") {
+      this.#correctAgentTurn(active, read.original, read.corrected);
+      return;
+    }
     const index = active.transcript.length;
-    active.transcript.push(transcript);
-    addCallTranscript(this.#options.db, { callId: active.call.id, speaker: transcript.speaker, text: transcript.text, at: this.#now() });
-    if (transcript.speaker === "patient") active.screens.push(this.#screenTurn(active, { id: turnId(active.call.id, index), text: transcript.text }));
-    if (event.type === "client_tool_call" || event.type === "server_tool_call") this.#log("call_tool_event", { call_id: active.call.id, tool: toolName(event) });
+    active.transcript.push(read.turn);
+    addCallTranscript(this.#options.db, { callId: active.call.id, speaker: read.turn.speaker, text: read.turn.text, at: this.#now() });
+    if (read.turn.speaker === "patient") active.screens.push(this.#screenTurn(active, { id: turnId(active.call.id, index), text: read.turn.text }));
+  }
+
+  /**
+   * She talked over the voice, so ElevenLabs sends what it actually said. The voice's latest turn takes the
+   * corrected text, in memory and in call_transcript_turns, but only when it is the turn being corrected.
+   */
+  #correctAgentTurn(active: ActiveCall, original: string, corrected: string): void {
+    const index = active.transcript.findLastIndex((t) => t.speaker === "agent");
+    const last = active.transcript[index];
+    if (!last || squash(last.text) !== squash(original)) return;
+    active.transcript[index] = { ...last, text: corrected };
+    correctLastAgentTurn(this.#options.db, { callId: active.call.id, text: corrected });
   }
 
   /** The safety screen on one turn as it arrives; a hit takes the typed safety path at once. Never throws. */
@@ -475,32 +498,57 @@ export class CallService implements CallEventHandler {
 
 const normalize = (handle: string) => handle.trim().replace(/^@/, "").toLowerCase();
 
-function transcriptEvent(event: ElevenLabsEvent): TranscriptTurn | undefined {
-  const type = event.type.toLowerCase();
-  const speaker = type.includes("user") || type.includes("patient") ? "patient" : type.includes("agent") ? "agent" : undefined;
-  if (!speaker) return undefined;
-  const body = event[`${type}_event`];
-  const text = firstString(body) ?? firstString(event);
-  return text ? { speaker, text } : undefined;
-}
+/**
+ * The ElevenLabs Agents server events the call reads, with only the fields used here (read as unknown: the
+ * bridge forwards them unchecked). Shapes from the ElevenLabs Agents WebSocket AsyncAPI, as generated in
+ * @elevenlabs/types (generated/types/asyncapi-types.ts). Every other type is ignored, never stored and never
+ * screened: tentative_user_transcript, internal_tentative_agent_response, agent_chat_response_part,
+ * agent_reasoning_response_part, audio, ping and the rest. A correction with no corrected text is ignored too.
+ */
+type AgentEvent =
+  | { type: "user_transcript"; user_transcription_event?: { user_transcript?: unknown } }
+  | { type: "agent_response"; agent_response_event?: { agent_response?: unknown } }
+  | { type: "agent_response_correction"; agent_response_correction_event?: { original_agent_response?: unknown; corrected_agent_response?: unknown } }
+  | { type: "agent_tool_request"; agent_tool_request?: { tool_name?: unknown } }
+  | { type: "agent_tool_response"; agent_tool_response?: { tool_name?: unknown } };
 
-function firstString(value: unknown): string | undefined {
-  if (typeof value === "string") return value.trim() || undefined;
-  if (!value || typeof value !== "object") return undefined;
-  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-    if (/transcript|response|text|message|agent|user/i.test(key) && typeof nested === "string" && nested.trim()) return nested.trim();
-    if (/event|data|message/i.test(key)) {
-      const found = firstString(nested);
-      if (found) return found;
+type AgentEventRead =
+  | { kind: "turn"; turn: TranscriptTurn }
+  | { kind: "correction"; original: string; corrected: string }
+  | { kind: "tool"; type: string; tool: string };
+
+function readAgentEvent(event: ElevenLabsEvent): AgentEventRead | undefined {
+  const e = event as AgentEvent;
+  switch (e.type) {
+    case "user_transcript": {
+      const text = nonEmpty(e.user_transcription_event?.user_transcript);
+      return text ? { kind: "turn", turn: { speaker: "patient", text } } : undefined;
     }
+    case "agent_response": {
+      const text = nonEmpty(e.agent_response_event?.agent_response);
+      return text ? { kind: "turn", turn: { speaker: "agent", text } } : undefined;
+    }
+    case "agent_response_correction": {
+      const original = nonEmpty(e.agent_response_correction_event?.original_agent_response);
+      const corrected = nonEmpty(e.agent_response_correction_event?.corrected_agent_response);
+      return original && corrected ? { kind: "correction", original, corrected } : undefined;
+    }
+    case "agent_tool_request":
+    case "agent_tool_response": {
+      const body = e.type === "agent_tool_request" ? e.agent_tool_request : e.agent_tool_response;
+      const tool = nonEmpty(body?.tool_name);
+      return tool ? { kind: "tool", type: e.type, tool } : undefined;
+    }
+    default:
+      return undefined;
   }
-  return undefined;
 }
 
-function toolName(event: ElevenLabsEvent): string {
-  const body = event[`${event.type}_event`];
-  return firstString(body && typeof body === "object" ? (body as Record<string, unknown>).tool_name : undefined) ?? "unknown";
+function nonEmpty(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
+
+const squash = (text: string) => text.replace(/\s+/g, " ").trim();
 
 function summary(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);

@@ -71,8 +71,10 @@ export function patchCallSession(db: Db, callId: string, patch: Partial<{
   db.prepare(`UPDATE call_sessions SET ${sets.join(", ")} WHERE call_id = ?`).run(...values);
 }
 
+const turnText = (text: string) => text.replace(/\s+/g, " ").trim().slice(0, 2_000);
+
 export function addCallTranscript(db: Db, input: { callId: string; speaker: TranscriptSpeaker; text: string; at: string }): void {
-  const text = input.text.replace(/\s+/g, " ").trim().slice(0, 2_000);
+  const text = turnText(input.text);
   if (!text) return;
   const row = db.prepare(`SELECT COALESCE(MAX(sequence), -1) + 1 AS sequence FROM call_transcript_turns WHERE call_id = ?`).get(input.callId) as {
     sequence: number;
@@ -80,6 +82,16 @@ export function addCallTranscript(db: Db, input: { callId: string; speaker: Tran
   db.prepare(
     `INSERT INTO call_transcript_turns (call_id, sequence, speaker, text, created_at) VALUES (?, ?, ?, ?, ?)`,
   ).run(input.callId, row.sequence, input.speaker, text, input.at);
+}
+
+/** The call's latest agent turn takes new text (ElevenLabs corrects what the voice said when she talks over it). */
+export function correctLastAgentTurn(db: Db, input: { callId: string; text: string }): void {
+  const text = turnText(input.text);
+  if (!text) return;
+  db.prepare(
+    `UPDATE call_transcript_turns SET text = ?
+     WHERE call_id = ? AND sequence = (SELECT MAX(sequence) FROM call_transcript_turns WHERE call_id = ? AND speaker = 'agent')`,
+  ).run(text, input.callId, input.callId);
 }
 
 export function callTranscript(db: Db, callId: string): { speaker: TranscriptSpeaker; text: string; createdAt: string }[] {
