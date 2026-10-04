@@ -8,6 +8,14 @@ Two consecutive offline rehearsals used separately created temporary synthetic d
 
 No model API, Relay phone delivery, ElevenLabs audio, Presage camera measurement, print layout or fresh-clone setup is proven by these runs. The fallback reads recorded FinchNode fixtures and scripts photo extraction. Its historical July date is intentionally earlier than the September fixture snapshot to reach a refill window.
 
+## Clean setup and report spot-check (local evidence)
+
+A fresh tracked archive of integration commit `a8b6cca`, plus this branch's fallback transcript, installed the locked dependencies with `npm ci --no-audit --no-fund` using Node 24.19.0 in 4 seconds. Two fallback rehearsals, their reports, and the existing seven-day scenario/report all exited 0; archive extraction, installation and these commands took 6 seconds total. Evidence: `/tmp/mhacks-clean-node24.Qcx37l`. No `.env`, existing database or existing dependency directory was copied. This measured local cached installation, not a teammate's fresh-clone or phone onboarding time.
+
+Five field groups matched the seven-day HTML against its database and stored fixture: Harriet's name and March 2, 1948 birth date; 5 answered/1 skipped/1 missed check-ins with August 29 missed; apixaban 5 mg directions verbatim; August 30 apixaban 2.5 mg strength mismatch; and August 28 level-3 breathing with her exact words. This verifies report data, not browser layout, two printed pages or phone access.
+
+The host's Node 25.8.2 produced a Vitest engine warning. The Node 24.19.0 clean install had no engine warning; README now recommends Node 24 LTS and corrects the previous Node 22.18 minimum to the package's 22.22.3.
+
 ## Required live evidence before saying demo-ready
 
 Record pass/fail, branch/commit, local timestamp, scenario and evidence location for each row. Keep tokens, secret values and personal contact identifiers out of saved evidence.
@@ -20,7 +28,7 @@ Record pass/fail, branch/commit, local timestamp, scenario and evidence location
 | Video/voice | Three live calls answered within 10 seconds. Recording shows AI disclosure, relevant questions, consent, patient interruption, closing and post-call persisted symptom severity. | Not verified |
 | Camera quality and recovery | Same-minute comparison with Presage app for 3 attempts, recorded as an engineering benchmark, not clinical validation. Also test decline, poor light, motion, disconnect and reconnect; unavailable stays unavailable and stale readings do not appear. | Injected estimate only |
 | Medication photo | Three printed synthetic labels read correctly on a phone. Strength mismatch asks pharmacist; blur or missing strength asks for another view. Reminder matches record directions verbatim. | Record matching exercised; image model not verified |
-| Report | Render simulated seven-day report, print exactly two pages, spot-check 5 dates/numbers against DB and record. Open served report link on a phone. | HTML generated for short scenario only |
+| Report | Render simulated seven-day report, print exactly two pages, spot-check 5 dates/numbers against DB and record. Open served report link on a phone. | Seven-day HTML data spot-checked; print/phone unverified |
 | Family | Second phone receives status and urgent alert; every configured family chat receives it. Time urgent delivery under 5 seconds; reply returns to Harriet. Verify lower sharing levels reduce medical detail. | Separate simulator panes only |
 | Safety practices | Rehearse emergency, self-harm and dose-change questions using QA synthetic scenarios. Appropriate fixed routing, no diagnosis or dose changes. Complete applicable safety tests and held-out content evaluation. | Breathing escalation exercised offline |
 | Clean integration | Claude and Codex agree on final commit and owned changes; final integrated typecheck/test/CI passes. Confirm startup and recovery on that exact revision. | Requires root integration evidence |

@@ -12,13 +12,15 @@ All data in this project is synthetic.
 
 ## Setup
 
-Requires Node 22.18 or newer: the server runs its `.ts` files directly through Node's built-in type stripping, with no build step.
+Use Node 24 LTS for the demo (Node 24.19.0 verified), or Node 22.22.3 or newer in the Node 22 line. The package requires at least 22.22.3; Vitest does not support Node 23 or 25. The server runs its `.ts` files directly through Node's built-in type stripping, with no build step.
 
 ```sh
 cd apps/server
-npm install
+npm ci
 cp ../../.env.example ../../.env   # optional for run 1
 ```
+
+See [the demo script](docs/DEMO.md), [readiness evidence](docs/DEMO_READINESS.md), and [local setup checker](docs/SETUP_CHECK.md) before presenting. Offline fixture rehearsals need no `.env` or API keys.
 
 The `.env` file lives at the repo root. Run 1 needs no keys: the FinchNode demo API is open and every other value has a default.
 
