@@ -15,7 +15,7 @@ import type { Messenger } from "./messenger.ts";
 //     trimmed, capped at MAX_FAMILY_WORDS) and the family member hears "I've passed that on to Harriet."
 // Their words are quoted as plain text, instruction-like text included (src/safety/injection.ts): never
 // read by a model, never an answer to her check-in, never a sharing change (none of this reaches the
-// engine). The forward carries no buttons, so it is never a prompt waiting for her reply. Sends use
+// engine). Her next typed message after a forward is plain chat (engine.ts "Latest prompt wins"). Sends use
 // idempotency keys from the Relay message id, so a replayed event never sends twice. Only metadata is
 // stored (family_messages, direction to_senior): never their words.
 
@@ -25,6 +25,12 @@ export const MAX_FAMILY_WORDS = 500;
 export type FamilyInboundOutcome = "passed_on" | "emergency" | "crisis" | "acknowledgement" | "no_senior_chat";
 
 export type FamilyInboundDeps = { db: Db; messenger: Messenger; now: () => string };
+
+/** When a family member's words last went to her chat, if ever. */
+export function lastPassedOnAt(db: Db, patientId: string): string | undefined {
+  const row = db.prepare(`SELECT MAX(created_at) AS at FROM family_messages WHERE patient_id = ? AND direction = 'to_senior'`).get(patientId) as { at: string | null };
+  return row.at ?? undefined;
+}
 
 /** Their words as passed on: whitespace tidied, capped. */
 export function familyWords(text: string): string {

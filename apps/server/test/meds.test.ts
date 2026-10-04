@@ -17,6 +17,7 @@ import {
   photoOther,
   photoReadFailed,
   photoRejected,
+  redFlagAdvice,
   refillAskedReply,
   smallTalkFallback,
 } from "../src/checkin/copy.ts";
@@ -523,6 +524,25 @@ describe("latest prompt wins: typed text goes to the newest prompt still waiting
       const next = await say("I'm fine thanks");
       expect(next.at(-1)!.buttons).toBeDefined();
       expect(getCheckin(db, P, PREV)!.step).toBe("question"); // her open reply, read by the check-in
+    }
+  });
+
+  it("a symptom in her words still gets its level: level 3 is her doctor today and Sarah alerted; her question still goes on her list", async () => {
+    const words = "My gums bleed every time I brush now and I have big new bruises. Is that from the apixaban?";
+    // After "I have a question" (read as chat or as a medicine question), and with nothing pending.
+    for (const [kind, tapFirst] of [["chat", true], ["medicine_question", true], ["medicine_question", false]] as const) {
+      const bleeding = { topic: "bleeding gums", amount: "a_lot", change: "new", words: "gums bleed every time I brush" } as const;
+      setup({ llm: new FakeLlmClient({ classifyMessage: () => ({ kind, confidence: "high", complaints: [], memories: [], symptoms: [bleeding] }) }) });
+      if (tapFirst) {
+        await engine.sendMedsReminder(P, DAY, "morning");
+        await say(MEDS_BUTTONS.question, lastMine());
+      }
+      later(1);
+      const sent = await say(words);
+      expect(observationsBetween(db, P, DAY, DAY).map((o) => [o.topic, o.level])).toEqual([["anticoagulant-bleeding", 3]]);
+      expect(mine(sent).map((m) => m.text)).toEqual([redFlagAdvice("Harriet", ["Sarah"]), medicineQuestion]);
+      expect(messenger.inChat(FAMILY)).toHaveLength(1);
+      expect(visitQuestions(db, P).map((q) => q.text)).toEqual([words]);
     }
   });
 

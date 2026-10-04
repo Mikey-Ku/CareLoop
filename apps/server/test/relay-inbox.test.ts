@@ -1,6 +1,6 @@
 import type { Chat, MessageSendParams, RelayWebhookEvent, WebhookSubscription, WebSocketRunOptions } from "@relaymessenger/sdk";
 import { describe, expect, it, vi } from "vitest";
-import { familyWelcome, photoCouldNotOpen, photoNotYet, photoRejected } from "../src/checkin/copy.ts";
+import { familyEmergencyAbout, familyWelcome, photoCouldNotOpen, photoNotYet, photoRejected } from "../src/checkin/copy.ts";
 import { familyChats, familyMembers, linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import { getSharing, openDatabase, upsertPatient, type Db } from "../src/db/index.ts";
 import { FakeMessenger } from "../src/relay/fake-messenger.ts";
@@ -309,6 +309,17 @@ describe("message.received", () => {
       expect(relay.chats.markAsRead).toHaveBeenCalledWith(HARRIET_CHAT);
     });
 
+    it("a caption the safety screen catches takes the safety path first; the photo is still read", async () => {
+      const fetchImpl = vi.fn(async () => new Response(new Uint8Array([1]), { status: 200 })) as unknown as typeof fetch;
+      const { inbox, engine, photos } = photoSetup(fetchImpl);
+      const caption = "I fell and my arm won't stop bleeding";
+      const event = textMessage({ chatId: HARRIET_CHAT, parts: [media(1), { type: "text", value: caption, reactions: null }] });
+      await inbox.onEvent(event, { sequence: "1" });
+      await inbox.drain();
+      expect(engine.handleInbound).toHaveBeenCalledWith({ chatId: HARRIET_CHAT, messageId: (event.data as { id: string }).id, text: caption, at: T });
+      expect(photos).toHaveLength(1);
+    });
+
     it("a photo over 8 MB is never downloaded and she is asked for a regular one", async () => {
       const fetchImpl = vi.fn() as unknown as typeof fetch;
       const { inbox, engine, relay } = photoSetup(fetchImpl);
@@ -343,6 +354,17 @@ describe("message.received", () => {
     await inbox.onEvent(photo, { sequence: "1" });
     await inbox.drain();
     expect(relay.chats.messages.send).not.toHaveBeenCalled();
+  });
+
+  it("a family photo's caption is read like their text: an emergency gets the 911-now reply", async () => {
+    const { db, inbox, relay } = setup();
+    linkFamilyMember(db, "sarah.demo", SARAH_CHAT, "Sarah", T);
+    const media = { type: "media", id: nextId(), url: "https://files.example.org/signed", filename: "p.jpg", mime_type: "image/jpeg", size_bytes: 10, reactions: null };
+    const caption = { type: "text", value: "Mom fell and can't get up, she's bleeding", reactions: null };
+    await inbox.onEvent(textMessage({ chatId: SARAH_CHAT, sender: "sarah.demo", parts: [media, caption] }), { sequence: "1" });
+    await inbox.drain();
+    expect(sentTexts(relay, SARAH_CHAT)).toEqual([familyEmergencyAbout("Harriet")]);
+    expect(sentTexts(relay, HARRIET_CHAT)).toEqual([]);
   });
 
   it("links her chat from her first message when contact.added never came", async () => {
