@@ -31,7 +31,10 @@ import { patientIdFor } from "../patient-id.ts";
 import { FakeMessenger } from "../relay/fake-messenger.ts";
 import type { InboundMessage, SentMessage } from "../relay/messenger.ts";
 import type { ExtractedPaper } from "../rules/paper-diff.ts";
-import { HELP_LINES, clockTime, painter, renderMessage, renderTable, type Painter, type Style } from "./sim-render.ts";
+import { EXAMPLE_CONTACTS_PATH, parseCareContacts } from "../care/contacts.ts";
+import { startCareRuntime } from "../care/runtime.ts";
+import { FakeCareMessenger, type FakeCareText } from "../photon/fake-care-messenger.ts";
+import { CARE_HELP_LINES, HELP_LINES, clockTime, painter, renderMessage, renderTable, type Painter, type Style } from "./sim-render.ts";
 
 // Terminal simulator of the daily check-in (npm run simulate). Drives the real
 // check-in engine with a FakeMessenger, a simulated clock and recorded FinchNode
@@ -141,6 +144,8 @@ export type SimulatorOptions = {
   /** Family members' handles, each with their own pre-linked family chat. Defaults to DEFAULT_FAMILY; [] for none. */
   family?: readonly string[];
   output: (line: string) => void;
+  /** Text the care summaries over (fake) Photon on their own when a day ends, as the agent does. /summary works either way. */
+  photon?: boolean;
   color?: boolean;
   config?: Config;
   /** Injected snapshot reader (tests); defaults to fixtures or the live API. */
@@ -159,6 +164,8 @@ export type Simulator = {
   readonly db: Db;
   /** Each linked family member's chat, in --family order. */
   readonly family: readonly FamilyChat[];
+  /** Care summaries and replies texted over (fake) Photon to the example doctor and emergency contact. */
+  readonly photon: FakeCareMessenger;
   /** Banner and the day's startDay. */
   start(): Promise<void>;
   /** One line typed as Harriet: a button number, free text or a /command. */
@@ -225,6 +232,29 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
       if (event.kind === "set") note(`${chatLabel(event.chatId)} shows "${event.label}".`);
     },
   });
+  // Care summaries over Photon, faked: the example contacts, template replies (no Claude).
+  const careContacts = parseCareContacts(readFileSync(EXAMPLE_CONTACTS_PATH, "utf8"), EXAMPLE_CONTACTS_PATH);
+  const photonLabel = (phone: string) =>
+    phone === careContacts.doctor.phone
+      ? `${careContacts.doctor.name}'s phone (Photon, doctor)`
+      : `${careContacts.emergencyContact.name}'s phone (Photon, emergency contact)`;
+  const photon = new FakeCareMessenger({
+    onSend: (t: FakeCareText) => {
+      out("");
+      out(paint(`--- ${photonLabel(t.phone)}, ${clockTime(clock.now())} ---`, "bold", "yellow"));
+      for (const line of t.text.split("\n")) out(line);
+    },
+  });
+  const care = startCareRuntime({
+    db,
+    patientId,
+    contacts: careContacts,
+    clock,
+    messenger: photon,
+    log: (line) => note(line.replace(/^\[care\] /, "Photon: ")),
+  });
+  let photonCount = 0;
+  const autoPhoton = options.photon ?? false;
   // `/as <kind>` readings wait here; while one does, it stands in for the LLM (small talk still
   // goes to the real LLM if there is one).
   // `/as extract` readings for the understanding pass wait in `extractions` the same way. While only an
@@ -269,6 +299,7 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     rxnav,
     medsNudgeMinutes: config.meds.nudgeMinutes,
     refillRemindDays: config.meds.refillRemindDays,
+    ...(autoPhoton ? { onDayFinished: care.onDayFinished } : {}),
   });
 
   // The engine dedupes inbound messages by id across the DB, so ids must be unique per run.
@@ -497,6 +528,7 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     switch (name) {
       case "/help":
         for (const l of HELP_LINES) out(l);
+        for (const l of CARE_HELP_LINES) out(l);
         return "ok";
       case "/quit":
       case "/exit":
@@ -507,7 +539,29 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
         const result = await engine.runMissedCheckin(patientId, day);
         note(result === "marked_missed" ? `Noon: the ${day} check-in was missed; family told.` : `Noon: nothing to do for ${day}.`);
         if ((await engine.runMedsMissed(patientId, day)) === "marked_missed") note(`Noon: the ${day} morning medicines reminder was not confirmed (family status at "all" only).`);
+        if (autoPhoton) await care.afterMissedCheckin(day);
         return "ok";
+      }
+      case "/summary": {
+        const result = await care.service.sendSummaries(day);
+        note(`Care summary ${result.summaryId} for ${day}: doctor ${result.doctor}, emergency contact ${result.family}.`);
+        return "ok";
+      }
+      case "/doctor":
+      case "/family": {
+        const text = line.trim().slice(name.length).trim();
+        if (!text) {
+          note(`usage: ${name} <text they text back>`, "red");
+          return "error";
+        }
+        const from = name === "/doctor" ? careContacts.doctor : careContacts.emergencyContact;
+        clock.tick();
+        photonCount += 1;
+        out("");
+        out(paint(`${from.name}> ${text}`, "bold", "yellow"));
+        const result = await care.service.handleInbound({ messageId: `sim-${runId}-photon-${photonCount}`, fromPhone: from.phone, text, at: clock.now() });
+        if (result === "duplicate") note("Photon: already handled that text.");
+        return result === "failed" ? "error" : "ok";
       }
       case "/next":
         return goToDay(nextDay(day));
@@ -609,6 +663,7 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     messenger,
     db,
     family,
+    photon,
     async start() {
       const sharing = getSharing(db, patientId) ?? "status";
       out(paint(`Check-in simulator: ${seniorName} (${subject}), patient id ${patientId}, sharing ${sharing}`, "bold"));
@@ -627,6 +682,7 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     },
     handle,
     close() {
+      void care.stop();
       db.close();
     },
   };

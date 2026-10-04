@@ -268,6 +268,38 @@ For calls, the packet goes to ElevenLabs as dynamic variables through the bridge
 | follow_ups | patient_id, checkin_id, reason, level, due_at, sent_at, answer (one waiting follow-up per patient; migrations 6 and 7) |
 | symptom_observations | patient_id, checkin_id, day, topic, question_id, level, amount, change, source, words (the ladder's memory: repetition rule and visit-prep sheet; migration 7) |
 | clarifications | one "A little, or a lot?" per check-in and question (migration 7) |
+| care_summaries | id, patient_id, day, trigger, facts_json (the day's facts frozen when first summarized), created_at; unique per patient, day, trigger (migration 11) |
+| care_messages | id, patient_id, audience (doctor, family), phone, direction, kind (summary, reply, inbound), summary_id, idempotency_key, photon_message_id, text, created_at, sent_at, error (Photon texts, planned before sending) |
+
+## Care summaries over Photon
+
+When a day ends, the engine's optional `onDayFinished` hook fires. A day ends when she checks in, says "Not today", or the noon job marks the check-in missed. The noon job also covers a check-in she started but didn't finish. The care service (`src/care/`) then:
+
+1. Builds `CareFacts` from the database (`buildCareFacts`): the check-in answers, red flags recomputed from them by `evaluateRedFlag`, the day's camera vitals, open flags with their evidence, labs, medications, conditions and the day's memories.
+2. Freezes the facts in `care_summaries`.
+3. Texts two summaries over Photon Spectrum (iMessage):
+   - `doctorSummary` to the doctor: labelled data sections.
+   - `familySummary` to the emergency contact: plain words, and only flags Harriet has already heard (told or noted).
+
+The emergency contact always gets the full plain-language summary, whatever Harriet's Relay sharing level (team decision).
+
+Contacts come from `care-contacts.json` (`src/care/contacts.ts`). It holds personal data, not a secret, so it is a gitignored file rather than `.env`. Placeholder 555-01xx numbers leave the step off.
+
+Replies arrive on the same Photon stream and are matched to a contact by phone number. Fixed rules decide first (`classifyInbound`):
+- an acknowledgment gets no reply;
+- an urgent-sounding text from the emergency contact gets a fixed reply: "I'm an automated assistant without the medical knowledge to judge symptoms. Contact the doctor first. If it looks like an emergency, call 911";
+- a dose question from the family is sent to the doctor;
+- the doctor asking the assistant to act gets "can't act", plus the emergency contact's number.
+
+Everything else is answered from the frozen facts. Claude words the answer (`ClaudeReplyWriter`): professional for the doctor, warm but plain for the family, and never beyond the facts. `guardReply` then rejects dosing language, markdown and dashes, and anything too long. Without a key, or if Claude fails, template answers go out instead.
+
+Each outbound text is planned in `care_messages` under a stable key before it is sent:
+- `care:<patient>:<day>:<trigger>:<audience>` for summaries;
+- `care-reply:<photon message id>` for replies.
+
+A retry sends only what didn't go out. A failure for one contact never blocks the other, and never blocks Harriet's check-in. Log lines mask phone numbers and never include message text.
+
+Photon limits: 50 new conversations per line per day, 5,000 messages per server per day. Contacts should text the line first.
 
 ## Relay facts (from docs.relayapp.im)
 

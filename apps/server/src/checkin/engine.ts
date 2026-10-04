@@ -331,7 +331,15 @@ export type EngineOptions = {
   medsNudgeMinutes?: number;
   /** REFILL_REMIND_DAYS: a fill is reminded about when it runs out within this many days. Defaults to 5. */
   refillRemindDays?: number;
+  /**
+   * Called once a day's check-in is over (checked in, "not today", or marked missed), after
+   * her messages and the family's went out. The care summaries over Photon hang off this
+   * (src/care/service.ts). Errors it throws are swallowed: it can't undo or fail the check-in.
+   */
+  onDayFinished?: (event: DayFinished) => Promise<void> | void;
 };
+
+export type DayFinished = { patientId: string; day: string; outcome: DayOutcome };
 
 /** The check-in question a "Taken" on the morning medicines reminder answers ("Yes"). */
 export const MORNING_MEDICINES_QUESTION = "morning-medicines";
@@ -652,6 +660,18 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       },
     },
   });
+  // Days the current inbound plan finished; read right after its transaction commits.
+  let finishedDays: DayFinished[] = [];
+
+  async function notifyFinished(events: DayFinished[]): Promise<void> {
+    for (const event of events) {
+      try {
+        await options.onDayFinished?.(event);
+      } catch {
+        // The hook owns its errors (the care service logs and never throws).
+      }
+    }
+  }
 
   /**
    * Send in order. Every send is attempted even if an earlier one fails, so one family
@@ -889,6 +909,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
 
   function finishCheckedIn(patient: CheckinPatient, c: CheckinRow, chatId: string, lead?: string): Send[] {
     updateCheckin(db, c.id, { step: "done", pendingFlagId: null, finishedAt: clock.now() });
+    finishedDays.push({ patientId: patient.id, day: c.date, outcome: "checked_in" });
     // While a follow-up for today is still to come (a concern, or something worth watching), she hears
     // we'll check on her again this afternoon.
     const waiting = nextFollowUp(db, patient.id);
@@ -925,6 +946,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
 
   function notToday(patient: CheckinPatient, c: CheckinRow, chatId: string): Send[] {
     updateCheckin(db, c.id, { status: "skipped", step: "done", pendingFlagId: null, finishedAt: clock.now() });
+    finishedDays.push({ patientId: patient.id, day: c.date, outcome: "not_today" });
     return [
       { chatId, message: { text: notTodayReply(patient.preferredName) }, key: `${patient.id}:${c.date}:not-today` },
       ...familyStatus(patient, "not_today", c),
@@ -2008,20 +2030,37 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
           }
         }
       }
-      const plan = (understood?: Reading) => db.transaction(() => planInbound(msg, fresh, understood))();
+      // Plans in one transaction; the days it finished are read right after it commits (synchronous,
+      // so no other message's plan can run in between).
+      const plan = (understood?: Reading): { planned: Planned; finished: DayFinished[] } => {
+        finishedDays = [];
+        try {
+          const planned = db.transaction(() => planInbound(msg, fresh, understood))();
+          return { planned, finished: finishedDays };
+        } finally {
+          finishedDays = [];
+        }
+      };
       const first = plan();
-      if (!("needs" in first)) {
-        await deliver(first.sends);
+      if (!("needs" in first.planned)) {
+        try {
+          await deliver(first.planned.sends);
+        } finally {
+          await notifyFinished(first.finished);
+        }
         return;
       }
       // Typed text: read it with the LLM (her chat shows that it's reading), then plan again with the reading.
       await showActivity(msg.chatId);
+      let finished: DayFinished[] = [];
       try {
-        const second = plan(await understand(first.needs));
+        const second = plan(await understand(first.planned.needs));
+        finished = second.finished;
         // The second pass has a reading, so it never asks again; if it somehow did, nothing is sent.
-        await deliver("needs" in second ? [] : second.sends);
+        await deliver("needs" in second.planned ? [] : second.planned.sends);
       } finally {
         await clearActivity(msg.chatId);
+        await notifyFinished(finished);
       }
     },
 
@@ -2038,7 +2077,11 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         return toFamily(patient, familyMissedAlert(patient.preferredName, missedCheckinTime), `${patientId}:${day}:missed`);
       })();
       if (!sends) return "nothing_to_do";
-      await deliver(sends);
+      try {
+        await deliver(sends);
+      } finally {
+        await notifyFinished([{ patientId, day, outcome: "missed" }]);
+      }
       return "marked_missed";
     },
 

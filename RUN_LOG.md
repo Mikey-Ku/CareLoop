@@ -167,3 +167,39 @@ Split by lanes in `docs/TEAM_PLAN.md`. Lane 1 (Relay live) first: token, two pho
 Retest on the phone with `FOLLOW_UP_DELAY_MINUTES=2`; add a second phone as family; then tick the remaining M1 boxes in `docs/DEFINITION_OF_DONE.md` and open the lane 1 PR.
 
 **Open questions:** `FEEDBACK.md` (phrase list review, held-out eval, demo-day LLM backup).
+
+## Run 2d: 2026-10-03 (branch photon/care-summaries)
+
+**Goal of this run:** After the check-in (and, once lanes 2 and 3 land, the call), text a data summary to her doctor and a plain-language one to her emergency contact over Photon, and answer their replies in the right tone.
+
+**What was built:**
+- **Contacts:** `care-contacts.json` (copy of `care-contacts.example.json`, gitignored). It holds the doctor's and the emergency contact's names and numbers, normalized to E.164. It's validated without echoing values, and the example 555-01xx numbers leave the step off.
+- **Facts and wording:**
+  - `src/care/facts.ts` builds the day's `CareFacts` from the database.
+  - `src/care/copy.ts` writes `doctorSummary` (data) and `familySummary` (plain words; only flags she has heard).
+  - `src/care/copy.ts` also holds the fixed replies. The urgent family reply says to contact the doctor first, because an automated assistant lacks the medical knowledge to act on symptoms. It ends with the 911 line.
+- **Service:** `src/care/service.ts` sends both summaries once per day. Each text is planned in `care_messages` before it's sent (migration 6 adds `care_summaries` and `care_messages`). A failure for one contact doesn't block the other.
+- **Replies:** inbound texts are routed by phone number and deduped. Rules come first (acknowledgment, urgent family text, dose question, doctor asking it to act). Otherwise Claude (`src/care/claude-writer.ts`) words an answer from the frozen facts. `guardReply` checks it, and template answers are the fallback.
+- **Transport:** `src/photon/` wraps the Spectrum SDK behind a small port, with a fake for tests and the simulator.
+- **Engine and agent:**
+  - The engine gets an optional `onDayFinished` hook. It is called after delivery, and its errors are swallowed.
+  - The agent connects care when the contacts file and the Photon credentials are present. The noon job calls `ensureDaySummary`.
+  - New `npm run care:send` CLI.
+- **Simulator:** `/summary`, `/doctor <text>`, `/family <text>` and `--photon`. New demo script `scripts/demo/harriet-care-summary.txt`.
+- 575 tests passing (was 525); lint clean.
+
+**What was skipped or changed from spec:**
+- Dependencies added, with approval: `@spectrum-ts/core`, `@spectrum-ts/imessage` and `@anthropic-ai/sdk`.
+  - A top-level npm override pins Spectrum's TypeScript peer to the repo's TS 7.
+  - The lockfile was generated with npm 10, because npm 11.5.1 drops the rolldown native bindings (npm/cli#4828).
+- The emergency contact gets the full plain-language summary, whatever Harriet's Relay sharing level (team decision).
+- In the simulator the automatic Photon send is opt-in (`--photon`), so existing simulator output is unchanged.
+- Not tested against a live Photon line (no credentials). `connectPhoton` typechecks against the real Spectrum types.
+
+**Files touched:**
+- New: `apps/server/src/care/*`, `src/photon/*`, `src/db/care.ts`, `src/cli/care-send.ts`, `test/care.test.ts`, `test/care-contacts.test.ts`, `care-contacts.example.json`, `scripts/demo/harriet-care-summary.txt`.
+- Additions only: `src/checkin/engine.ts` (hook), `src/agent.ts` (wiring), `src/db/schema.ts` (migration 6), `src/cli/{simulator,simulate,sim-render}.ts`, `test/db.test.ts` (table list), `package.json`, `package-lock.json`, `.env.example`, `.gitignore`, `README.md`, `docs/DESIGN.md`, `FEEDBACK.md`.
+
+**Recommended next step:** Create the Photon project, fill in `care-contacts.json`, have both contacts text the line once, then `npm run care:send -- --dry-run` and `npm run agent -- --checkin-now`.
+
+**Open questions:** `FEEDBACK.md` (Photon setup).

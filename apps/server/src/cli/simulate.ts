@@ -20,13 +20,14 @@ import {
 
 // npm run simulate -- [subject] [--day YYYY-MM-DD] [--db path] [--reset] [--live]
 //                     [--script file] [--sharing status|status_vitals|all] [--family sarah,tom] [--llm]
+//                     [--photon]  (text the care summaries over fake Photon when a day ends)
 // Runs the daily check-in in the terminal: Harriet's phone and each family
 // member's own chat with the agent as separate panes, her replies typed at the
 // prompt. --llm reads what she types with the LLM from .env (GEMINI_API_KEY);
 // without it, buttons only. See src/cli/simulator.ts.
 
 const USAGE =
-  "usage: npm run simulate -- [subject] [--day YYYY-MM-DD] [--db path] [--reset] [--live] [--script file] [--sharing status|status_vitals|all] [--family sarah,tom] [--llm]";
+  "usage: npm run simulate -- [subject] [--day YYYY-MM-DD] [--db path] [--reset] [--live] [--script file] [--sharing status|status_vitals|all] [--family sarah,tom] [--llm] [--photon]";
 
 /** Delete the simulator DB file (and its WAL siblings). Refuses the app database. */
 function resetDatabase(dbPath: string, appDbPath: string): void {
@@ -51,6 +52,7 @@ async function main(argv: string[]): Promise<number> {
         sharing: { type: "string" },
         family: { type: "string" },
         llm: { type: "boolean", default: false },
+        photon: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
     });
@@ -90,6 +92,7 @@ async function main(argv: string[]): Promise<number> {
     subject,
     dbPath,
     live: values.live,
+    photon: values.photon,
     output,
     color,
     config,

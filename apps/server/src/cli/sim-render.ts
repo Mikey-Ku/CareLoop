@@ -91,3 +91,10 @@ export const HELP_LINES = [
   "  /db                   row counts per table",
   "  /quit                 leave",
 ];
+
+export const CARE_HELP_LINES = [
+  "Care summaries over Photon (faked here, to the example contacts in care-contacts.example.json):",
+  "  /summary              text the day's summary to the doctor and the emergency contact (also sent when a check-in ends)",
+  "  /doctor <text>        the doctor texts back",
+  "  /family <text>        the emergency contact texts back",
+];

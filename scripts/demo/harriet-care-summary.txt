@@ -1,0 +1,20 @@
+# Harriet's red-flag check-in, then the care summaries over (fake) Photon to her doctor
+# and her emergency contact, and their replies (check-in date 2026-09-01).
+# npm run simulate -- --reset --photon --script ../../scripts/demo/harriet-care-summary.txt
+# The summaries go out when the check-in ends; the numbers are care-contacts.example.json's.
+#
+# Quick questions
+1
+# How was your breathing last night when you lay down? -> Yes, it was hard (red flag)
+3
+# Any unusual bruising or bleeding? -> No
+1
+# Have you felt dizzy when standing up? -> No
+1
+# After a red flag no flag is offered that day, so the check-in ends here.
+# Her daughter writes back, worried: the reply sends her to the doctor first.
+/family She sounds out of breath, what should I do?
+# A thank-you needs no reply.
+/family Thanks
+# The doctor asks about her labs: answered from the summary.
+/doctor What were her latest labs?

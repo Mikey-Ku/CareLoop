@@ -399,6 +399,39 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE symptom_observations_v10 RENAME TO symptom_observations;
   CREATE INDEX symptom_observations_patient_day ON symptom_observations (patient_id, day);
   `,
+  // 11: care summaries over Photon (src/care/*). A care summary is the day's facts after a
+  // check-in or call, frozen as sent, so follow-up replies answer from exactly what the doctor
+  // and the emergency contact were told. care_messages holds every Photon text both ways:
+  // outbound rows are written before the send (idempotency_key), inbound rows dedupe by
+  // Photon's message id.
+  `
+  CREATE TABLE care_summaries (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    day TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    facts_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (patient_id, day, trigger)
+  );
+
+  CREATE TABLE care_messages (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    audience TEXT NOT NULL CHECK (audience IN ('doctor', 'family')),
+    phone TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('outbound', 'inbound')),
+    kind TEXT NOT NULL CHECK (kind IN ('summary', 'reply', 'inbound')),
+    summary_id INTEGER REFERENCES care_summaries(id) ON DELETE SET NULL,
+    idempotency_key TEXT UNIQUE,
+    photon_message_id TEXT UNIQUE,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    sent_at TEXT,
+    error TEXT
+  );
+  CREATE INDEX care_messages_thread ON care_messages (patient_id, audience, id);
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

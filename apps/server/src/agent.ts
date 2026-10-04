@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createApp } from "./app.ts";
+import { loadCareConfig } from "./care/config.ts";
+import { connectCareRuntime, type CareRuntime } from "./care/runtime.ts";
 import { createCheckinEngine } from "./checkin/engine.ts";
 import type { CheckinEngine, Clock } from "./checkin/engine-types.ts";
 import { snapshotLoader } from "./cli/simulator.ts";
@@ -101,6 +103,11 @@ export type AgentDeps = {
   /** Port for /health; defaults to config.port. 0 picks a free one (tests). */
   port?: number;
   relayOps?: Partial<RelayOps>;
+  /**
+   * Care summaries over Photon (src/care/runtime.ts), built once the patient id is known.
+   * Undefined (or returning undefined) leaves them off.
+   */
+  care?: (ctx: { patientId: string; db: Db; clock: Clock; log: (line: string) => void }) => Promise<CareRuntime | undefined>;
 };
 
 export type RunningAgent = {
@@ -181,6 +188,13 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   const clock: Clock = { now: () => now().toISOString() };
   const messenger = deps.messenger ?? new RelayMessenger(relay, { log: relayLog });
   log(`[agent] ${llmStatus(config, deps.llm)}`);
+  // 3a. Care summaries to her doctor and emergency contact over Photon, when configured.
+  let care: CareRuntime | undefined;
+  try {
+    care = await deps.care?.({ patientId, db, clock, log });
+  } catch (error) {
+    log(`[agent] care summaries over Photon are off: ${errorSummary(error)}`);
+  }
   const engine = createCheckinEngine(
     { db, messenger, clock, loadSnapshot: deps.loadSnapshot, llm: deps.llm },
     {
@@ -188,6 +202,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
       medsNudgeMinutes: config.meds.nudgeMinutes,
       refillRemindDays: config.meds.refillRemindDays,
       ...(deps.followUpDelayMinutes !== undefined ? { followUpDelayMinutes: deps.followUpDelayMinutes } : {}),
+      ...(care ? { onDayFinished: care.onDayFinished } : {}),
     },
   );
 
@@ -234,6 +249,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
           log(`[agent] missed check-in ${day}: ${result === "marked_missed" ? "marked missed, family told" : "nothing to do"}`);
           const meds = await engine.runMedsMissed(patientId, day);
           if (meds === "marked_missed") log(`[agent] morning medicines ${day}: not confirmed, marked missed`);
+          await care?.afterMissedCheckin(day);
         },
       },
       {
@@ -354,6 +370,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
         scheduler.stop();
         abort.abort();
         await inboxDone.catch(() => {});
+        await care?.stop();
         await closeServer(server);
         log("[agent] stopped");
       })();
@@ -481,6 +498,7 @@ export async function main(argv: string[] = process.argv.slice(2), env: Record<s
       checkinNow,
       medsNow,
       ...(followUpDelayMinutes !== undefined ? { followUpDelayMinutes } : {}),
+      care: (ctx) => connectCareRuntime({ config: loadCareConfig(env), ...ctx }),
     });
   } catch (error) {
     console.error(`[agent] could not start: ${errorSummary(error)}`);
