@@ -203,6 +203,11 @@ export function zonedInstant(day: string, time: string, timezone: string): numbe
   return wall - before;
 }
 
+/** The same local time of day on `day`: a demo pinned to CLOCK_DATE stamps a separate tool's records on that day. */
+export function onDay(day: string, date: Date, timezone: string): Date {
+  return new Date(date.getTime() + zonedInstant(day, "12:00", timezone) - zonedInstant(localDate(date, timezone), "12:00", timezone));
+}
+
 function pad(n: number): string {
   return String(n).padStart(2, "0");
 }

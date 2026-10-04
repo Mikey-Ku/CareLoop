@@ -53,8 +53,10 @@ describe("usableReading: only what Presage is sure of", () => {
 
 describe("runCameraCallback", () => {
   it("texts her first, records, reads the file, saves the reading and texts it back; her video is deleted", async () => {
-    const f = setup(recorded, vitals({ heartRate: 82.5, heartRateConfidence: 70, heartRateStable: true }));
+    // Presage stamps the file's reading on the real clock; the agent's clock (here the pinned demo day) wins.
+    const f = setup(recorded, vitals({ heartRate: 82.5, heartRateConfidence: 70, heartRateStable: true, measuredAt: "2026-10-04T13:44:06.259Z" }));
     expect(await runCameraCallback(f.deps, PATIENT)).toBe("reading");
+    expect(f.db.prepare("SELECT taken_at AS takenAt FROM vitals_readings").get()).toEqual({ takenAt: "2026-09-02T14:00:00.000Z" });
     expect(f.sent.map((m) => m.text)).toEqual([CAMERA_CHECK_NOTICE, "Your heart rate is about 83 beats a minute. This is a camera estimate, not a medical test."]);
     expect(new Set(f.sent.map((m) => m.key)).size).toBe(2); // each message has its own retry-safe key
     expect(readings(f.db)).toEqual([{ hr: 82.5, br: null, method: "relay_call" }]);

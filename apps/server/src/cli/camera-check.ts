@@ -3,6 +3,7 @@ import { runCameraCallback } from "../calls/camera-callback.ts";
 import { loadConfig } from "../config.ts";
 import { openDatabase } from "../db/index.ts";
 import { createRelayClient } from "../relay/relay-client.ts";
+import { onDay } from "../scheduler.ts";
 
 // npm run camera:check -- [--patient id] [--db path]
 // The camera check call-back on demand: texts her, calls her phone through the Python recorder
@@ -48,7 +49,8 @@ export async function main(argv: string[]): Promise<number> {
         },
         minConfidence: config.calls.vitalsMinConfidence,
         presageApiKey,
-        now: () => new Date().toISOString(),
+        // With CLOCK_DATE (demos) the reading lands on the pinned day, as the agent's records do.
+        now: () => (config.clockDate ? onDay(config.clockDate, new Date(), config.patient.timezone) : new Date()).toISOString(),
         log: (event, fields) => console.log(`[camera-check] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`),
       },
       { id: patient.id, chatId: patient.chatId, handle: patient.handle },

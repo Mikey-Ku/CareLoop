@@ -128,7 +128,7 @@ export async function runCameraCallback(deps: CameraCallbackDeps, patient: Camer
     }
     addVitalsReading(deps.db, {
       patientId: patient.id,
-      takenAt: vitals.measuredAt ?? deps.now(),
+      takenAt: deps.now(), // the agent's clock (a pinned demo day); Presage's file time is the real clock
       heartRate: reading.heartRate,
       breathingRate: reading.breathingRate,
       method: "relay_call", // the call-back is a Relay video call

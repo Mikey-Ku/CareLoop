@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { addDays, dayNumber } from "../src/days.ts";
-import { createDailyScheduler, localDate, zonedInstant, type SchedulerJob } from "../src/scheduler.ts";
+import { createDailyScheduler, localDate, onDay, zonedInstant, type SchedulerJob } from "../src/scheduler.ts";
 
 const TZ = "America/Detroit";
 const HOUR = 3_600_000;
@@ -44,6 +44,17 @@ describe("time zone helpers", () => {
     expect(new Date(zonedInstant("2026-03-08", "02:30", TZ)).toISOString()).toBe("2026-03-08T07:30:00.000Z");
     // 2026-11-01 01:30 happens at 05:30Z (EDT) and again at 06:30Z (EST).
     expect(new Date(zonedInstant("2026-11-01", "01:30", TZ)).toISOString()).toBe("2026-11-01T05:30:00.000Z");
+  });
+
+  it("moves an instant to the same local time on another day (a pinned demo day), across DST and late evenings", () => {
+    expect(onDay("2026-09-02", new Date("2026-10-04T13:44:06.259Z"), TZ).toISOString()).toBe("2026-09-02T13:44:06.259Z");
+    // 09:44 EST in November is 09:44 EDT on the pinned day.
+    expect(onDay("2026-09-02", new Date("2026-11-10T14:44:00.000Z"), TZ).toISOString()).toBe("2026-09-02T13:44:00.000Z");
+    // 23:30 in Detroit is already the next day in UTC; it stays on the pinned local day.
+    const late = onDay("2026-09-02", new Date("2026-10-05T03:30:00.000Z"), TZ);
+    expect(late.toISOString()).toBe("2026-09-03T03:30:00.000Z");
+    expect(localDate(late, TZ)).toBe("2026-09-02");
+    expect(onDay("2026-10-04", new Date("2026-10-04T13:44:00.000Z"), TZ).toISOString()).toBe("2026-10-04T13:44:00.000Z");
   });
 
   it("adds calendar days across months and years", () => {
