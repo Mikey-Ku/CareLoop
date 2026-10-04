@@ -1068,3 +1068,53 @@ describe("the camera reading as a call-back (CAMERA_CALLBACK=on)", () => {
     expect(cameraCallBack).not.toHaveBeenCalled();
   });
 });
+
+describe("after every call her doctor and emergency contact get the day's summary", () => {
+  const turn = "My ankles are a bit swollen.";
+  const engineWith = (callFinished: CallEngine["callFinished"]) =>
+    ({
+      callCheckinContext: async () => ({ firstName: "Harriet", questions: [], yesterday: [], memories: [], familyNames: [] }),
+      screenSpokenTurn: async () => undefined,
+      recordSpokenCheckin: async () => ({ level: 0, items: [] }),
+      callFinished,
+    }) as unknown as CallEngine;
+  const recorded = () => vi.waitFor(() => expect(getCallSession(db, "call-1")?.status).toBe("ended"));
+
+  it("a call she spoke on: once the call is recorded", async () => {
+    const callFinished = vi.fn(async () => {});
+    const service = setup({ callTurn: () => modelPlan(), engine: engineWith(callFinished) });
+    await start(service);
+    stt.emit(turn);
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    await recorded();
+    await vi.waitFor(() => expect(callFinished).toHaveBeenCalledWith(PATIENT, DATE, "call-1"));
+    expect(callFinished).toHaveBeenCalledOnce();
+  });
+
+  it("with a camera check call-back: only after it is done, so its reading is in the summary", async () => {
+    let release!: () => void;
+    const cameraCallBack = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
+    const callFinished = vi.fn(async () => {});
+    const service = setup({ callTurn: () => modelPlan(), env: { PRESAGE_API_KEY: "presage-test-key" }, engine: engineWith(callFinished), cameraCallBack });
+    await start(service);
+    stt.emit(turn);
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_CALLBACK_OFFER));
+    stt.emit("Yes please.");
+    await recorded();
+    await vi.waitFor(() => expect(cameraCallBack).toHaveBeenCalledOnce());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(callFinished).not.toHaveBeenCalled();
+    release();
+    await vi.waitFor(() => expect(callFinished).toHaveBeenCalledWith(PATIENT, DATE, "call-1"));
+  });
+
+  it("a call she never spoke on sends nothing", async () => {
+    const callFinished = vi.fn(async () => {});
+    const service = setup({ callTurn: () => modelPlan(), engine: engineWith(callFinished) });
+    await start(service);
+    await service.end("call-1");
+    await recorded();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(callFinished).not.toHaveBeenCalled();
+  });
+});

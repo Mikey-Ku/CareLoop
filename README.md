@@ -80,7 +80,7 @@ The commands above are for macOS (`sed -i ''`, zsh `read`). Your conversation is
 
 ### Optional: care summaries over Photon
 
-Off by default and not part of the MVP. After each check-in the doctor and the emergency contact can get a text over [Photon](https://photon.codes/docs/spectrum-ts/getting-started) (iMessage). To try it: copy `care-contacts.example.json` to `care-contacts.json` with their numbers, set `SPECTRUM_PROJECT_ID` and `SPECTRUM_PROJECT_SECRET` in `.env`, have both contacts text the Photon line once, then run the agent. Preview with `npm run care:send -- --day 2026-09-01 --dry-run`.
+Off by default and not part of the MVP. After each check-in, and after every call (once its camera check call-back is done), the doctor and the emergency contact can get a text over [Photon](https://photon.codes/docs/spectrum-ts/getting-started) (iMessage). To try it: copy `care-contacts.example.json` to `care-contacts.json` with their numbers, set `SPECTRUM_PROJECT_ID` and `SPECTRUM_PROJECT_SECRET` in `.env`, have both contacts text the Photon line once, then run the agent. Preview with `npm run care:send -- --day 2026-09-01 --dry-run`.
 
 ### Optional: the camera check call-back
 
