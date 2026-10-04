@@ -1,10 +1,10 @@
 import type Relay from "@relaymessenger/sdk";
 import type { Call, CallWebhookEvent } from "@relaymessenger/sdk";
-import { ElevenLabsCall, type ElevenLabsEvent } from "@relaymessenger/elevenlabs";
+import { RelayCallTransport } from "@relaymessenger/sdk/calls";
 import type { CheckinEngine, SpokenTurn } from "../checkin/engine-types.ts";
-import type { UnderstoodItem } from "../checkin/copy.ts";
+import { crisisReply, urgentReply, type UnderstoodItem } from "../checkin/copy.ts";
 import type { ContextPacket } from "../context/packet.ts";
-import { getCallSession, addCallTranscript, correctLastAgentTurn, createCallSession, patchCallSession, callTranscript } from "../db/calls.ts";
+import { getCallSession, addCallTranscript, createCallSession, patchCallSession, callTranscript } from "../db/calls.ts";
 import { getCheckinPatient } from "../db/checkins.ts";
 import { familyChats } from "../db/family.ts";
 import { addVisitQuestion } from "../db/notes.ts";
@@ -13,21 +13,22 @@ import { normalizeHandle, type Config } from "../config.ts";
 import type { Db } from "../db/index.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import type { VitalsResult } from "../vitals/types.ts";
-import { QUIET_MINUTE_PROMPT, callClosing, callFirstMessage, heartRateReadback, noReadingReadback, noVideoReadback, stillMeasuring, wrongCallerDecline } from "./copy.ts";
+import type { CallScreeningLlmOutput, LlmClient } from "../llm/types.ts";
+import { QUIET_MINUTE_PROMPT, heartRateReadback, noReadingReadback, noVideoReadback, stillMeasuring, wrongCallerDecline } from "./copy.ts";
 import { emergencyDecision } from "./emergency.ts";
 import { callResult, emptyCallVitals, loadUsualRange } from "./screening.ts";
 import { RelayPresageBridge } from "./video.ts";
-import { andList } from "../text.ts";
 import type { ScreeningResult, TranscriptTurn } from "./types.ts";
+import { ElevenLabsRealtimeStt, ElevenLabsTts, relayAudioToStt } from "./audio.ts";
+import { ConversationOrchestrator } from "./orchestrator.ts";
 
-// A video check-in call (docs/CALLS.md). Relay rings, ElevenLabs holds a short warm conversation
-// (it says it is an AI, asks today's unanswered questions, guides a quiet Presage reading, says the
-// heart rate back, points her to family), and the server keeps the rules:
+// A video check-in call (docs/CALLS.md). Relay carries the call, ElevenLabs provides streaming STT/TTS,
+// and Gemini plans evidence-grounded turns using bounded FinchNode context. The server retains control:
 // - Only her Relay handle gets the call; anyone else gets a short polite decline and nothing from her record.
 // - Each of her turns gets the safety screen as it arrives; a hit takes the typed safety path at once
 //   (engine.screenSpokenTurn: her reply, every family chat alerted, a follow-up).
-// - What the voice reads back about her health is fixed copy by ladder level (src/calls/copy.ts), from
-//   a fresh reading of everything she said so far (never cached), and nothing a model wrote.
+// - Gemini's approved patient wording is validated and stored with its structured screening summary;
+//   deterministic safety replies still use fixed copy and always take precedence.
 // - After the call her turns go through the same understanding pass and ladder as typed words
 //   (engine.recordSpokenCheckin) and she gets ONE message saying what was noted.
 // - The server ends the call after CALL_MAX_MINUTES.
@@ -52,12 +53,18 @@ export type CallServiceOptions = {
   loadSnapshot: (subject: string) => Promise<HealthRecord>;
   /** The check-in engine: without it the call still screens for safety but records nothing. */
   engine?: CallEngine;
+  /** Gemini client for adaptive turn planning. */
+  llm?: LlmClient;
   /** Her check-in date now (YYYY-MM-DD, her time zone or CLOCK_DATE). Defaults to the UTC date. */
   today?: () => string;
   log?: CallLog;
   now?: () => string;
   /** The real clock, for Relay's own timestamps (the 32-second answer deadline). Defaults to `now`. */
   wallNow?: () => string;
+  /** Injectable media clients keep call lifecycle tests offline. */
+  transportFactory?: (relay: Relay, callId: string) => RelayCallTransport;
+  sttFactory?: (options: ConstructorParameters<typeof ElevenLabsRealtimeStt>[0]) => ElevenLabsRealtimeStt;
+  ttsFactory?: (transport: RelayCallTransport, options: ConstructorParameters<typeof ElevenLabsTts>[1]) => ElevenLabsTts;
 };
 
 type ActiveCall = {
@@ -68,17 +75,22 @@ type ActiveCall = {
   day: string;
   transcript: TranscriptTurn[];
   bridge?: RelayPresageBridge;
-  elevenLabs?: ElevenLabsCall;
+  transport?: RelayCallTransport;
+  stt?: ElevenLabsRealtimeStt;
+  tts?: ElevenLabsTts;
+  conversation?: ConversationOrchestrator;
   /** Highest safety level seen so far (4 urgent, 5 crisis). */
   safetyLevel: number;
   /** Per-turn safety screens in flight; waited for before the call is recorded. */
   screens: Promise<void>[];
   ending: boolean;
+  mediaClosed?: boolean;
   finishing?: Promise<void>;
   maxTimer?: ReturnType<typeof setTimeout>;
   readingSaved: boolean;
   /** Undefined until asked; null when her record couldn't be read (no comparison then). */
   usualRange?: ContextPacket["usualRange"] | null;
+  geminiScreening?: CallScreeningLlmOutput;
 };
 
 export type CallEventHandler = { handle(event: CallWebhookEvent): Promise<void> };
@@ -127,7 +139,8 @@ export class CallService implements CallEventHandler {
     }
     active.ending = true;
     active.bridge?.quiet.interrupt();
-    active.elevenLabs?.close();
+    active.conversation?.close();
+    this.#closeMedia(active);
     await this.#finish(active);
   }
 
@@ -139,11 +152,7 @@ export class CallService implements CallEventHandler {
     return { status: active.bridge.quiet.status, durationMs: active.bridge.quiet.durationMs };
   }
 
-  /**
-   * The ElevenLabs tool: the ladder's reading of everything she has said so far, read fresh every time
-   * (a later "chest pain" is never missed), as fixed copy. Safety acts for real; nothing else is recorded
-   * until the call ends.
-   */
+  /** Internal deterministic safety/ladder screen for local callers. The live call needs no HTTP tool. */
   async screen(callId: string): Promise<ScreeningResult> {
     const active = this.#active.get(callId);
     const stored = getCallSession(this.#options.db, callId);
@@ -171,11 +180,7 @@ export class CallService implements CallEventHandler {
     return result;
   }
 
-  /**
-   * The ElevenLabs tool after the quiet minute: the heart rate as a camera estimate (an in or out of usual
-   * range phrase only when her record says to compare: never with AFib), breathing said, never compared,
-   * then the ladder's one line about what she said. The reading is saved once per call.
-   */
+  /** Internal read-back helper used by offline tests/tools; live TTS uses the orchestrator directly. */
   async vitalsReadback(callId: string): Promise<{ status: string; patientResponseText: string }> {
     const active = this.#active.get(callId);
     if (!active) throw new Error("unknown call");
@@ -192,6 +197,10 @@ export class CallService implements CallEventHandler {
   }
 
   async #start(call: Call): Promise<void> {
+    if (this.#active.has(call.id)) {
+      this.#log("call_duplicate_start_ignored", { call_id: call.id });
+      return;
+    }
     const patient = this.#patientForCall(call);
     if (!patient) {
       this.#log("call_wrong_caller", { call_id: call.id });
@@ -214,9 +223,11 @@ export class CallService implements CallEventHandler {
     this.#active.set(call.id, active);
     createCallSession(this.#options.db, { callId: call.id, patientId: patient.id, relayChatId: call.chat_id, at: this.#now() });
     const calls = this.#options.config.calls;
-    if (!calls.elevenLabsApiKey || !calls.elevenLabsAgentId) {
-      patchCallSession(this.#options.db, call.id, { status: "failed", phase: "failed", error: "ElevenLabs is not configured" });
-      this.#log("call_skipped_not_configured", { call_id: call.id });
+    if (!calls.elevenLabsApiKey || !calls.elevenLabsVoiceId || !this.#options.llm?.callTurn) {
+      const missing = !calls.elevenLabsApiKey || !calls.elevenLabsVoiceId ? "ElevenLabs API or voice" : "Gemini call-turn operation";
+      patchCallSession(this.#options.db, call.id, { status: "failed", phase: "failed", error: `${missing} is not configured`, endedAt: this.#now() });
+      this.#log("call_skipped_not_configured", { call_id: call.id, integration: missing });
+      await this.#callUnavailable(call);
       this.#active.delete(call.id);
       return;
     }
@@ -224,38 +235,53 @@ export class CallService implements CallEventHandler {
     try {
       const context = await this.#context(patient, day);
       active.firstName = context.firstName;
-      const bridge = await ElevenLabsCall.connect({
-        relay: this.#options.relay,
-        callId: call.id,
-        elevenlabs: {
-          apiKey: calls.elevenLabsApiKey,
-          agentId: calls.elevenLabsAgentId,
-          initiationData: {
-            dynamic_variables: {
-              call_id: call.id,
-              patient_id: patient.id,
-              patient_name: context.firstName,
-              todays_questions: context.questions.map((q) => q.text).join(" | ") || "none",
-              yesterday: context.yesterday.join("; ") || "nothing",
-              recent_memories: context.memories.join("; ") || "none",
-              family_names: andList(context.familyNames) || "none",
-              quiet_prompt: QUIET_MINUTE_PROMPT,
-              closing_line: callClosing(context.firstName, context.familyNames),
-              max_minutes: String(calls.maxMinutes),
-              screening_operation: "screen_symptoms",
-            },
-            conversation_config_override: { agent: { first_message: callFirstMessage(context.firstName) } },
-          },
-        },
-        onEvent: (event) => this.#onElevenLabsEvent(active, event),
-        onWarning: (message) => this.#log("call_bridge_warning", { call_id: call.id, message }),
+      const transport = (this.#options.transportFactory ?? ((relay, callId) => new RelayCallTransport({ relay, callId })))(this.#options.relay, call.id);
+      const sttOptions: ConstructorParameters<typeof ElevenLabsRealtimeStt>[0] = {
+        apiKey: calls.elevenLabsApiKey,
+        modelId: calls.elevenLabsSttModel,
+        log: (event, fields) => this.#log(event, { call_id: call.id, ...fields }),
+      };
+      const stt = (this.#options.sttFactory ?? ((options) => new ElevenLabsRealtimeStt(options)))(sttOptions);
+      const ttsOptions: ConstructorParameters<typeof ElevenLabsTts>[1] = {
+        apiKey: calls.elevenLabsApiKey,
+        voiceId: calls.elevenLabsVoiceId,
+        modelId: calls.elevenLabsTtsModel,
+        outputFormat: calls.elevenLabsTtsOutputFormat,
+        log: (event, fields) => this.#log(event, { call_id: call.id, ...fields }),
+      };
+      const tts = (this.#options.ttsFactory ?? ((target, options) => new ElevenLabsTts(target, options)))(transport, ttsOptions);
+      active.transport = transport;
+      active.stt = stt;
+      active.tts = tts;
+      transport.on("audio", (frame) => {
+        try {
+          stt.send(relayAudioToStt(frame));
+        } catch (error) {
+          this.#log("call_audio_rejected", { call_id: call.id, error: summary(error) });
+        }
       });
-      active.elevenLabs = bridge;
-      if (call.ringing_at && !withinRelayAnswerDeadline(call.ringing_at, this.#wallNow())) {
-        throw new Error(`Relay answer deadline exceeded (${RELAY_ANSWER_DEADLINE_MS} ms)`);
+      transport.on("error", (error) => this.#log("call_transport_error", { call_id: call.id, error: summary(error) }));
+      transport.on("ended", () => void this.end(call.id));
+      stt.onPartial((text) => {
+        if (text.trim() && tts.isSpeaking) tts.cancel();
+      });
+      stt.onCommitted((text) => this.#onPatientTranscript(active, text));
+      const elapsedSinceRinging = call.ringing_at ? Date.parse(this.#wallNow()) - Date.parse(call.ringing_at) : 0;
+      const connectBudget = call.ringing_at ? RELAY_ANSWER_DEADLINE_MS - elapsedSinceRinging - 500 : RELAY_ANSWER_DEADLINE_MS - 500;
+      if (connectBudget <= 0) throw new Error(`Relay answer deadline exceeded (${RELAY_ANSWER_DEADLINE_MS} ms)`);
+      let connectTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.all([transport.connect(), stt.connect()]),
+          new Promise<never>((_resolve, reject) => {
+            connectTimer = setTimeout(() => reject(new Error(`Relay answer deadline exceeded (${RELAY_ANSWER_DEADLINE_MS} ms)`)), connectBudget);
+          }),
+        ]);
+      } finally {
+        clearTimeout(connectTimer);
       }
       active.bridge = calls.presageApiKey
-        ? new RelayPresageBridge(bridge.transport, {
+        ? new RelayPresageBridge(transport, {
             apiKey: calls.presageApiKey,
             quietDurationMs: calls.quietMeasurementMs,
             minConfidence: calls.vitalsMinConfidence,
@@ -263,16 +289,48 @@ export class CallService implements CallEventHandler {
           })
         : undefined;
       active.bridge?.start();
+      active.conversation = new ConversationOrchestrator({
+        callId: call.id,
+        patientId: patient.id,
+        subject: patient.finchnodePatientId,
+        firstName: context.firstName,
+        transcript: active.transcript,
+        initialContext: context,
+        llm: this.#options.llm,
+        loadSnapshot: this.#options.loadSnapshot,
+        getVitals: () => active.bridge?.result() ?? emptyCallVitals(),
+        canMeasure: Boolean(active.bridge),
+        quietMeasurementMs: calls.quietMeasurementMs,
+        speak: (text) => tts.speak(text),
+        recordAgentTurn: (text) => this.#recordTurn(active, { speaker: "agent", text }),
+        beginQuietMeasurement: () => {
+          if (!active.bridge) return;
+          active.bridge.beginQuietMeasurement(true);
+          patchCallSession(this.#options.db, call.id, { phase: "quiet_measurement", measurementStartedAt: this.#now() });
+        },
+        onComplete: (screening) => {
+          if (screening) active.geminiScreening = screening;
+          patchCallSession(this.#options.db, call.id, { phase: "screening" });
+          active.transport?.end();
+        },
+        log: (event, fields) => this.#log(event, { call_id: call.id, ...fields }),
+      });
       // The call's length is ours: the server ends it after CALL_MAX_MINUTES.
       active.maxTimer = setTimeout(() => this.#timeUp(active), calls.maxMinutes * 60_000);
       active.maxTimer.unref?.();
-      patchCallSession(this.#options.db, call.id, { status: "in_progress", phase: "interview", answeredAt: this.#now(), conversationId: bridge.conversationId ?? null });
+      patchCallSession(this.#options.db, call.id, { status: "in_progress", phase: "interview", answeredAt: this.#now() });
       this.#log("call_answered", { call_id: call.id });
-      await bridge.closed;
+      active.conversation.start();
+      await new Promise<void>((resolve) => {
+        transport.on("ended", () => resolve());
+        transport.on("close", () => resolve());
+      });
     } catch (error) {
       patchCallSession(this.#options.db, call.id, { status: "failed", phase: "failed", error: summary(error), endedAt: this.#now() });
       this.#log("call_bridge_failed", { call_id: call.id, error: summary(error) });
     } finally {
+      active.conversation?.close();
+      this.#closeMedia(active);
       await this.#finish(active);
     }
   }
@@ -302,49 +360,55 @@ export class CallService implements CallEventHandler {
     if (active.ending) return;
     this.#log("call_time_limit", { call_id: active.call.id, minutes: this.#options.config.calls.maxMinutes });
     try {
-      active.elevenLabs?.end();
+      active.transport?.end();
     } catch {
-      active.elevenLabs?.close();
+      active.transport?.close();
     }
   }
 
-  /**
-   * Only final turns are kept: her `user_transcript` (the one event that gets the per-turn safety screen)
-   * and the voice's `agent_response`. A correction rewrites the voice's last turn; it is never a new turn.
-   */
-  #onElevenLabsEvent(active: ActiveCall, event: ElevenLabsEvent): void {
-    const read = readAgentEvent(event);
-    if (!read) return;
-    if (read.kind === "tool") {
-      this.#log("call_tool_event", { call_id: active.call.id, type: read.type, tool: read.tool });
-      return;
-    }
-    if (read.kind === "correction") {
-      this.#correctAgentTurn(active, read.original, read.corrected);
-      return;
-    }
-    const index = active.transcript.length;
-    active.transcript.push(read.turn);
-    addCallTranscript(this.#options.db, { callId: active.call.id, speaker: read.turn.speaker, text: read.turn.text, at: this.#now() });
-    if (read.turn.speaker === "patient") active.screens.push(this.#screenTurn(active, { id: turnId(active.call.id, index), text: read.turn.text }));
+  #recordTurn(active: ActiveCall, turn: TranscriptTurn): void {
+    active.transcript.push({ ...turn, at: this.#now() });
+    addCallTranscript(this.#options.db, { callId: active.call.id, speaker: turn.speaker, text: turn.text, at: this.#now() });
   }
 
-  /**
-   * She talked over the voice, so ElevenLabs sends what it actually said. The voice's latest turn takes the
-   * corrected text, in memory and in call_transcript_turns, but only when it is the turn being corrected.
-   */
-  #correctAgentTurn(active: ActiveCall, original: string, corrected: string): void {
-    const index = active.transcript.findLastIndex((t) => t.speaker === "agent");
-    const last = active.transcript[index];
-    if (!last || squash(last.text) !== squash(original)) return;
-    active.transcript[index] = { ...last, text: corrected };
-    correctLastAgentTurn(this.#options.db, { callId: active.call.id, text: corrected });
+  #closeMedia(active: ActiveCall): void {
+    if (active.mediaClosed) return;
+    active.mediaClosed = true;
+    active.stt?.close();
+    active.tts?.close();
+    active.transport?.close();
+  }
+
+  async #onPatientTranscript(active: ActiveCall, text: string): Promise<void> {
+    const turn: SpokenTurn = { id: turnId(active.call.id, active.transcript.length), text };
+    this.#recordTurn(active, { speaker: "patient", text });
+    const emergency = emergencyDecision([{ speaker: "patient", text }]);
+    if (emergency) {
+      active.safetyLevel = Math.max(active.safetyLevel, emergency.level);
+      patchCallSession(this.#options.db, active.call.id, { phase: "emergency" });
+      this.#log("call_safety_hit", { call_id: active.call.id, kind: emergency.hit.kind });
+      active.screens.push(Promise.resolve(this.#options.engine?.screenSpokenTurn(active.patientId, turn)).then(() => {}).catch((error) => {
+        this.#log("call_safety_send_failed", { call_id: active.call.id, error: summary(error) });
+      }));
+      active.tts?.cancel();
+      const response = emergency.level >= 5
+        ? crisisReply(active.firstName, this.#familyNames(active.patientId))
+        : urgentReply(active.firstName, this.#familyNames(active.patientId));
+      this.#recordTurn(active, { speaker: "agent", text: response });
+      void active.tts?.speak(response).finally(() => active.transport?.end());
+      return;
+    }
+    const screen = this.#screenTurn(active, turn);
+    active.screens.push(screen.then(async (isEmergency) => {
+      if (isEmergency) return;
+      await active.conversation?.handlePatientTurn(text);
+    }));
   }
 
   /** The safety screen on one turn as it arrives; a hit takes the typed safety path at once. Never throws. */
-  async #screenTurn(active: ActiveCall, turn: SpokenTurn): Promise<void> {
+  async #screenTurn(active: ActiveCall, turn: SpokenTurn): Promise<boolean> {
     const decision = emergencyDecision([{ speaker: "patient", text: turn.text }]);
-    if (!decision) return;
+    if (!decision) return false;
     active.safetyLevel = Math.max(active.safetyLevel, decision.level);
     patchCallSession(this.#options.db, active.call.id, { phase: "emergency" });
     this.#log("call_safety_hit", { call_id: active.call.id, kind: decision.hit.kind });
@@ -353,6 +417,7 @@ export class CallService implements CallEventHandler {
     } catch (error) {
       this.#log("call_safety_send_failed", { call_id: active.call.id, error: summary(error) });
     }
+    return true;
   }
 
   /** The ladder over her turns: the engine's understanding pass, or the safety screen alone without one. */
@@ -420,7 +485,7 @@ export class CallService implements CallEventHandler {
       patchCallSession(this.#options.db, callId, {
         ...(failed ? {} : { status: "ended" as const, phase: level >= 4 ? ("emergency" as const) : ("complete" as const) }),
         endedAt: this.#now(),
-        screeningJson: JSON.stringify(result),
+        screeningJson: JSON.stringify(active.geminiScreening ? { ...result, geminiScreening: active.geminiScreening } : result),
         measurementEndedAt: active.bridge?.quiet.status === "complete" ? this.#now() : undefined,
       });
     } catch (error) {
@@ -499,59 +564,22 @@ export class CallService implements CallEventHandler {
       this.#log("call_decline_end_failed", { call_id: call.id, error: summary(error) });
     }
   }
-}
 
-/**
- * The ElevenLabs Agents server events the call reads, with only the fields used here (read as unknown: the
- * bridge forwards them unchecked). Shapes from the ElevenLabs Agents WebSocket AsyncAPI, as generated in
- * @elevenlabs/types (generated/types/asyncapi-types.ts). Every other type is ignored, never stored and never
- * screened: tentative_user_transcript, internal_tentative_agent_response, agent_chat_response_part,
- * agent_reasoning_response_part, audio, ping and the rest. A correction with no corrected text is ignored too.
- */
-type AgentEvent =
-  | { type: "user_transcript"; user_transcription_event?: { user_transcript?: unknown } }
-  | { type: "agent_response"; agent_response_event?: { agent_response?: unknown } }
-  | { type: "agent_response_correction"; agent_response_correction_event?: { original_agent_response?: unknown; corrected_agent_response?: unknown } }
-  | { type: "agent_tool_request"; agent_tool_request?: { tool_name?: unknown } }
-  | { type: "agent_tool_response"; agent_tool_response?: { tool_name?: unknown } };
-
-type AgentEventRead =
-  | { kind: "turn"; turn: TranscriptTurn }
-  | { kind: "correction"; original: string; corrected: string }
-  | { kind: "tool"; type: string; tool: string };
-
-function readAgentEvent(event: ElevenLabsEvent): AgentEventRead | undefined {
-  const e = event as AgentEvent;
-  switch (e.type) {
-    case "user_transcript": {
-      const text = nonEmpty(e.user_transcription_event?.user_transcript);
-      return text ? { kind: "turn", turn: { speaker: "patient", text } } : undefined;
+  async #callUnavailable(call: Call): Promise<void> {
+    try {
+      await this.#options.relay.chats.messages.send(call.chat_id, {
+        message: { parts: [{ type: "text", value: "Sorry, the check-in call is unavailable right now. Please try again later." }], idempotency_key: `call:${call.id}:unavailable` },
+      });
+    } catch (error) {
+      this.#log("call_unavailable_message_failed", { call_id: call.id, error: summary(error) });
     }
-    case "agent_response": {
-      const text = nonEmpty(e.agent_response_event?.agent_response);
-      return text ? { kind: "turn", turn: { speaker: "agent", text } } : undefined;
+    try {
+      await this.#options.relay.calls.end(call.id);
+    } catch (error) {
+      this.#log("call_unavailable_end_failed", { call_id: call.id, error: summary(error) });
     }
-    case "agent_response_correction": {
-      const original = nonEmpty(e.agent_response_correction_event?.original_agent_response);
-      const corrected = nonEmpty(e.agent_response_correction_event?.corrected_agent_response);
-      return original && corrected ? { kind: "correction", original, corrected } : undefined;
-    }
-    case "agent_tool_request":
-    case "agent_tool_response": {
-      const body = e.type === "agent_tool_request" ? e.agent_tool_request : e.agent_tool_response;
-      const tool = nonEmpty(body?.tool_name);
-      return tool ? { kind: "tool", type: e.type, tool } : undefined;
-    }
-    default:
-      return undefined;
   }
 }
-
-function nonEmpty(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-const squash = (text: string) => text.replace(/\s+/g, " ").trim();
 
 function summary(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);

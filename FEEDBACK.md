@@ -2,7 +2,7 @@
 
 Open items for the team. Product or medical questions you can't settle go here.
 
-- [ ] ElevenLabs agent, tool URLs and an HTTPS tunnel for the video call: `docs/CALLS.md`. Then three timed calls and Presage's heart rate within 5 bpm of its own app.
+- [ ] Relay video call: set `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` and `GEMINI_API_KEY` (and `PRESAGE_API_KEY` for the camera reading) in `.env`; see `docs/CALLS.md`. Then check real-device setup, transcription quality, voice playback and interruption, the consented quiet reading and cleanup, three timed calls, and Presage within 5 bpm of its own app.
 - [ ] Content eval on a held-out set: someone who hasn't seen `fixtures/content/messages.json` or the classifier prompt writes 50 new messages, so the accuracy numbers aren't flattered by tuning.
 - [ ] Review the safety phrase lists (`apps/server/src/safety/screen.ts`) against `docs/content-eval.md` before the demo.
 - [ ] Red-flag cadence (`redFlagEveryDays = 2`, `followUpDays = 3` in `apps/server/src/context/questions.ts`) are product values, not clinical cutoffs; change them if they feel wrong in rehearsal.

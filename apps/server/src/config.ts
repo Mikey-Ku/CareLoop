@@ -50,8 +50,10 @@ const ConfigSchema = z.object({
   LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(DEFAULT_LLM_TIMEOUT_MS),
   LLM_ATTEMPT_TIMEOUT_MS: z.coerce.number().int().min(500).max(120_000).default(DEFAULT_LLM_ATTEMPT_TIMEOUT_MS),
   ELEVENLABS_API_KEY: z.string().optional(),
-  ELEVENLABS_AGENT_ID: z.string().optional(),
-  ELEVENLABS_TOOL_SECRET: z.string().optional(),
+  ELEVENLABS_VOICE_ID: z.string().optional(),
+  ELEVENLABS_STT_MODEL: z.string().default("scribe_v2_realtime"),
+  ELEVENLABS_TTS_MODEL: z.string().default("eleven_flash_v2_5"),
+  ELEVENLABS_TTS_OUTPUT_FORMAT: z.string().default("pcm_48000").pipe(z.literal("pcm_48000")),
   CALL_QUIET_MEASUREMENT_MS: z.coerce.number().int().min(30_000).max(45_000).default(30_000),
   /** Longest call; the server ends the ElevenLabs session after it (Relay's 32 s is only the time to answer). */
   CALL_MAX_MINUTES: z.coerce.number().positive().max(30).default(4),
@@ -94,10 +96,11 @@ export type LlmConfig = {
 export type CallsConfig = {
   /** ElevenLabs API key. Non-enumerable and never logged. */
   elevenLabsApiKey: string | undefined;
-  /** ElevenLabs conversational agent id. */
-  elevenLabsAgentId: string | undefined;
-  /** Optional bearer token for the ElevenLabs server tool endpoint. Non-enumerable. */
-  elevenLabsToolSecret: string | undefined;
+  /** ElevenLabs voice used by direct streaming TTS. */
+  elevenLabsVoiceId: string | undefined;
+  elevenLabsSttModel: string;
+  elevenLabsTtsModel: string;
+  elevenLabsTtsOutputFormat: string;
   /** SmartSpectra key. Non-enumerable and never logged. */
   presageApiKey: string | undefined;
   /** SmartSpectra's minimum quiet window for breathing. */
@@ -130,7 +133,7 @@ export class ConfigError extends Error {
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
   // Secrets are read here and nowhere near the schema, so a parse error can't echo them.
-  const { RELAY_AGENT_TOKEN, GEMINI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_TOOL_SECRET, PRESAGE_API_KEY, ...rest } = env;
+  const { RELAY_AGENT_TOKEN, GEMINI_API_KEY, ELEVENLABS_API_KEY, PRESAGE_API_KEY, ...rest } = env;
   const cleaned = Object.fromEntries(Object.entries(rest).map(([k, v]) => [k, v === "" ? undefined : v]));
   const parsed = ConfigSchema.safeParse(cleaned);
   if (!parsed.success) {
@@ -153,15 +156,16 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 
   const calls: CallsConfig = {
     elevenLabsApiKey: undefined,
-    elevenLabsAgentId: c.ELEVENLABS_AGENT_ID?.trim() || undefined,
-    elevenLabsToolSecret: undefined,
+    elevenLabsVoiceId: c.ELEVENLABS_VOICE_ID?.trim() || undefined,
+    elevenLabsSttModel: c.ELEVENLABS_STT_MODEL.trim(),
+    elevenLabsTtsModel: c.ELEVENLABS_TTS_MODEL.trim(),
+    elevenLabsTtsOutputFormat: c.ELEVENLABS_TTS_OUTPUT_FORMAT.trim(),
     presageApiKey: undefined,
     quietMeasurementMs: c.CALL_QUIET_MEASUREMENT_MS,
     maxMinutes: c.CALL_MAX_MINUTES,
     vitalsMinConfidence: c.VITALS_MIN_CONFIDENCE,
   };
   Object.defineProperty(calls, "elevenLabsApiKey", { value: ELEVENLABS_API_KEY?.trim() || undefined, enumerable: false });
-  Object.defineProperty(calls, "elevenLabsToolSecret", { value: ELEVENLABS_TOOL_SECRET?.trim() || undefined, enumerable: false });
   Object.defineProperty(calls, "presageApiKey", { value: PRESAGE_API_KEY?.trim() || undefined, enumerable: false });
 
   return {

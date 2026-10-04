@@ -227,6 +227,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
         relay: deps.callRelay,
         loadSnapshot: deps.loadSnapshot,
         engine,
+        llm: deps.llm,
         today: () => config.clockDate ?? localDate(now(), timezone),
         log: (event, fields) => log(`[calls] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`),
         now: () => dataNow().toISOString(),
@@ -334,16 +335,6 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
     createApp({
       config,
       doctorReport: doctorReportRoute(db),
-      ...(calls
-        ? {
-            calls: {
-              screen: (callId) => calls.screen(callId),
-              beginQuietMeasurement: (callId, permissionGranted) => calls.beginQuietMeasurement(callId, permissionGranted),
-              vitalsReadback: (callId) => calls.vitalsReadback(callId),
-              toolSecret: config.calls.elevenLabsToolSecret,
-            },
-          }
-        : {}),
     }),
     deps.port ?? config.port,
   );

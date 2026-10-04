@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.18"
+    "node": ">=22.22.3"
   },
   "scripts": {
     "dev": "node --env-file-if-exists=../../.env src/server.ts",
@@ -23,7 +23,7 @@
     "record-fixtures": "node --env-file-if-exists=../../.env ../../scripts/record-fixtures.ts"
   },
   "dependencies": {
-    "@relaymessenger/elevenlabs": "0.1.1",
+    "@evan/opus": "1.0.3",
     "@relaymessenger/sdk": "0.5.1",
     "@smartspectra/node-sdk": "3.4.0",
     "@spectrum-ts/core": "^12.10.1",
@@ -31,6 +31,9 @@
     "better-sqlite3": "^13.0.3",
     "express": "^5.2.1",
     "node-webcodecs": "1.3.0",
+    "rtp-packet": "0.4.2",
+    "ws": "8.22.0",
+    "werift": "0.24.4",
     "zod": "^4.6.5"
   },
   "devDependencies": {

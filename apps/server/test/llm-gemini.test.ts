@@ -9,6 +9,7 @@ import {
   candidateText,
   cleanList,
   parseClassification,
+  parseCallTurn,
   parseMapping,
   parseSmallTalk,
   type FetchLike,
@@ -712,5 +713,26 @@ describe("FakeLlmClient.screenCall", () => {
     const fake = new FakeLlmClient({ screenCall: () => out });
     expect(await fake.screenCall(input)).toEqual(out);
     expect(fake.calls.map((c) => c.method)).toEqual(["screenCall"]);
+  });
+});
+
+describe("Gemini adaptive call-turn validation", () => {
+  it("accepts one question with separate acknowledgment and evidence", () => {
+    expect(parseCallTurn(JSON.stringify({
+      acknowledgment: "Thank you for telling me.",
+      patientResponseText: "I appreciate you sharing that.",
+      nextQuestion: "When did it begin?",
+      nextAction: "ask_follow_up",
+      informationCollected: ["New dizziness"],
+      missingInformation: ["onset"],
+      evidence: [{ source: "patient_transcript", detail: "Patient said dizziness began today." }],
+      uncertainty: [],
+    }))).toMatchObject({ nextAction: "ask_follow_up", nextQuestion: "When did it begin?", informationCollected: ["New dizziness"] });
+  });
+
+  it("rejects multiple questions and questions hidden in the response text", () => {
+    const base = { acknowledgment: "Thank you.", patientResponseText: "I understand.", nextAction: "ask_follow_up", nextQuestion: "When did it start? How severe is it?" };
+    expect(() => parseCallTurn(JSON.stringify(base))).toThrow(LlmUnavailableError);
+    expect(() => parseCallTurn(JSON.stringify({ ...base, patientResponseText: "What happened?", nextQuestion: "When did it begin?" }))).toThrow(LlmUnavailableError);
   });
 });

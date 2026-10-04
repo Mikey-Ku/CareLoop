@@ -22,12 +22,12 @@ Do "Try it on your phone" in the [README](../README.md#try-it-on-your-phone-abou
 | `RELAY_AGENT_TOKEN` | The Relay agent (the README's step 3 fills it) | Yes, for any phone test |
 | `PATIENT_RELAY_HANDLE` | Which Relay handle plays Harriet (your own handle) | Yes, for any phone test |
 | `FAMILY_RELAY_HANDLES` | Family chats, comma separated (second phone plays Sarah) | Optional, needed for family tests |
-| `GEMINI_API_KEY` | Reading typed messages, label and paper photos, small talk, call understanding, Photon wording | Optional, but most tests need it. Without it: buttons only, and photos get "I can't read photos yet" |
+| `GEMINI_API_KEY` | Reading typed messages, label and paper photos, small talk, adaptive call turns, Photon wording | Optional for non-call use (without it: buttons only, and photos get "I can't read photos yet"); required for calls |
 | `LLM_PROVIDER` | Keep `gemini`, the only adapter. Any other value stops the agent with a config error | Leave as is |
 | `GEMINI_MODELS`, `LLM_TIMEOUT_MS`, `LLM_ATTEMPT_TIMEOUT_MS` | Model list and time budget | Leave defaults |
-| `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` | The video check-in call | Needed for calls |
-| `ELEVENLABS_TOOL_SECRET` | Auth for the three call tools: the server answers 401 to every tool call without it | Needed for calls |
-| `PRESAGE_API_KEY` | Heart rate during the call | Optional (without it the voice says it can't see the camera) |
+| `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | Realtime transcription and spoken replies inside the Relay call (no ElevenLabs agent, tool secret or tunnel) | Needed for calls |
+| `ELEVENLABS_STT_MODEL`, `ELEVENLABS_TTS_MODEL`, `ELEVENLABS_TTS_OUTPUT_FORMAT` | Direct ElevenLabs model and audio format | Leave defaults |
+| `PRESAGE_API_KEY` | Pulse and breathing estimates from Relay video frames | Optional; without it the call skips the camera reading |
 | `CALL_QUIET_MEASUREMENT_MS` | Length of the quiet reading, 30000 to 45000 | Optional |
 | `CALL_MAX_MINUTES`, `VITALS_MIN_CONFIDENCE` | Server ends the call after N minutes (default 4); lowest camera confidence used (default 1) | Optional |
 | `SPECTRUM_PROJECT_ID`, `SPECTRUM_PROJECT_SECRET` plus `care-contacts.json` | Photon (iMessage) care summaries to the doctor and the emergency contact. Off unless set; not part of the MVP | Optional |
@@ -145,10 +145,10 @@ Before each: agent running with a fresh `CLOCK_DATE` (or fresh database), `FOLLO
 4. Harriet types "Tell Sarah I love her". Expect it on Sarah's phone.
 
 **S12. The video call**
-1. Agent and tunnel running, ElevenLabs agent set up per `docs/CALLS.md`. Harriet video calls the agent.
+1. Agent running with `ELEVENLABS_VOICE_ID` set (no tunnel or ElevenLabs agent needed; see `docs/CALLS.md`). Harriet video calls the agent.
 2. Say "my ankles are a bit puffy". Agree to the reading and hold still with the phone propped up.
 3. Ask "Should I stop my aspirin?"
-- Expect: answered within 10 seconds; first sentence says it is an AI; asks today's questions; quiet prompt; heart rate as a camera estimate with no usual-range words; the fixed medicine reply; goodbye naming Sarah; ends by about 3 minutes (cut at 4). Then one "Here's what I noted from our call: ..." message with [That's right] [Something's wrong].
+- Expect: answered within 10 seconds; first sentence says it is an AI; asks today's questions; quiet prompt; heart rate as a camera estimate with no usual-range words; a medicine question gets a pointer to her doctor or pharmacist, never advice (this is Gemini's wording on a call, so check it); goodbye naming Sarah; ends by about 3 minutes (cut at 4). Then one "Here's what I noted from our call: ..." message with [That's right] [Something's wrong].
 4. Second call: say "I have chest pain". Expect the 911 reply and Sarah alerted during the call.
 5. Write down the heart rate next to Presage's own app, same person, same minute.
 
