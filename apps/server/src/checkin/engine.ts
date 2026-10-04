@@ -2264,8 +2264,10 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         // The model read a crisis or an urgent symptom the screen missed: it wins, nothing else is recorded.
         const kind = read.safety;
         raise(kind);
+        // Once per kind per call, so a later crisis still acts; an urgent reading after a crisis adds nothing.
         const id = `${options.callId ? `call:${options.callId}` : (turns[0]?.id ?? `call:${day}`)}:model`;
-        sends.push(...db.transaction(() => planSpokenSafety(patient, { id, text: words }, kind))());
+        const plan = () => (kind === "urgent_symptom" && inboundSeen(db, `${id}:crisis`) ? [] : planSpokenSafety(patient, { id: `${id}:${kind}`, text: words }, kind));
+        sends.push(...db.transaction(plan)());
       } else if (read.extraction && !looksLikeInstructions(words)) reading = readSpoken(patient, day, read.extraction, words);
     }
     if (reading) level = Math.max(level, reading.level);
