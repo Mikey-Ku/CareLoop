@@ -39,11 +39,11 @@ cp ../../.env.example ../../.env    # the .env lives at the repo root
 | FinchNode | Harriet's synthetic health record, read live and read-only | nothing: the demo API is open (`FINCHNODE_API_KEY` only for an authenticated endpoint) | `npm run packet -- patient-demo-polypharmacy --live` |
 | Relay Messenger | Chat, video call and photos with the agent | `RELAY_AGENT_TOKEN`, `PATIENT_RELAY_HANDLE`, and `FAMILY_RELAY_HANDLES` for family | `npm run relay:check` |
 | Gemini | Understands typed and spoken words, words the questions | `GEMINI_API_KEY` (without it, buttons only) | `npm run llm:check` |
-| ElevenLabs | Hears and speaks on the call | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | `npm run demo:check`, then a call |
+| ElevenLabs | Hears and speaks on the call | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | `npm run voice:check` |
 | Presage | Pulse and breathing estimate from the call's video | `PRESAGE_API_KEY` (optional) | a video call with the camera on |
 | Photon (optional) | Texts care summaries to the doctor and emergency contact over iMessage | `SPECTRUM_PROJECT_ID`, `SPECTRUM_PROJECT_SECRET` | `npm run care:send -- --dry-run` |
 
-`npm run demo:check` reads the config and the synthetic fixtures without any network request and never prints a key. Exit `0` means configured, `2` means an optional part is missing, `1` means something required is. It shows presence, not that a key works: `relay:check` and `llm:check` call the providers (`llm:check` uses a little quota). `content:eval` runs 145 messages through Gemini and overwrites `docs/content-eval.md`. Phone calls, the camera and family delivery need a live rehearsal with a synthetic patient on a phone.
+`npm run demo:check` reads the config and the synthetic fixtures without any network request and never prints a key. Exit `0` means configured, `2` means an optional part is missing, `1` means something required is. It shows presence, not that a key works: `relay:check`, `llm:check` and `voice:check` call the providers (`llm:check` uses a little quota, `voice:check` about 6 characters of speech). `content:eval` runs 145 messages through Gemini and overwrites `docs/content-eval.md`. Phone calls, the camera and family delivery need a live rehearsal with a synthetic patient on a phone.
 
 **No keys? Run the recorded demo:** `npm run simulate -- --reset --day 2026-07-28 --sharing all --family sarah --script ../../scripts/demo/hackathon-demo.txt` (from `apps/server`). It needs no `.env`. See [the three-minute demo](docs/DEMO.md) and [QA gates](docs/QA.md) before presenting.
 
