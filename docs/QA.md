@@ -27,6 +27,7 @@ Do "Try it on your phone" in the [README](../README.md#try-it-on-your-phone-abou
 | `GEMINI_MODELS`, `LLM_TIMEOUT_MS`, `LLM_ATTEMPT_TIMEOUT_MS` | Model list and time budget | Leave defaults |
 | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | Realtime transcription and spoken replies inside the Relay call (no ElevenLabs agent, tool secret or tunnel) | Needed for calls |
 | `ELEVENLABS_STT_MODEL`, `ELEVENLABS_TTS_MODEL`, `ELEVENLABS_TTS_OUTPUT_FORMAT` | Direct ElevenLabs model and audio format | Leave defaults |
+| `ELEVENLABS_STT_LANGUAGE` | Language of her speech for transcription, an ISO code (default `en`). Empty means auto-detect, which once took English for Chinese | Leave `en` for English speakers |
 | `ELEVENLABS_STT_VAD_SILENCE_SECS` | How long she must pause, in seconds (0.3 to 3; default 0.7), before her turn is taken as finished. Every reply waits this long | Optional; lower it if replies feel slow, raise it if she is cut off |
 | `ELEVENLABS_TTS_GAIN` | How loud the voice is: a soft limiter, 1 to 4 (default 1.6; 1 leaves it untouched) | Optional; raise it if the voice sounds quiet |
 | `PRESAGE_API_KEY` | Pulse and breathing estimates from Relay video frames | Optional; without it the call skips the camera reading |

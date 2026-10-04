@@ -306,11 +306,12 @@ describe("the voice and the transcriber are set up from the configuration", () =
     expect(ttsOptions?.gain).toBe(2.2);
   });
 
-  it("the transcriber gets the speech wait: 0.7 s unless ELEVENLABS_STT_VAD_SILENCE_SECS says otherwise", async () => {
+  it("the transcriber gets the speech wait (0.7 s) and her language (en), unless the settings say otherwise", async () => {
     await start(setup());
-    expect(sttOptions?.vadSilenceSecs).toBe(0.7);
-    await start(setup({ env: { ELEVENLABS_STT_VAD_SILENCE_SECS: "1.1" } }), relayCall("harriet", "call-2"));
+    expect(sttOptions).toMatchObject({ vadSilenceSecs: 0.7, languageCode: "en" });
+    await start(setup({ env: { ELEVENLABS_STT_VAD_SILENCE_SECS: "1.1", ELEVENLABS_STT_LANGUAGE: "" } }), relayCall("harriet", "call-2"));
     expect(sttOptions?.vadSilenceSecs).toBe(1.1);
+    expect(sttOptions).not.toHaveProperty("languageCode"); // empty: auto-detect
   });
 });
 

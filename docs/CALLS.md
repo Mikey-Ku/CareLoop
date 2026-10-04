@@ -21,6 +21,7 @@ PATIENT_RELAY_HANDLE=
 ELEVENLABS_API_KEY=
 ELEVENLABS_VOICE_ID=
 ELEVENLABS_STT_MODEL=scribe_v2_realtime
+ELEVENLABS_STT_LANGUAGE=en
 ELEVENLABS_STT_VAD_SILENCE_SECS=0.7
 ELEVENLABS_TTS_MODEL=eleven_flash_v2_5
 ELEVENLABS_TTS_OUTPUT_FORMAT=pcm_48000
@@ -34,7 +35,7 @@ VITALS_MIN_CONFIDENCE=1
 
 Keep every key on the server. The phones need only the Relay app and the relevant call permissions; they do not receive API credentials. The server makes outbound HTTPS/WebSocket connections to Relay, ElevenLabs, Gemini, FinchNode, and Presage. The call flow does not require a website, HTTPS tunnel, or publicly exposed HTTP endpoint. `/health` is only a local operational check.
 
-`ELEVENLABS_VOICE_ID` identifies the TTS voice. The STT model must support realtime PCM 16 kHz input; the TTS output format is currently PCM 48 kHz mono, which is the format sent to Relay. `ELEVENLABS_STT_VAD_SILENCE_SECS` is how long she must pause (0.3 to 3 seconds) before her turn is taken as finished: every reply waits at least that long, so lower is quicker but may cut her off mid-sentence. `ELEVENLABS_TTS_GAIN` is a soft limiter on the voice before it is sent (1 to 4): 1 leaves it untouched, and the default 1.6 lifts a quiet voice about 4 dB without clipping. `CALL_QUIET_MEASUREMENT_MS` is constrained to 30–45 seconds. Never put real keys, patient records, or media in Git.
+`ELEVENLABS_VOICE_ID` identifies the TTS voice. The STT model must support realtime PCM 16 kHz input; the TTS output format is currently PCM 48 kHz mono, which is the format sent to Relay. `ELEVENLABS_STT_LANGUAGE` is the language of her speech as an ISO code; empty means ElevenLabs detects it, which on a real call took English for Chinese. `ELEVENLABS_STT_VAD_SILENCE_SECS` is how long she must pause (0.3 to 3 seconds) before her turn is taken as finished: every reply waits at least that long, so lower is quicker but may cut her off mid-sentence. `ELEVENLABS_TTS_GAIN` is a soft limiter on the voice before it is sent (1 to 4): 1 leaves it untouched, and the default 1.6 lifts a quiet voice about 4 dB without clipping. `CALL_QUIET_MEASUREMENT_MS` is constrained to 30–45 seconds. Never put real keys, patient records, or media in Git.
 
 ## Runtime sequence
 

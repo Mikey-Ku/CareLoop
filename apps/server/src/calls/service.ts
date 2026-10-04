@@ -244,6 +244,7 @@ export class CallService implements CallEventHandler {
       const sttOptions: ConstructorParameters<typeof ElevenLabsRealtimeStt>[0] = {
         apiKey: calls.elevenLabsApiKey,
         modelId: calls.elevenLabsSttModel,
+        ...(calls.elevenLabsSttLanguage ? { languageCode: calls.elevenLabsSttLanguage } : {}),
         vadSilenceSecs: calls.elevenLabsSttVadSilenceSecs,
         log: (event, fields) => this.#log(event, { call_id: call.id, ...fields }),
       };

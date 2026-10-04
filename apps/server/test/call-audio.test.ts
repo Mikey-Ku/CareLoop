@@ -48,8 +48,8 @@ describe("call audio adapters", () => {
     stt.close();
   });
 
-  it("waits 0.7 s of her silence before a turn is committed, or as long as the setting says", async () => {
-    const query = async (options: { vadSilenceSecs?: number } = {}) => {
+  it("asks for a 0.7 s speech wait unless told otherwise, and for her language only when it is set", async () => {
+    const query = async (options: { vadSilenceSecs?: number; languageCode?: string } = {}) => {
       const stt = new ElevenLabsRealtimeStt({ apiKey: "test", webSocket: FakeWebSocket as never, ...options });
       await stt.connect();
       stt.close();
@@ -58,6 +58,8 @@ describe("call audio adapters", () => {
     expect((await query()).get("vad_silence_threshold_secs")).toBe("0.7");
     expect((await query({ vadSilenceSecs: 1.2 })).get("vad_silence_threshold_secs")).toBe("1.2");
     expect((await query()).get("commit_strategy")).toBe("vad");
+    expect((await query({ languageCode: "en" })).get("language_code")).toBe("en");
+    expect((await query()).has("language_code")).toBe(false); // left out: ElevenLabs detects the language
   });
 
   it("streams generated mono PCM into Relay and clears speaking state on HTTP failure", async () => {

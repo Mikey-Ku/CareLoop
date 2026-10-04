@@ -114,6 +114,8 @@ export type CallsConfig = {
   /** ElevenLabs voice used by direct streaming TTS. */
   elevenLabsVoiceId: string | undefined;
   elevenLabsSttModel: string;
+  /** ELEVENLABS_STT_LANGUAGE: the language code of her speech ("en" unless set); undefined means ElevenLabs detects it. */
+  elevenLabsSttLanguage: string | undefined;
   /** ELEVENLABS_STT_VAD_SILENCE_SECS: her pause, in seconds, that ends a turn. */
   elevenLabsSttVadSilenceSecs: number;
   elevenLabsTtsModel: string;
@@ -178,6 +180,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     elevenLabsApiKey: undefined,
     elevenLabsVoiceId: c.ELEVENLABS_VOICE_ID?.trim() || undefined,
     elevenLabsSttModel: c.ELEVENLABS_STT_MODEL.trim(),
+    elevenLabsSttLanguage: sttLanguageCode(env.ELEVENLABS_STT_LANGUAGE),
     elevenLabsSttVadSilenceSecs: c.ELEVENLABS_STT_VAD_SILENCE_SECS,
     elevenLabsTtsModel: c.ELEVENLABS_TTS_MODEL.trim(),
     elevenLabsTtsOutputFormat: c.ELEVENLABS_TTS_OUTPUT_FORMAT.trim(),
@@ -236,6 +239,19 @@ export function parseHandles(value: string | undefined): string[] {
     if (handle) seen.add(handle);
   }
   return [...seen];
+}
+
+/**
+ * ELEVENLABS_STT_LANGUAGE: "en" when unset. Unlike the other settings an empty value means something,
+ * no language code, so ElevenLabs detects the language itself (it once took English for Chinese), which is
+ * why this is read from the raw environment, where an empty value is still empty.
+ */
+function sttLanguageCode(value: string | undefined): string | undefined {
+  if (value === undefined) return "en";
+  const code = value.trim().toLowerCase();
+  if (code === "") return undefined;
+  if (!/^[a-z]{2,3}$/.test(code)) throw new ConfigError("ELEVENLABS_STT_LANGUAGE: use an ISO language code such as en (empty means auto-detect)");
+  return code;
 }
 
 /** Comma separated values, trimmed, blanks and repeats dropped; undefined when nothing is left. */
