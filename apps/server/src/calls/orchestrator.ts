@@ -3,7 +3,7 @@ import type { CallCheckinContext } from "../checkin/engine-types.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import type { CallScreeningLlmOutput, LlmClient } from "../llm/types.ts";
 import type { VitalsResult } from "../vitals/types.ts";
-import { callClosing, callFirstMessage, quietMeasurementPrompt } from "./copy.ts";
+import { CAMERA_OFFER_AT_END, callClosing, callFirstMessage, quietMeasurementPrompt } from "./copy.ts";
 import { emergencyDecision } from "./emergency.ts";
 import type { TranscriptTurn } from "./types.ts";
 
@@ -37,6 +37,8 @@ export class ConversationOrchestrator {
   #completed = false;
   #waitingForMeasurementConsent = false;
   #measurementDeclined = false;
+  /** She said yes and the quiet reading was started: it is never offered or asked for again. */
+  #measurementDone = false;
   #measurementTimer: ReturnType<typeof setTimeout> | undefined;
   #phase: "interview" | "quiet_measurement" | "screening" = "interview";
 
@@ -84,6 +86,7 @@ export class ConversationOrchestrator {
       this.#waitingForMeasurementConsent = false;
       if (affirmative(text)) {
         this.#phase = "quiet_measurement";
+        this.#measurementDone = true;
         await this.#speak(quietMeasurementPrompt(Math.round(this.#options.quietMeasurementMs / 1000)));
         this.#options.beginQuietMeasurement();
         this.#measurementTimer = setTimeout(() => void this.#afterMeasurement(), this.#options.quietMeasurementMs + 500);
@@ -131,7 +134,7 @@ export class ConversationOrchestrator {
       currentVitals: this.#options.getVitals(),
       finchContext,
       recentMemories: [...this.#options.initialContext.memories],
-      canMeasure: this.#options.canMeasure && !this.#measurementDeclined,
+      canMeasure: this.#canMeasure,
       interviewPhase: interviewPhase === "quiet_measurement" ? "screening" : interviewPhase,
     });
     if (this.#completed) return;
@@ -145,10 +148,18 @@ export class ConversationOrchestrator {
       await this.#speak(`${decision.acknowledgment} ${decision.nextQuestion}`);
       return;
     }
-    if ((decision.nextAction === "request_measurement_permission" || decision.nextAction === "start_quiet_measurement") && this.#options.canMeasure && !this.#measurementDeclined) {
+    if ((decision.nextAction === "request_measurement_permission" || decision.nextAction === "start_quiet_measurement") && this.#canMeasure) {
       this.#waitingForMeasurementConsent = true;
       const question = decision.nextQuestion ?? "Would you be comfortable taking a quiet camera measurement?";
       await this.#speak(`${decision.acknowledgment} ${question}`);
+      return;
+    }
+    if ((decision.nextAction === "complete_screening" || decision.nextAction === "end_call") && this.#canMeasure) {
+      // Gemini would end the call, but the reading only happens if she is asked, and Gemini asks only
+      // sometimes. So the offer is ours: once, in fixed words, before the goodbye. Her answer takes the
+      // consent path above; after the reading or her no, the next turn that ends the call says goodbye.
+      this.#waitingForMeasurementConsent = true;
+      await this.#speak(CAMERA_OFFER_AT_END);
       return;
     }
     if (decision.nextAction === "complete_screening" || decision.nextAction === "emergency" || decision.nextAction === "end_call") {
@@ -179,6 +190,11 @@ export class ConversationOrchestrator {
     if (!spoken) return;
     this.#options.recordAgentTurn(spoken);
     await this.#options.speak(spoken);
+  }
+
+  /** The camera reading is possible, she hasn't said no, and it hasn't been taken: so it can be offered, and never twice. */
+  get #canMeasure(): boolean {
+    return this.#options.canMeasure && !this.#measurementDeclined && !this.#measurementDone;
   }
 
   /**

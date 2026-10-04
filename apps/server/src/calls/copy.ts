@@ -22,6 +22,9 @@ export function quietMeasurementPrompt(durationSeconds = 30): string {
 
 export const QUIET_MINUTE_PROMPT = quietMeasurementPrompt();
 
+/** Gemini would end the call and the camera reading is possible: offered once, in these words, before the goodbye. She answers yes or no. */
+export const CAMERA_OFFER_AT_END = "Before we finish, would you like to try a quiet camera measurement? You can say yes or no.";
+
 /** The goodbye: points her to her family, by name when we know them. */
 export function callClosing(name: string, familyNames: readonly string[] = []): string {
   const names = familyNames.map((n) => n.trim()).filter(Boolean);
@@ -138,6 +141,7 @@ export function callCopySamples(name = "Harriet"): { level: number; text: string
   const samples: { level: number; text: string }[] = [
     { level: 0, text: callFirstMessage(name) },
     { level: 0, text: QUIET_MINUTE_PROMPT },
+    { level: 0, text: CAMERA_OFFER_AT_END },
     { level: 0, text: MEDICINE_QUESTION_REPLY },
     { level: 0, text: callClosing(name, ["Sarah"]) },
     { level: 0, text: callClosing(name) },
