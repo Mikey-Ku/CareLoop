@@ -35,6 +35,19 @@ export const LEVEL_WORDS: Record<number, string> = {
   5: "crisis",
 };
 
+/** One urgent thing today (level 3 and up). */
+export type CareRedFlag = {
+  /** A question id, a safety kind ("crisis", "urgent_symptom"), her topic words, or "concern". */
+  questionId: string;
+  /** The question as she saw it, or the topic in plain words. */
+  question: string;
+  /** Her answer, her words, or what happened ("Worse" on the follow-up). */
+  answer: string;
+  level: number;
+  /** answer: a red-flag answer; typed, follow_up, safety: an observation; concern: the check-in's concern mark. */
+  source: "answer" | "typed" | "follow_up" | "safety" | "button" | "photo" | "concern";
+};
+
 /** One thing the ladder levelled today, 1 and up. */
 export type CareSymptom = {
   level: number;
@@ -73,8 +86,13 @@ export type CareFacts = {
     startedAt: string | null;
     finishedAt: string | null;
   };
-  /** Answers a fixed red-flag rule treats as urgent. Each one alerted her family chats in Relay. */
-  redFlags: { questionId: string; question: string; answer: string }[];
+  /**
+   * Everything urgent today (level 3 and up), each of which alerted her family chats in Relay: answers a
+   * fixed red-flag rule treats as urgent, then the day's other level-3+ observations (a typed symptom, a
+   * "Worse" on a follow-up, a safety screen hit), then a concern the check-in noted (concern_at) that
+   * nothing else explains. One per topic, highest level first after the answers.
+   */
+  redFlags: CareRedFlag[];
   /** Family members linked in Relay, who got any red-flag alert there. */
   familyAlerted: string[];
   vitals: {
@@ -174,10 +192,10 @@ export function buildCareFacts(db: Db, input: BuildCareFactsInput): CareFacts {
     at: a.at,
     worrying: isWorryingAnswer(a.questionId, a.answer),
   }));
-  const redFlags = (checkin?.answers ?? []).flatMap((a) => {
+  const redFlags: CareRedFlag[] = (checkin?.answers ?? []).flatMap((a) => {
     const q = QUESTIONS.get(a.questionId);
     const red = q ? evaluateRedFlag(q, a.answer) : undefined;
-    return red ? [{ questionId: red.questionId, question: red.questionText, answer: red.answer }] : [];
+    return red ? [{ questionId: red.questionId, question: red.questionText, answer: red.answer, level: 3, source: "answer" as const }] : [];
   });
 
   const usualRange = packet?.usualRange ?? null;
@@ -221,6 +239,26 @@ export function buildCareFacts(db: Db, input: BuildCareFactsInput): CareFacts {
     if (seenTopics.has(o.topic)) continue;
     seenTopics.add(o.topic);
     symptoms.push({ level: o.level, topic: o.topic, about: topicAbout(o.topic), words: oneLine(o.words), source: o.source });
+  }
+
+  // The rest of today's urgent things, from the ladder's own record (one per topic, highest first).
+  const flagged = new Set(redFlags.map((r) => r.questionId));
+  for (const o of observed) {
+    if (o.level < 3 || flagged.has(o.topic)) continue;
+    flagged.add(o.topic);
+    const q = QUESTIONS.get(o.topic);
+    const what =
+      o.source === "follow_up"
+        ? '"Worse" on the follow-up'
+        : o.topic === "crisis"
+          ? "words about not wanting to live (988 given)"
+          : o.topic === "urgent_symptom"
+            ? "an urgent symptom (911 given)"
+            : (oneLine(o.words) ?? `level ${o.level}`);
+    redFlags.push({ questionId: o.topic, question: q?.text ?? topicAbout(o.topic), answer: what, level: o.level, source: o.source as CareRedFlag["source"] });
+  }
+  if (redFlags.length === 0 && checkin?.concernAt) {
+    redFlags.push({ questionId: "concern", question: "A concern came up during the check-in", answer: "the check-in paused", level: 3, source: "concern" });
   }
 
   const notes = checkin ? checkinNotes(db, checkin.id).map((n) => ({ about: topicAbout(n.questionId ?? n.topic), text: oneLine(n.text) ?? "" })).filter((n) => n.text) : [];

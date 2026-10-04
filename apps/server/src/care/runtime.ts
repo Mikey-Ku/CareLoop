@@ -8,7 +8,7 @@ import { PhotonMessenger, connectPhoton } from "../photon/photon-messenger.ts";
 import type { CareConfig } from "./config.ts";
 import { loadCareContacts, type CareContacts } from "./contacts.ts";
 import type { ReplyWriter } from "./replies.ts";
-import { createCareService, type CareService } from "./service.ts";
+import { DAY_TRIGGER, MISSED_TRIGGER, createCareService, type CareService } from "./service.ts";
 import { GeminiCareWriter } from "./writer.ts";
 
 // The care summaries as the agent runs them: the service, its Photon listener for replies,
@@ -19,7 +19,7 @@ export type CareRuntime = {
   service: CareService;
   /** For EngineOptions.onDayFinished. */
   onDayFinished(event: DayFinished): Promise<void>;
-  /** After the noon job: a summary for the day if none went out (check-in left unfinished). */
+  /** After the noon job: the missed-day summary, only when the check-in was marked missed (a retry of the hook's). */
   afterMissedCheckin(day: string): Promise<void>;
   stop(): Promise<void>;
 };
@@ -71,9 +71,12 @@ export function startCareRuntime(deps: CareRuntimeDeps): CareRuntime {
 
   return {
     service,
+    // A missed day and a finished day are separate summaries, so a check-in finished after noon still sends.
     onDayFinished: (event) =>
-      event.patientId === deps.patientId ? guarded(`summary for ${event.day}`, () => service.sendSummaries(event.day)) : Promise.resolve(),
-    afterMissedCheckin: (day) => guarded(`noon summary for ${day}`, () => service.ensureDaySummary(day)),
+      event.patientId === deps.patientId
+        ? guarded(`summary for ${event.day}`, () => service.sendSummaries(event.day, event.outcome === "missed" ? MISSED_TRIGGER : DAY_TRIGGER))
+        : Promise.resolve(),
+    afterMissedCheckin: (day) => guarded(`noon summary for ${day}`, () => service.missedDaySummary(day)),
     async stop() {
       abort.abort();
       await deps.closeTransport?.().catch(() => {});

@@ -337,7 +337,12 @@ export type EngineOptions = {
    * (src/care/service.ts). Errors it throws are swallowed: it can't undo or fail the check-in.
    */
   onDayFinished?: (event: DayFinished) => Promise<void> | void;
+  /** Longest wait for onDayFinished before her chat moves on. Defaults to DAY_FINISHED_TIMEOUT_MS. */
+  dayFinishedTimeoutMs?: number;
 };
+
+/** onDayFinished is waited on for at most this long (it keeps running after). */
+export const DAY_FINISHED_TIMEOUT_MS = 10_000;
 
 export type DayFinished = { patientId: string; day: string; outcome: DayOutcome };
 
@@ -663,13 +668,24 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
   // Days the current inbound plan finished; read right after its transaction commits.
   let finishedDays: DayFinished[] = [];
 
+  /**
+   * The onDayFinished hook for each finished day, after her messages went out. Errors are swallowed, and
+   * it is waited on for at most DAY_FINISHED_TIMEOUT_MS (a hung Photon send can't stall her chat; the
+   * hook keeps running in the background).
+   */
   async function notifyFinished(events: DayFinished[]): Promise<void> {
+    const hook = options.onDayFinished;
+    if (!hook) return;
     for (const event of events) {
-      try {
-        await options.onDayFinished?.(event);
-      } catch {
-        // The hook owns its errors (the care service logs and never throws).
-      }
+      const run = Promise.resolve()
+        .then(() => hook(event))
+        .catch(() => {}); // the hook owns its errors (the care service logs and never throws)
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, options.dayFinishedTimeoutMs ?? DAY_FINISHED_TIMEOUT_MS);
+      });
+      await Promise.race([run, timeout]);
+      clearTimeout(timer);
     }
   }
 

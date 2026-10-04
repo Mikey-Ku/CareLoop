@@ -3,7 +3,16 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MISSED_JOB, startAgent, type AgentDeps, type RunningAgent } from "../src/agent.ts";
 import { parseCareContacts, type CareContacts } from "../src/care/contacts.ts";
-import { doctorSummary, familySummary } from "../src/care/copy.ts";
+import {
+  doctorActionReply,
+  doctorSummary,
+  familyAskDoctorReply,
+  familyCrisisReply,
+  familyEmergencyReply,
+  familySummary,
+  familySymptomReply,
+  noSummaryReply,
+} from "../src/care/copy.ts";
 import { buildCareFacts, type CareFacts } from "../src/care/facts.ts";
 import { classifyInbound, guardReply, type ReplyRequest, type ReplyWriter } from "../src/care/replies.ts";
 import { startCareRuntime, type CareRuntime } from "../src/care/runtime.ts";
@@ -132,9 +141,32 @@ describe("care facts", () => {
   it("recomputes red flags from her answers and names who was alerted", async () => {
     await checkIn(["Yes, it was hard", "No", "No"]);
     const f = facts();
-    expect(f.redFlags).toEqual([{ questionId: "hf-breathing-lying-flat", question: expect.stringMatching(/breathing last night/), answer: "Yes, it was hard" }]);
+    expect(f.redFlags).toEqual([
+      { questionId: "hf-breathing-lying-flat", question: expect.stringMatching(/breathing last night/), answer: "Yes, it was hard", level: 3, source: "answer" },
+    ]);
     expect(f.familyAlerted).toEqual(["Sarah"]);
     expect(f.checkin.answers[0]?.worrying).toBe(true);
+  });
+
+  it("red flags also come from the day's level-3+ observations and the check-in's concern mark", async () => {
+    await checkIn();
+    const c = getCheckin(db, P, DAY1)!;
+    const at = `${DAY1}T15:00:00.000Z`;
+    addObservation(db, { patientId: P, checkinId: c.id, day: DAY1, topic: "anticoagulant-bleeding", level: 3, source: "follow_up", createdAt: at });
+    addObservation(db, { patientId: P, checkinId: c.id, day: DAY1, topic: "chest tightness", level: 3, source: "typed", words: "tight chest", createdAt: at });
+    addObservation(db, { patientId: P, checkinId: c.id, day: DAY1, topic: "crisis", level: 5, source: "safety", createdAt: at });
+    expect(facts().redFlags.map((r) => [r.questionId, r.level, r.source, r.answer])).toEqual([
+      ["crisis", 5, "safety", "words about not wanting to live (988 given)"],
+      ["anticoagulant-bleeding", 3, "follow_up", '"Worse" on the follow-up'],
+      ["chest tightness", 3, "typed", "tight chest"],
+    ]);
+    expect(facts().familyAlerted).toEqual(["Sarah"]);
+  });
+
+  it("a concern with nothing else to explain it is still a red flag", async () => {
+    await engine.startDay(P, DAY1);
+    db.prepare("UPDATE checkins SET concern_at = ? WHERE patient_id = ?").run(`${DAY1}T13:05:00.000Z`, P);
+    expect(facts().redFlags).toEqual([{ questionId: "concern", question: "A concern came up during the check-in", answer: "the check-in paused", level: 3, source: "concern" }]);
   });
 
   it("takes the day's camera vitals, not comparing heart rate because she has AFib", async () => {
@@ -148,7 +180,14 @@ describe("care facts", () => {
     expect(f.vitals.readings[0]?.inUsualRange).toBeUndefined();
     expect(f.vitals.usualRange?.compareHeartRate).toBe(false);
     expect(doctorSummary(f, CONTACTS)).toMatch(/09:10: HR 74 bpm, RR 16 \/min, confidence 0.82, method relay_call\. Not compared with usual range/);
-    expect(familySummary(f, CONTACTS)).toMatch(/heart rate was about 74 beats a minute.*irregular heartbeat \(atrial fibrillation\)/s);
+    // The family sees the reading by her sharing level: nothing at "status", no number with AFib at
+    // "status_vitals", the number with the AFib note at "all".
+    expect(familySummary(f, CONTACTS)).not.toMatch(/heart|camera/i);
+    setSharing(db, P, "status_vitals");
+    expect(familySummary(facts(), CONTACTS)).toContain("Harriet's heart rate was checked today with the camera. This is a camera estimate, not a medical test.");
+    expect(familySummary(facts(), CONTACTS)).not.toMatch(/74/);
+    setSharing(db, P, "all");
+    expect(familySummary(facts(), CONTACTS)).toMatch(/heart rate was about 74 beats a minute.*irregular heartbeat \(atrial fibrillation\)/s);
   });
 
   it("an unstarted day reads as none, and the noon job's missed as missed", async () => {
@@ -217,11 +256,11 @@ describe("care facts: the day's severity, notes and medicines", () => {
   it("the family sees the level-3 item at every sharing level, the rest only at 'all'", async () => {
     await busyDay();
     const status = familySummary(facts(), CONTACTS);
-    expect(status).toContain("Harriet mentioned chest tightness today, and I asked her to call her doctor today. Please call Harriet today to check on her.");
-    expect(status).not.toMatch(/tight chest this morning|knee|Tylenol|get up fast|Morning medicines|Apixaban|apixaban/);
+    expect(status).toContain("Harriet reported something she should call her doctor about. Please call Harriet today to check on her.");
+    expect(status).not.toMatch(/chest|knee|Tylenol|get up fast|Morning medicines|Apixaban|apixaban|answered/);
     setSharing(db, P, "all");
     const all = familySummary(facts(), CONTACTS);
-    expect(all).toContain('Harriet mentioned chest tightness today ("tight chest this morning")');
+    expect(all).toContain('- chest tightness "tight chest this morning"\nI asked Harriet to call her doctor today.');
     expect(all).toContain("- knee pain (noted for her doctor): \"my knee aches\"");
     expect(all).toContain('- dizziness on standing: "only when I get up fast"');
     expect(all).toContain("- Can I take Tylenol with my water pill?");
@@ -234,7 +273,11 @@ describe("care facts: the day's severity, notes and medicines", () => {
   it("a safety-screen hit (level 4) is always said as something urgent, never in her words below 'all'", async () => {
     await checkIn();
     addObservation(db, { patientId: P, day: DAY1, topic: "urgent_symptom", level: 4, source: "safety", createdAt: `${DAY1}T14:00:00.000Z` });
-    expect(familySummary(facts(), CONTACTS)).toContain("Harriet told me about something urgent today, and I gave her the emergency numbers. Please call Harriet today");
+    const status = familySummary(facts(), CONTACTS);
+    expect(status).toContain("Harriet told me about something that may be urgent. Please call Harriet now to check on her.");
+    expect(status).not.toMatch(/\b911\b/);
+    setSharing(db, P, "all");
+    expect(familySummary(facts(), CONTACTS)).toContain("I asked Harriet to call 911 if it's happening now, and then her doctor.");
   });
 });
 
@@ -248,7 +291,7 @@ describe("care summary wording", () => {
     expect(text).toContain("CHECK-IN: Completed");
     expect(text).toMatch(/breathing last night when you lay down\? Yes, it was hard {2}\[RED FLAG\]/);
     expect(text).toContain("RED FLAGS: 1");
-    expect(text).toContain("Sarah alerted in Relay");
+    expect(text).toMatch(/- L3 How was your breathing .*"Yes, it was hard"\. She was told to call her doctor today; Sarah alerted in Relay\./);
     expect(text).toMatch(/R1 .*\[medium; not yet discussed with her\]/);
     expect(text).toContain("Glomerular filtration rate: 31 mL/min");
     expect(text).toContain("Potassium: 4.9 mmol/L");
@@ -271,14 +314,21 @@ describe("care summary wording", () => {
   it("family: a red flag always asks them to call her, with the doctor's number", async () => {
     await checkIn(["Yes, it was hard", "No", "No"]);
     const text = familySummary(facts(), CONTACTS);
-    expect(text).toContain("One thing needs attention");
-    expect(text).toContain("Please call Harriet today");
+    // At the default "status": the base line only, as her family's Relay alert.
+    expect(text).toContain("Harriet reported something she should call her doctor about. Please call Harriet today to check on her.");
     expect(text).toContain("Dr. Patel can be reached at +1 734-555-0142");
+    expect(text).not.toMatch(/breathing|Yes, it was hard|answered|911/);
+    setSharing(db, P, "all");
+    const all = familySummary(facts(), CONTACTS);
+    expect(all).toContain('- How was your breathing last night when you lay down? "Yes, it was hard"');
+    expect(all).toContain('- "How was your breathing last night when you lay down?" Harriet answered: Yes, it was hard');
   });
 
   it("family: only flags she has already heard, as not emergencies", async () => {
     await checkIn();
     db.prepare("UPDATE flags SET status = 'noted' WHERE patient_id = ? AND rule_id = 'R1'").run(P);
+    expect(familySummary(facts(), CONTACTS)).not.toMatch(/list to ask her doctor|answered/); // "status": neither
+    setSharing(db, P, "all");
     const text = familySummary(facts(), CONTACTS);
     expect(text).toContain("Things on Harriet's list to ask her doctor about (not emergencies):");
     expect(text.match(/^- /gm)?.length).toBe(4); // three answers and one flag
@@ -291,6 +341,41 @@ describe("care summary wording", () => {
     const text = toFamily()[0] ?? "";
     expect(text).toContain(`said "not today" to this morning's check-in. That's her choice`);
     expect(toDoctor()[0]).toContain("CHECK-IN:");
+  });
+});
+
+describe("care copy scan: every care text, every sharing level", () => {
+  beforeEach(() => setup());
+  const DOSING = /\b(should|could|can|must|needs? to) (take|stop|start|increase|decrease|double|skip|halve)\b|\b(increase|decrease|double|halve|skip) (her|the|your) (dose|dosage|medicine)/i;
+
+  it("no long dashes, no diagnosis, no dosing advice; 911 only at level 4 and up (or the fixed emergency and crisis replies)", async () => {
+    await checkIn(["Yes, it was hard", "A little bruising", "Sometimes"]);
+    const c = getCheckin(db, P, DAY1)!;
+    const at = `${DAY1}T15:00:00.000Z`;
+    addObservation(db, { patientId: P, checkinId: c.id, day: DAY1, topic: "knee pain", level: 1, source: "typed", words: "my knee aches", createdAt: at });
+    addCheckinNote(db, { patientId: P, checkinId: c.id, questionId: "dizzy-on-standing", text: "only when I get up fast", createdAt: at });
+    addVisitQuestion(db, { patientId: P, text: "Can I take Tylenol with my water pill?", createdAt: at });
+    const texts: { text: string; level4: boolean; label: string }[] = [];
+    for (const withUrgent of [false, true]) {
+      if (withUrgent) addObservation(db, { patientId: P, checkinId: c.id, day: DAY1, topic: "urgent_symptom", level: 4, source: "safety", createdAt: at });
+      for (const sharing of ["status", "status_vitals", "all"] as const) {
+        setSharing(db, P, sharing);
+        const f = facts();
+        texts.push({ text: doctorSummary(f, CONTACTS), level4: withUrgent, label: `doctor ${sharing} ${withUrgent}` });
+        texts.push({ text: familySummary(f, CONTACTS), level4: withUrgent, label: `family ${sharing} ${withUrgent}` });
+      }
+    }
+    for (const t of [familySymptomReply(facts(), CONTACTS), familyAskDoctorReply(facts(), CONTACTS), doctorActionReply(CONTACTS), noSummaryReply(CONTACTS.doctor), noSummaryReply(CONTACTS.emergencyContact)])
+      texts.push({ text: t, level4: false, label: t.slice(0, 30) });
+    for (const t of [familyEmergencyReply(facts(), CONTACTS), familyCrisisReply(facts())]) texts.push({ text: t, level4: true, label: t.slice(0, 30) });
+    for (const { text: t, level4, label } of texts) {
+      expect(DASHES.test(t), label).toBe(false);
+      expect(/\bdiagnos(e|ed|es|is|ing)\b/i.test(t), label).toBe(false); // "not a diagnostic reading" is the disclaimer
+      expect(DOSING.test(t), label).toBe(false);
+      if (!level4) expect(/\b911\b/.test(t), label).toBe(false);
+    }
+    // The doctor's data lines say what she was told at level 4 (911 if happening): that is level 4.
+    expect(texts.find((t) => t.label === "family status true")?.text).not.toMatch(/\b911\b/); // detail only at "all"
   });
 });
 
@@ -325,15 +410,29 @@ describe("sending the summaries", () => {
     expect(photon.sent).toHaveLength(2);
   });
 
-  it("the noon fallback covers a check-in she started but didn't finish", async () => {
+  it("noon sends nothing for a check-in she started; the finished day's summary goes out when she ends it", async () => {
     await engine.startDay(P, DAY1);
     await tap("Quick questions");
     await tap("Fine");
     expect(await engine.runMissedCheckin(P, DAY1)).toBe("nothing_to_do");
-    expect(photon.sent).toEqual([]);
     await care.afterMissedCheckin(DAY1);
-    expect(toFamily()[0]).toContain("started this morning's check-in but hasn't finished it yet");
-    expect(photon.sent).toHaveLength(2);
+    expect(photon.sent).toEqual([]);
+    await tap("No");
+    await tap("No");
+    await tap("Later");
+    expect(toFamily()).toHaveLength(1);
+    expect(toFamily()[0]).toContain("Harriet checked in today.");
+  });
+
+  it("a day missed at noon and then checked in after all sends both summaries", async () => {
+    await engine.startDay(P, DAY1);
+    await engine.runMissedCheckin(P, DAY1);
+    expect(toFamily()).toHaveLength(1);
+    await tap("Quick questions");
+    for (const a of ["Fine", "No", "No"]) await tap(a);
+    await tap("Later");
+    expect(toFamily()).toHaveLength(2);
+    expect(toFamily()[1]).toContain("Harriet checked in today.");
   });
 
   it("one contact failing doesn't stop the other; the retry sends only the failed one", async () => {
@@ -418,33 +517,37 @@ describe("replies to the doctor and the emergency contact", () => {
     expect(toFamily()).toHaveLength(1);
   });
 
-  it("urgent-sounding family texts get the fixed doctor-first reply", async () => {
+  it("family texts follow the ladder: an emergency gets 911 now, a crisis 988, a symptom her doctor with no 911", async () => {
     setup();
     await checkIn(["Yes, it was hard", "No", "No"]);
-    const urgent = [
-      "She sounds out of breath, what should I do?",
-      "Should I take her to the hospital?",
-      "Mom fell this morning",
-      "She has chest pain",
-      "she's really dizzy and confused",
-      "Is this an emergency??",
-      "her ankles are swollen",
-    ];
-    for (const message of urgent) {
-      expect(classifyInbound("family", message), message).toBe("family_urgent");
+    const emergencies = ["Mom fell this morning", "She has chest pain", "she can't breathe", "Harriet fell in the kitchen", "She's unconscious", "Should I call 911?"];
+    for (const message of emergencies) {
+      expect(classifyInbound("family", message, "Harriet"), message).toBe("family_emergency");
       await text(FAMILY_PHONE, message);
       const reply = toFamily().at(-1) ?? "";
-      expect(reply, message).toContain("I'm an automated assistant, so I don't have the medical knowledge to judge symptoms");
-      expect(reply).toContain("Please contact Harriet's doctor, Dr. Patel, first at +1 734-555-0142 before acting on this.");
-      expect(reply).toContain("If it looks like an emergency, call 911.");
+      expect(reply, message).toMatch(/^If this is happening now, please call 911 right away\. After that, call Harriet's doctor, Dr\. Patel, at \+1 734-555-0142\./);
     }
+    for (const message of ["She says she wants to die", "she wants to kill herself"]) {
+      expect(classifyInbound("family", message, "Harriet"), message).toBe("family_crisis");
+      await text(FAMILY_PHONE, message);
+      expect(toFamily().at(-1)).toMatch(/^Please call or text 988, the Suicide & Crisis Lifeline, now\..*If Harriet is in danger right now, call 911\./);
+    }
+    const symptoms = ["She sounds out of breath, what should I do?", "Should I take her to the hospital?", "she's really dizzy and confused", "Is this an emergency??", "her ankles are swollen", "her knee hurts", "she seems worse"];
+    for (const message of symptoms) {
+      expect(classifyInbound("family", message, "Harriet"), message).toBe("family_symptom");
+      await text(FAMILY_PHONE, message);
+      const reply = toFamily().at(-1) ?? "";
+      expect(reply, message).toBe("I'm an automated assistant, so I don't have the medical knowledge to judge symptoms or decide what to do about them. Please contact Harriet's doctor, Dr. Patel, at +1 734-555-0142.");
+    }
+    expect(classifyInbound("family", "How did her kidney test look?", "Harriet")).toBe("answer");
+    expect(classifyInbound("family", "She fell asleep early", "Harriet")).toBe("answer");
   });
 
   it("the same urgent reply goes out even before any summary, and even with a writer", async () => {
     let calls = 0;
     setup({ writer: { write: async () => (calls++, "made up") } });
     await text(FAMILY_PHONE, "She can't breathe");
-    expect(toFamily()[0]).toContain("Please contact her doctor, Dr. Patel, first");
+    expect(toFamily()[0]).toBe("If this is happening now, please call 911 right away. After that, call her doctor, Dr. Patel, at +1 734-555-0142. I'm an automated assistant, so I can't judge symptoms or act on them myself.");
     expect(calls).toBe(0);
   });
 
@@ -465,9 +568,17 @@ describe("replies to the doctor and the emergency contact", () => {
     await text(DOCTOR_PHONE, "How did the check-in go?");
     expect(toDoctor().at(-1)).toMatch(/Check-in completed on 2026-09-01\. .*Red flags: .*breathing last night.*"Yes, it was hard"/);
     await text(FAMILY_PHONE, "How is she doing?");
-    expect(toFamily().at(-1)).toMatch(/Harriet checked in today\. One of her answers needs attention, so please call her today\./);
+    expect(toFamily().at(-1)).toMatch(/Harriet checked in today\. Something came up today that needs attention, so please call her today\./);
     await text(FAMILY_PHONE, "What medicines is she on?");
-    expect(toFamily().at(-1)).toBe("Her record lists 14 medicines. For questions about any of them, her doctor is the right person to ask.");
+    expect(toFamily().at(-1)).toBe("For questions about her medicines, her doctor is the right person to ask.");
+    await text(FAMILY_PHONE, "What was her heart rate?");
+    expect(toFamily().at(-1)).toBe("Harriet keeps her health readings between her and her doctor, so I can't share them.");
+    await text(FAMILY_PHONE, "Anything on her list for the doctor? Any flags?");
+    expect(toFamily().at(-1)).toMatch(/^Harriet keeps the details of her record between her and her doctor\./);
+    setSharing(db, P, "all");
+    // The summary's facts froze her level when sent: the answers still follow "status".
+    await text(FAMILY_PHONE, "What medicines is she on?");
+    expect(toFamily().at(-1)).toBe("For questions about her medicines, her doctor is the right person to ask.");
   });
 
   it("before any summary went out, says so", async () => {
@@ -543,20 +654,21 @@ describe("GeminiCareWriter (the shared LlmClient words the care texts)", () => {
     const doctor = toDoctor()[0] ?? "";
     expect(doctor).toMatch(/^Daily check-in summary for Harriet Lindqvist, 78/);
     expect(doctor).toContain("CHECK-IN: completed 09:00 to 09:04.");
-    expect(doctor).toMatch(/RED FLAGS: 1\n- How was your breathing last night when you lay down\? "Yes, it was hard"/);
+    expect(doctor).toMatch(/RED FLAGS: 1\n- L3 How was your breathing last night when you lay down\? "Yes, it was hard"/);
     expect(doctor).toMatch(/Emergency contact: Sarah \(daughter\), \+1 313-555-0187/);
     const family = toFamily()[0] ?? "";
     expect(family).toMatch(/^Hi Sarah\. This is Harriet's daily check-in assistant\. I'm an automated assistant, not a person\./);
     // The urgent paragraph is fixed and comes right after the greeting; the model's body follows.
-    expect(family.indexOf("One thing needs attention")).toBeLessThan(family.indexOf("Harriet did her check-in this morning"));
-    expect(family).toMatch(/Please call Harriet today to check on her\. If you have questions about what this means, Dr\. Patel can be reached at \+1 734-555-0142\./);
+    expect(family.indexOf("Harriet reported something she should call her doctor about")).toBeLessThan(family.indexOf("Harriet did her check-in this morning"));
+    expect(family).toMatch(/Please call Harriet today to check on her\.\sIf you have questions about what this means, Dr\. Patel can be reached at \+1 734-555-0142\./);
     const [d, f] = llm.careMessageCalls;
     expect(d).toMatchObject({ audience: "doctor", recipientName: "Dr. Patel", seniorName: "Harriet" });
     expect(JSON.stringify(d?.facts)).toContain("Glomerular");
     // The family's model never sees labs, the medication list or record flags she hasn't heard.
     expect(f).toMatchObject({ audience: "family", recipientName: "Sarah" });
     expect(JSON.stringify(f?.facts)).not.toMatch(/Glomerular|metformin|apixaban|R1/);
-    expect(f?.facts).toMatchObject({ somethingUrgentToday: true });
+    expect(f?.facts).toMatchObject({ somethingUrgentToday: true, checkin: { answers: [] } }); // "status": no answers
+    expect(JSON.stringify(f?.facts)).not.toMatch(/555|breathing/); // no phone numbers, no red-flag detail
     expect(DASHES.test(doctor + family)).toBe(false);
   });
 
@@ -778,7 +890,7 @@ describe("simulator", () => {
     expect(code).toBe(0);
     expect(out).toMatch(/--- Dr\. Patel's phone \(Photon, doctor\), \d\d:\d\d ---\nDaily check-in summary for Harriet Lindqvist/);
     expect(out).toMatch(/--- Sarah's phone \(Photon, emergency contact\), \d\d:\d\d ---\nHi Sarah\./);
-    expect(out).toContain("Please contact Harriet's doctor, Dr. Patel, first at +1 555-555-0100 before acting on this.");
+    expect(out).toContain("Please contact Harriet's doctor, Dr. Patel, at +1 555-555-0100.");
     expect(out).toContain("Photon: text from family +1 ***-***-0101: none, no reply needed");
     expect(out).toMatch(/Open flags: R1 \(new\)/);
   });
@@ -788,7 +900,7 @@ describe("simulator", () => {
     expect(code).toBe(0);
     expect(out).not.toContain("Daily check-in summary");
     // The replies still run (no summary yet): the urgent one is fixed, the rest say there's no update.
-    expect(out).toContain("Please contact her doctor, Dr. Patel, first");
+    expect(out).toContain("Please contact her doctor, Dr. Patel, at");
     expect(out).toContain("No check-in summary has been sent yet");
   });
 });

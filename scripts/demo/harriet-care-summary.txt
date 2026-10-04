@@ -12,7 +12,7 @@
 # Have you felt dizzy when standing up? -> No
 1
 # After a red flag no flag is offered that day, so the check-in ends here.
-# Her daughter writes back, worried: the reply sends her to the doctor first.
+# Her daughter writes back, worried: a symptom, not an emergency phrase, so the reply sends her to the doctor (no 911).
 /family She sounds out of breath, what should I do?
 # A thank-you needs no reply.
 /family Thanks

@@ -273,15 +273,20 @@ For calls, the packet goes to ElevenLabs as dynamic variables through the bridge
 
 ## Care summaries over Photon
 
-When a day ends, the engine's optional `onDayFinished` hook fires. A day ends when she checks in, says "Not today", or the noon job marks the check-in missed. The noon job also covers a check-in she started but didn't finish. The care service (`src/care/`) then:
+When a day ends, the engine's optional `onDayFinished` hook fires (after her messages went out; errors swallowed; waited on for at most 10 seconds). A day ends when she checks in, says "Not today", or the noon job marks the check-in missed. A missed day and a finished day are separate summaries (triggers `missed` and `day`), so a check-in finished after noon still sends. At noon nothing goes out for a check-in she started, or one paused by a concern: its summary goes when it ends. The care service (`src/care/`) then:
 
-1. Builds `CareFacts` from the database (`buildCareFacts`): the check-in answers, red flags recomputed from them by `evaluateRedFlag`, the day's camera vitals, open flags with their evidence, labs, medications, conditions and the day's memories. Also the day's severity ladder (every topic at level 1 and up, highest first, from `symptom_observations`), her notes for the doctor (`checkin_notes`, by topic), the visit questions she asked that day, medicine adherence (`med_doses`: morning and evening, taken or not confirmed), label photos that didn't match her list (`med_label_checks`) and refills reminded or asked about (`med_refills`), and her sharing level.
+1. Builds `CareFacts` from the database (`buildCareFacts`): the check-in answers, red flags (red-flag answers by `evaluateRedFlag`, the day's other level-3+ observations: a typed symptom, "Worse" on a follow-up, a safety screen hit; else the check-in's `concern_at`), the day's camera vitals, open flags with their evidence, labs, medications, conditions and the day's memories. Also the day's severity ladder (every topic at level 1 and up, highest first, from `symptom_observations`), her notes for the doctor (`checkin_notes`, by topic), the visit questions she asked that day, medicine adherence (`med_doses`: morning and evening, taken or not confirmed), label photos that didn't match her list (`med_label_checks`) and refills reminded or asked about (`med_refills`), and her sharing level.
 2. Freezes the facts in `care_summaries`.
 3. Texts two summaries over Photon Spectrum (iMessage), worded by Gemini through the shared `LlmClient.writeCareMessage` (`src/care/writer.ts`) inside fixed parts:
    - to the doctor: a few overview lines from Gemini on top of the fixed data sections of `doctorSummary` (header, check-in, RED FLAGS, SYMPTOMS by level, her notes, visit questions, medicines today, vitals, record flags, labs, medications, conditions, footer). The data lines stay fixed: in a live test a model writing the whole summary left out a level-3 follow-up.
    - to the emergency contact: the fixed greeting (it says it is an automated assistant), the fixed paragraph about anything urgent (red-flag answers, and anything else at level 3 or more), Gemini's body, the fixed closing. Only flags Harriet has already heard (told or noted).
 
-The emergency contact gets the check-in answers whatever Harriet's Relay sharing level (team decision in PR #6). The day's extra data follows her sharing level, as her family's Relay status does (`familyVisible`): symptoms below level 3, her notes, visit questions, medicine reminders and label photos only at "all"; a refill at "all" or when she asked us to tell her family. Anything at level 3 or more is always there (her words only at "all"). Gemini only ever sees what the reader may see (`doctorView`, `familyView`), with times in her time zone and numbers rounded.
+What the emergency contact reads follows Harriet's sharing level, as her family's Relay messages do (`familyDailyStatus`, `familyRedFlagAlert`):
+- "status": how the check-in went, and the base line of anything urgent ("reported something she should call her doctor about", "something that may be urgent", "a very hard time"), no detail;
+- "status_vitals": also her camera heart rate as within or outside her usual range, no number (with atrial fibrillation only "checked, a camera estimate");
+- "all": also her answers, the urgent detail, the number, flags she has heard, her notes, visit questions, medicines, other symptoms and her call's memories. A refill also shows below "all" when she asked us to tell her family.
+
+Anything at level 3 or more always gets its base line. The template replies to the family follow the same levels. Gemini only ever sees what the reader may see (`doctorView`, `familyView`), with times in her time zone, numbers rounded, and no phone numbers.
 
 Every written text is checked (`checkWritten`): no long dashes, markdown cleaned, not too long, no dosing advice, no diagnosis words, no 911 (only fixed copy says 911), and no number above 20 that isn't in the facts it was written from. No LLM, a failed call or a failed check: the fixed template goes out (`doctorSummary`, `familySummary`). A retry sends exactly the text first planned.
 
@@ -289,7 +294,7 @@ Contacts come from `care-contacts.json` (`src/care/contacts.ts`). It holds perso
 
 Replies arrive on the same Photon stream and are matched to a contact by phone number. Fixed rules decide first (`classifyInbound`):
 - an acknowledgment gets no reply;
-- an urgent-sounding text from the emergency contact gets a fixed reply: "I'm an automated assistant without the medical knowledge to judge symptoms. Contact the doctor first. If it looks like an emergency, call 911";
+- texts from the emergency contact follow the severity ladder, read by the app's safety screen on their words turned to first person ("she fell" reads as "I fell") plus a few bystander phrases ("unconscious", "not breathing", or 911 named): an emergency gets "call 911 right away, then her doctor"; a crisis gets 988, and 911 if she is in danger; a symptom or "what should I do" below that gets her doctor, with no 911;
 - a dose question from the family is sent to the doctor;
 - the doctor asking the assistant to act gets "can't act", plus the emergency contact's number.
 

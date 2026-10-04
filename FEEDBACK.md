@@ -35,8 +35,6 @@ Open:
 
 - [ ] Red-flag cadence numbers: `redFlagEveryDays = 2` and `followUpDays = 3` in `apps/server/src/context/questions.ts`. Product values, not clinical cutoffs; change them if they feel wrong in rehearsal.
 
-- [ ] Care summary to the emergency contact and the sharing level: PR #6 decided she gets the full plain-language summary (check-in answers) whatever Harriet's sharing level. The day data added in lane A (symptoms below level 3, her notes, visit questions, medicines) follows the sharing level like the family's Relay status; anything at level 3 or more is always there. Should the check-in answers follow the sharing level too?
-
 ## Team tasks (humans only, not for Claude Code)
 
 Relay setup (WebSocket, so no public URL and no webhook secret):

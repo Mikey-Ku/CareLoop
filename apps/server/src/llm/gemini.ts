@@ -126,7 +126,7 @@ export function careMessageSystemPrompt(input: Pick<CareMessageInput, "audience"
         : "Write the body of today's update in 2 to 5 short sentences, or a few \"- \" lines each on its own line (separate lines with a newline): how the check-in went and anything worth knowing. No greeting and no sign-off: the app adds them, and adds a fixed paragraph about anything urgent (redFlags, and symptoms at level 3 or more), so don't describe those yourself, but never call the day calm, fine or uneventful when there are any."
       : input.audience === "doctor"
         ? `Answer ${input.recipientName}'s message from FACTS and SUMMARY, at most 5 short sentences or a short list. If the answer isn't there, say plainly that you don't have that information. If the message needs no reply (an acknowledgment, a thank-you, a goodbye), answer with exactly ${CARE_NO_REPLY}.`
-        : `Answer ${input.recipientName}'s message from FACTS and SUMMARY, at most 4 short sentences. If the answer isn't there, say plainly that you don't have that information. For anything medical, point them to ${name}'s doctor (FACTS give the name and number). If the message needs no reply (an acknowledgment, a thank-you, a goodbye), answer with exactly ${CARE_NO_REPLY}.`;
+        : `Answer ${input.recipientName}'s message from FACTS and SUMMARY, at most 4 short sentences. If the answer isn't there, say plainly that you don't have that information. For anything medical, point them to ${name}'s doctor by name (FACTS give it); the app's other texts give the number. If the message needs no reply (an acknowledgment, a thank-you, a goodbye), answer with exactly ${CARE_NO_REPLY}.`;
   return [who, tone, task, CARE_RULES].join("\n");
 }
 

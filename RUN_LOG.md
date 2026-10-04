@@ -192,7 +192,6 @@ Retest on the phone with `FOLLOW_UP_DELAY_MINUTES=2`; add a second phone as fami
 - Dependencies added, with approval: `@spectrum-ts/core`, `@spectrum-ts/imessage` and `@anthropic-ai/sdk`.
   - A top-level npm override pins Spectrum's TypeScript peer to the repo's TS 7.
   - The lockfile was generated with npm 10, because npm 11.5.1 drops the rolldown native bindings (npm/cli#4828).
-- The emergency contact gets the full plain-language summary, whatever Harriet's Relay sharing level (team decision).
 - In the simulator the automatic Photon send is opt-in (`--photon`), so existing simulator output is unchanged.
 - Not tested against a live Photon line (no credentials). `connectPhoton` typechecks against the real Spectrum types.
 
@@ -211,9 +210,10 @@ Retest on the phone with `FOLLOW_UP_DELAY_MINUTES=2`; add a second phone as fami
 **What was built:**
 - Merge: PR #6's migration is migration 11 (after the medication helper's 10). The engine's `onDayFinished` hook fires at the new finish points (finishCheckedIn, notToday, runMissedCheckin), after delivery, errors swallowed. Simulator keeps `--llm`, `/as` and the meds commands with `--photon`, `/summary`, `/doctor`, `/family`.
 - `LlmClient.writeCareMessage` (Gemini adapter, FakeLlmClient scripted). `src/care/writer.ts` (`GeminiCareWriter`) replaces `claude-writer.ts`; `@anthropic-ai/sdk` removed. Doctor: Gemini overview lines over the fixed data sections. Family: fixed greeting (AI disclosure), fixed urgent paragraph, Gemini body, fixed closing. Replies: Gemini from the facts, the summary as sent and the thread. `checkWritten` rejects dashes, dosing advice, diagnosis words, 911 and numbers not in the facts; any failure sends the template.
-- Care facts: severity ladder by topic, her notes, visit questions, medicine doses, label mismatches, refills, sharing level. Doctor template gets them as data lines; family template and Gemini's family view only what the sharing level allows (level 3 and up always).
+- Care facts: severity ladder by topic, her notes, visit questions, medicine doses, label mismatches, refills, sharing level. Red flags also from the day's level-3+ observations (typed, "Worse" follow-ups, safety 4 and 5) and `concern_at`. Doctor template gets them as data lines.
+- PR #6 review fixes: the emergency contact's summary, template replies and Gemini's family view follow the sharing level like the family's Relay messages (no such "full summary whatever the level" decision existed); family texts follow the ladder (emergency: 911 now then her doctor; crisis: 988; a symptom: her doctor, no 911; read by the safety screen in first person); noon sends only a really missed day, under its own trigger, so a finished day always sends; the care hook is waited on for at most 10 s; no phone numbers go to the model; a care copy scan.
 
 **What was skipped or changed from spec:** In a live test Gemini writing the whole doctor summary left out a level-3 follow-up, so the doctor's data lines stay fixed and Gemini writes only the overview. Visit questions, label checks and refills are matched to the day by their UTC date.
 
-**Open questions:** `FEEDBACK.md` (emergency contact and the sharing level).
+**Note:** anyone who ran the photon/care-summaries branch has a database with its tables as migration 6: delete `data/*.db` (the app and simulator databases) before running this branch.
 

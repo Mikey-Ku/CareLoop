@@ -101,7 +101,13 @@ export function doctorRedFlags(f: CareFacts): string {
   const redLines = [`RED FLAGS: ${f.redFlags.length}`];
   for (const r of f.redFlags) {
     const told = f.familyAlerted.length > 0 ? `${listJoin(f.familyAlerted)} alerted in Relay` : "no family chat linked";
-    redLines.push(`- ${r.question} "${r.answer}". She was told to call her doctor today; ${told}.`);
+    const advice =
+      r.level >= 5 || r.questionId === "crisis"
+        ? "She was given 988 (911 if in danger)"
+        : r.level === 4
+          ? "She was told to call 911 if it was happening, then her doctor"
+          : "She was told to call her doctor today";
+    redLines.push(`- L${r.level} ${r.question} "${r.answer}". ${advice}; ${told}.`);
   }
   return redLines.join("\n");
 }
@@ -207,18 +213,38 @@ export function doctorSummary(f: CareFacts, contacts: CareContacts, overview?: s
 
 // ---------------------------------------------------------------------------
 // Emergency contact (family)
+//
+// What the emergency contact reads follows Harriet's sharing level, as her family's Relay messages do
+// (familyDailyStatus, familyRedFlagAlert in src/checkin/copy.ts):
+//   status         how the check-in went, and the base line of anything urgent (no detail)
+//   status_vitals  also her camera heart rate as within or outside her usual range, no number (with
+//                  atrial fibrillation only "checked, a camera estimate")
+//   all            also her answers, the urgent detail, the number, flags she has heard (told or
+//                  noted), her notes, visit questions, medicines, other symptoms and her call's memories
+// Anything at level 3 or more always gets its base line: safety wins over privacy, on purpose.
+
+/** Whether the camera reading is compared with her usual range (not with atrial fibrillation). */
+const isAfib = (f: CareFacts) => /atrial fibrillation/i.test(f.vitals.usualRange?.note ?? "");
 
 function vitalsForFamily(f: CareFacts): string | undefined {
+  const sharing = f.patient.sharing;
+  if (sharing === "status") return undefined;
   const r = f.vitals.readings.at(-1);
   if (!r || (r.heartRate === null && r.breathingRate === null)) return undefined;
+  const estimate = "This is a camera estimate, not a medical test.";
+  const name = f.patient.preferredName;
+  if (sharing === "status_vitals") {
+    if (r.inUsualRange === true) return `${name}'s camera heart-rate check today was within her usual range from clinic visits. ${estimate}`;
+    if (r.inUsualRange === false) return `${name}'s camera heart-rate check today was outside her usual range from clinic visits, which is worth mentioning to her doctor. ${estimate}`;
+    return `${name}'s heart rate was checked today with the camera. ${estimate}`;
+  }
   const bits: string[] = [];
   if (r.heartRate !== null) bits.push(`her heart rate was about ${Math.round(r.heartRate)} beats a minute`);
   if (r.breathingRate !== null) bits.push(`her breathing was about ${Math.round(r.breathingRate)} breaths a minute`);
-  const lines = [`On her camera check, ${listJoin(bits)}. This is a camera estimate, not a medical test.`];
+  const lines = [`On her camera check, ${listJoin(bits)}. ${estimate}`];
   if (r.inUsualRange === true) lines.push("Her heart rate was within her usual range from clinic visits.");
   else if (r.inUsualRange === false) lines.push("Her heart rate was outside her usual range from clinic visits, which is worth mentioning to her doctor.");
-  else if (f.vitals.usualRange?.note && /atrial fibrillation/i.test(f.vitals.usualRange.note))
-    lines.push("Because she has an irregular heartbeat (atrial fibrillation), the camera number is only a rough estimate.");
+  else if (isAfib(f)) lines.push("Because she has an irregular heartbeat (atrial fibrillation), the camera number is only a rough estimate.");
   return lines.join(" ");
 }
 
@@ -231,45 +257,58 @@ export function familyGreeting(f: CareFacts, contacts: CareContacts): string {
 export const FAMILY_CLOSING = "If you have a question about today's update, you can reply here.";
 
 /**
- * What the emergency contact may see of the day's extra data, by her sharing level (as her family's
- * Relay status does): symptoms below level 3, her notes, visit questions, medicine reminders and label
- * photos only at "all"; a refill only at "all" or when she asked us to tell her family. Anything at
- * level 3 or more is always included (her words only at "all"), as red flags always are.
+ * What the emergency contact may see beyond how the check-in went and the urgent base lines, by her
+ * sharing level (see above). Everything below level 3 is "all" only; a refill also when she asked us to
+ * tell her family.
  */
 export function familyVisible(f: CareFacts) {
   const all = f.patient.sharing === "all";
   const m = f.medicines;
   return {
-    urgent: f.severity.symptoms.filter((s) => s.level >= 3).map((s) => ({ ...s, words: all ? s.words : null })),
+    answers: all ? f.checkin.answers : [],
     symptoms: all ? f.severity.symptoms.filter((s) => s.level < 3) : [],
     notes: all ? f.notes : [],
     visitQuestions: all ? f.visitQuestions : [],
     doses: all ? m.doses : [],
     labelMismatches: all ? m.labelMismatches : [],
     refills: all ? m.refills : m.refills.filter((r) => r.familyTold),
+    heardFlags: all ? f.flags.filter((x) => x.status === "told" || x.status === "noted") : [],
+    memories: all ? f.memories : [],
   };
 }
 
 /**
- * The fixed paragraph about anything urgent today, or undefined: her red-flag answers (always), then
- * anything else at level 3 or more (a typed symptom, a safety screen hit). Never written by a model.
+ * The fixed paragraph about anything urgent today (level 3 and up), or undefined. Never written by a
+ * model. The base lines match her family's Relay alerts and go out at every sharing level: a crisis
+ * (call her now), an urgent symptom (call her now), something to call her doctor about (call her
+ * today). The detail (the question and her answer, what she was told) only at "all". 911 only for
+ * level 4 and up.
  */
 export function familyAttention(f: CareFacts, contacts: CareContacts): string | undefined {
+  if (f.redFlags.length === 0) return undefined;
   const name = f.patient.preferredName;
-  const doctor = contacts.doctor;
-  const parts: string[] = [];
-  if (f.redFlags.length > 0) {
-    const which = f.redFlags.map((r) => `"${r.answer}" to "${r.question}"`);
-    parts.push(`One thing needs attention: ${name} answered ${listJoin(which)}. I asked ${name} to call her doctor today.`);
+  const all = f.patient.sharing === "all";
+  const crisis = f.redFlags.some((r) => r.questionId === "crisis" || r.level >= 5);
+  const urgent = f.redFlags.some((r) => r.level === 4 && r.questionId !== "crisis");
+  const three = f.redFlags.filter((r) => r.level === 3);
+  const lines: string[] = [];
+  if (crisis) {
+    lines.push(`${name} may be going through a very hard time. Please call her now.`);
+    if (all) lines.push(`I asked ${name} to call or text 988, the Suicide & Crisis Lifeline, or 911 if in danger.`);
   }
-  const covered = new Set(f.redFlags.map((r) => r.questionId));
-  const others = familyVisible(f).urgent.filter((s) => !covered.has(s.topic));
-  if (others.some((s) => s.level >= 4)) parts.push(`${name} told me about something urgent today, and I gave her the emergency numbers.`);
-  for (const s of others.filter((x) => x.level === 3))
-    parts.push(`${name} mentioned ${s.about} today${s.words ? ` ("${s.words}")` : ""}, and I asked her to call her doctor today.`);
-  if (parts.length === 0) return undefined;
-  parts.push(`Please call ${name} today to check on her. If you have questions about what this means, ${doctor.name} can be reached at ${displayPhone(doctor.phone)}.`);
-  return parts.join(" ");
+  if (urgent) {
+    lines.push(`${name} told me about something that may be urgent. Please call ${name} now to check on her.`);
+    if (all) lines.push(`I asked ${name} to call 911 if it's happening now, and then her doctor.`);
+  }
+  if (three.length > 0) {
+    lines.push(`${name} reported something she should call her doctor about.${crisis || urgent ? "" : ` Please call ${name} today to check on her.`}`);
+    if (all) {
+      for (const r of three) lines.push(`- ${r.question} "${r.answer}"`);
+      lines.push(`I asked ${name} to call her doctor today.`);
+    }
+  }
+  lines.push(`If you have questions about what this means, ${contacts.doctor.name} can be reached at ${displayPhone(contacts.doctor.phone)}.`);
+  return lines.join("\n");
 }
 
 /** The day's extra data for the family, in plain words, cut by her sharing level (familyVisible). */
@@ -290,26 +329,29 @@ export function familyDayLines(f: CareFacts): string[] {
   return sections;
 }
 
+/** How the check-in went, in one line; her answers under it at "all" only. */
+function familyOutcome(f: CareFacts): string {
+  const name = f.patient.preferredName;
+  const answers = familyVisible(f).answers.map((a) => `- "${a.question}" ${name} answered: ${a.answer}`);
+  const c = f.checkin;
+  switch (c.outcome) {
+    case "checked_in":
+      return [`${name} checked in today.`, ...answers].join("\n");
+    case "not_today":
+      return `${name} said "not today" to this morning's check-in. That's her choice, and I'll check in again tomorrow.`;
+    case "missed":
+      return `${name} hasn't answered this morning's check-in. You may want to give ${name} a call.`;
+    case "in_progress":
+      return [`${name} started this morning's check-in but hasn't finished it yet.`, ...answers].join("\n");
+    case "none":
+      return `There was no check-in with ${name} today.`;
+  }
+}
+
 export function familySummary(f: CareFacts, contacts: CareContacts): string {
   const name = f.patient.preferredName;
-  const sections: string[] = [familyGreeting(f, contacts)];
-
-  const c = f.checkin;
-  if (c.outcome === "checked_in") {
-    const lines = [`${name} checked in today.`];
-    for (const a of c.answers) lines.push(`- "${a.question}" ${name} answered: ${a.answer}`);
-    sections.push(lines.join("\n"));
-  } else if (c.outcome === "not_today") {
-    sections.push(`${name} said "not today" to this morning's check-in. That's her choice, and I'll check in again tomorrow.`);
-  } else if (c.outcome === "missed") {
-    sections.push(`${name} hasn't answered this morning's check-in. You may want to give ${name} a call.`);
-  } else if (c.outcome === "in_progress") {
-    const lines = [`${name} started this morning's check-in but hasn't finished it yet.`];
-    for (const a of c.answers) lines.push(`- "${a.question}" ${name} answered: ${a.answer}`);
-    sections.push(lines.join("\n"));
-  } else {
-    sections.push(`There was no check-in with ${name} today.`);
-  }
+  const v = familyVisible(f);
+  const sections: string[] = [familyGreeting(f, contacts), familyOutcome(f)];
 
   const attention = familyAttention(f, contacts);
   if (attention) sections.push(attention);
@@ -319,31 +361,59 @@ export function familySummary(f: CareFacts, contacts: CareContacts): string {
   if (vitals) sections.push(vitals);
 
   // Only flags she has already heard: she should never learn about one from her family first.
-  const heard = f.flags.filter((flag) => flag.status === "told" || flag.status === "noted");
-  if (heard.length > 0)
+  if (v.heardFlags.length > 0)
     sections.push(
       [
         `Things on ${name}'s list to ask her doctor about (not emergencies):`,
-        ...heard.map((flag) => `- ${FAMILY_RULE_LABELS[flag.ruleId]}${flag.status === "noted" ? ` (${name} plans to ask her doctor)` : ""}`),
+        ...v.heardFlags.map((flag) => `- ${FAMILY_RULE_LABELS[flag.ruleId]}${flag.status === "noted" ? ` (${name} plans to ask her doctor)` : ""}`),
       ].join("\n"),
     );
 
-  if (f.memories.length > 0) sections.push([`From ${name}'s call today:`, ...f.memories.map((m) => `- ${m}`)].join("\n"));
+  if (v.memories.length > 0) sections.push([`From ${name}'s call today:`, ...v.memories.map((m) => `- ${m}`)].join("\n"));
 
   sections.push(FAMILY_CLOSING);
   return sections.join("\n\n");
 }
 
+/** Her camera reading for a family reply, as her sharing level allows; undefined when it allows none. */
+export function familyVitalsAnswer(f: CareFacts): string {
+  const name = f.patient.preferredName;
+  if (f.patient.sharing === "status") return `${name} keeps her health readings between her and her doctor, so I can't share them.`;
+  return vitalsForFamily(f) ?? `${name} didn't do a camera heart-rate check today.`;
+}
+
 // ---------------------------------------------------------------------------
 // Fixed replies (rules decide these; no LLM)
 
-/** Emergency contact wrote something urgent. Doctor first, as the team asked; 911 stays as the last line. */
-export function familyUrgentReply(f: CareFacts | undefined, contacts: CareContacts): string {
+/**
+ * The emergency contact describes an emergency happening to her (a fall, chest pain, can't breathe,
+ * unconscious: the safety screen's level 4). 911 now, then her doctor.
+ */
+export function familyEmergencyReply(f: CareFacts | undefined, contacts: CareContacts): string {
   const doctor = contacts.doctor;
   return [
-    `I'm an automated assistant, so I don't have the medical knowledge to judge symptoms or decide what to do about them.`,
-    `Please contact ${possessive(f)} doctor, ${doctor.name}, first at ${displayPhone(doctor.phone)} before acting on this.`,
-    "If it looks like an emergency, call 911.",
+    "If this is happening now, please call 911 right away.",
+    `After that, call ${possessive(f)} doctor, ${doctor.name}, at ${displayPhone(doctor.phone)}.`,
+    "I'm an automated assistant, so I can't judge symptoms or act on them myself.",
+  ].join(" ");
+}
+
+/** The emergency contact says she may harm herself or not want to live (level 5). 988, and 911 if she is in danger. */
+export function familyCrisisReply(f: CareFacts | undefined): string {
+  const who = f ? f.patient.preferredName : "she";
+  return [
+    `Please call or text 988, the Suicide & Crisis Lifeline, now. They can help you support ${f ? who : "her"}.`,
+    `If ${who} is in danger right now, call 911.`,
+    "I'm an automated assistant, so I can't act on this myself.",
+  ].join(" ");
+}
+
+/** The emergency contact describes a symptom or asks what to do (below level 4): her doctor, no 911. */
+export function familySymptomReply(f: CareFacts | undefined, contacts: CareContacts): string {
+  const doctor = contacts.doctor;
+  return [
+    "I'm an automated assistant, so I don't have the medical knowledge to judge symptoms or decide what to do about them.",
+    `Please contact ${possessive(f)} doctor, ${doctor.name}, at ${displayPhone(doctor.phone)}.`,
   ].join(" ");
 }
 

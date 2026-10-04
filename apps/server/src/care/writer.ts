@@ -4,7 +4,6 @@ import {
   DOCTOR_RULE_LABELS,
   FAMILY_CLOSING,
   FAMILY_RULE_LABELS,
-  displayPhone,
   doctorSummary,
   familyAttention,
   familyGreeting,
@@ -93,40 +92,49 @@ export function doctorView(f: CareFacts, contacts: CareContacts) {
     medications: f.medications.map((m) => m.name),
     conditions: f.conditions,
     sharedOnHerCall: f.memories,
-    emergencyContact: { name: ec.name, relationship: ec.relationship ?? null, phone: displayPhone(ec.phone) },
+    emergencyContact: { name: ec.name, relationship: ec.relationship ?? null },
   };
 }
 
 /**
- * What the emergency contact's model sees: her check-in, a camera reading in plain numbers, the flags she
- * has already heard in plain words, and the day's extra data only as her sharing level allows
- * (familyVisible). Urgent items are not in it: their fixed paragraph is added by code.
+ * What the emergency contact's model sees: only what her sharing level lets them read (familyVisible,
+ * the same cut as the family template): how the check-in went, whether something urgent came up (its
+ * fixed paragraph is added by code), the camera reading as the level allows, and at "all" her answers,
+ * flags she has heard, other symptoms, notes, visit questions, medicines and memories. No phone numbers.
  */
 export function familyView(f: CareFacts, contacts: CareContacts) {
   const v = familyVisible(f);
+  const sharing = f.patient.sharing;
   const last = f.vitals.readings.at(-1);
+  const camera =
+    !last || sharing === "status"
+      ? null
+      : {
+          note: "a camera estimate, not a medical test",
+          ...(last.inUsualRange === undefined ? { checked: true, comparedWithUsualRange: false } : { withinHerUsualRange: last.inUsualRange }),
+          ...(sharing === "all"
+            ? {
+                heartRateAbout: last.heartRate === null ? null : Math.round(last.heartRate),
+                breathingAbout: last.breathingRate === null ? null : Math.round(last.breathingRate),
+                ...(last.inUsualRange === undefined && /atrial fibrillation/i.test(f.vitals.usualRange?.note ?? "") ? { irregularHeartbeatSoOnlyARoughEstimate: true } : {}),
+              }
+            : {}),
+        };
   return {
     seniorName: f.patient.preferredName,
     day: f.day,
-    checkin: { outcome: f.checkin.outcome, answers: f.checkin.answers.map((a) => ({ question: a.question, answer: a.answer })) },
-    somethingUrgentToday: f.redFlags.length > 0 || v.urgent.length > 0,
-    cameraCheck: last
-      ? {
-          heartRateAbout: last.heartRate === null ? null : Math.round(last.heartRate),
-          breathingAbout: last.breathingRate === null ? null : Math.round(last.breathingRate),
-          note: "a camera estimate, not a medical test",
-          ...(last.inUsualRange === undefined ? { irregularHeartbeatSoOnlyARoughEstimate: /atrial fibrillation/i.test(f.vitals.usualRange?.note ?? "") } : { withinHerUsualRange: last.inUsualRange }),
-        }
-      : null,
-    onHerListToAskTheDoctor: f.flags.filter((x) => x.status !== "new").map((x) => FAMILY_RULE_LABELS[x.ruleId]),
+    checkin: { outcome: f.checkin.outcome, answers: v.answers.map((a) => ({ question: a.question, answer: a.answer })) },
+    somethingUrgentToday: f.redFlags.length > 0,
+    cameraCheck: camera,
+    onHerListToAskTheDoctor: v.heardFlags.map((x) => FAMILY_RULE_LABELS[x.ruleId]),
     alsoMentioned: v.symptoms.map((s) => ({ about: s.about, howMuch: LEVEL_WORDS[s.level], herWords: s.words })),
     herNotesForTheDoctor: v.notes,
     visitQuestions: v.visitQuestions,
     medicineReminders: v.doses,
     labelPhotosThatDidntMatch: v.labelMismatches.map((l) => l.label),
     refills: v.refills,
-    sharedOnHerCall: f.memories,
-    doctor: { name: contacts.doctor.name, phone: displayPhone(contacts.doctor.phone) },
+    sharedOnHerCall: v.memories,
+    doctor: { name: contacts.doctor.name },
   };
 }
 

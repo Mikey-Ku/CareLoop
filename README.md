@@ -57,9 +57,9 @@ The commands above are for macOS (`sed -i ''`, zsh `read`). Your conversation is
 
 After each check-in, the doctor and the emergency contact each get a text over [Photon](https://photon.codes/docs/spectrum-ts/getting-started) (iMessage):
 - the doctor gets a data summary;
-- the emergency contact gets a plain-language one.
+- the emergency contact gets a plain-language one, with only what Harriet's sharing level allows (anything urgent always gets its base line).
 
-The assistant answers their replies, grounded in that summary. If the emergency contact sends something urgent-sounding, the reply is always the same fixed text: contact the doctor first.
+The assistant answers their replies, grounded in that summary. Urgent texts from the emergency contact get fixed replies on the severity ladder: an emergency ("she fell", "chest pain") gets 911 now, then her doctor; a crisis gets 988; a symptom gets her doctor, with no 911.
 
 1. Copy `care-contacts.example.json` to `care-contacts.json` at the repo root. The real file is gitignored.
 2. Put in the doctor's and the emergency contact's names and phone numbers. Any common format works, for example `(734) 555-1234` or `+17345551234`. A 10-digit number is taken as US or Canada.

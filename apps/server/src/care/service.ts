@@ -2,7 +2,6 @@ import type { Clock } from "../checkin/engine-types.ts";
 import {
   careThread,
   getCareSummary,
-  hasCareSummaryForDay,
   insertCareSummary,
   latestSentSummary,
   markOutboundFailed,
@@ -13,6 +12,7 @@ import {
   recordInbound,
   type CareSummaryRow,
 } from "../db/care.ts";
+import { getCheckin } from "../db/checkins.ts";
 import type { Db } from "../db/index.ts";
 import type { RxNavCache } from "../finchnode/rxnav.ts";
 import type { CareInbound, CareMessenger } from "../photon/care-messenger.ts";
@@ -32,8 +32,13 @@ import { composeSummary, templateSummary } from "./writer.ts";
 // Inbound texts dedupe on Photon's message id. A failed send to one contact never stops
 // the other. Log lines carry masked numbers and never message text.
 
-/** Trigger for the one daily summary (check-in ended, or the noon job). */
+/** Trigger for the day's summary once her check-in is over (checked in or "not today"). */
 export const DAY_TRIGGER = "day";
+/**
+ * Trigger for the noon summary of a missed check-in (no answers by MISSED_CHECKIN_TIME). Its own
+ * trigger, so if she checks in after noon after all, the finished day's summary still goes out.
+ */
+export const MISSED_TRIGGER = "missed";
 
 export type SendOutcome = "sent" | "already_sent" | "failed";
 export type SummaryResult = { summaryId: number; doctor: SendOutcome; family: SendOutcome };
@@ -107,10 +112,15 @@ export function createCareService(deps: CareServiceDeps) {
   return {
     sendSummaries,
 
-    /** The day's summary unless one already exists for that day (any trigger). For the noon job. */
-    async ensureDaySummary(day: string): Promise<SummaryResult | undefined> {
-      if (hasCareSummaryForDay(db, patientId, day)) return undefined;
-      return sendSummaries(day, DAY_TRIGGER);
+    /**
+     * The noon job: the missed-day summary, only when the day's check-in really was missed (marked
+     * missed: no answers by MISSED_CHECKIN_TIME). A check-in still in progress, or paused by a concern
+     * (her family already had the alert), sends nothing at noon: its summary goes out when it ends.
+     * Sending twice is a no-op.
+     */
+    async missedDaySummary(day: string): Promise<SummaryResult | undefined> {
+      if (getCheckin(db, patientId, day)?.status !== "missed") return undefined;
+      return sendSummaries(day, MISSED_TRIGGER);
     },
 
     /** A text from the doctor or the emergency contact. Never throws. */
@@ -126,7 +136,7 @@ export function createCareService(deps: CareServiceDeps) {
       if (!recordInbound(db, { patientId, audience, phone: contact.phone, photonMessageId: message.messageId, text: message.text, createdAt: message.at, summaryId: summary?.id ?? null }))
         return "duplicate";
 
-      const intent = classifyInbound(audience, message.text);
+      const intent = classifyInbound(audience, message.text, summary?.facts.patient.preferredName);
       let reply = fixedReply(intent, summary?.facts, contacts);
       if (reply === undefined) {
         reply = summary
