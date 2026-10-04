@@ -17,7 +17,14 @@ export function callFirstMessage(name: string): string {
 
 /** Before the Presage reading: she rests the phone and the voice stays quiet. */
 export function quietMeasurementPrompt(durationSeconds = 30): string {
-  return `Thank you. For this optional camera estimate, please prop up your phone so I can see your face and upper chest. When I finish speaking, please stay still and quiet for about ${durationSeconds} seconds. This is only an estimate, not a medical test.`;
+  return `Thank you. Hold your phone steady with your face and upper chest in view, and stay still and quiet for ${durationSeconds} seconds once I stop talking. I will count down the time. This is only an estimate, not a medical test.`;
+}
+
+/** Said while the quiet window runs, so she knows how long is left. Short on purpose: she is meant to be quiet. */
+export const QUIET_COUNTDOWN_SECONDS: readonly number[] = [20, 10];
+const NUMBER_WORDS: Record<number, string> = { 5: "Five", 10: "Ten", 15: "Fifteen", 20: "Twenty", 25: "Twenty-five", 30: "Thirty", 40: "Forty", 45: "Forty-five" };
+export function quietCountdown(secondsLeft: number): string {
+  return `${NUMBER_WORDS[secondsLeft] ?? String(secondsLeft)} seconds left.`;
 }
 
 export const QUIET_MINUTE_PROMPT = quietMeasurementPrompt();
@@ -159,6 +166,7 @@ export function callCopySamples(name = "Harriet"): { level: number; text: string
   const samples: { level: number; text: string }[] = [
     { level: 0, text: callFirstMessage(name) },
     { level: 0, text: QUIET_MINUTE_PROMPT },
+    ...QUIET_COUNTDOWN_SECONDS.map((seconds) => ({ level: 0, text: quietCountdown(seconds) })),
     { level: 0, text: CAMERA_OFFER_AT_END },
     { level: 0, text: CAMERA_GUIDANCE },
     { level: 0, text: CAMERA_STILL_OFF },

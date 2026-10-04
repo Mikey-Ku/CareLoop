@@ -4,7 +4,7 @@ import type { CallCheckinContext } from "../checkin/engine-types.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import type { CallScreeningLlmOutput, CallTurnLlmOutput, LlmClient } from "../llm/types.ts";
 import type { VitalsResult } from "../vitals/types.ts";
-import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, callClosing, callFirstMessage, quietMeasurementPrompt } from "./copy.ts";
+import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, QUIET_COUNTDOWN_SECONDS, callClosing, callFirstMessage, quietCountdown, quietMeasurementPrompt } from "./copy.ts";
 import { emergencyDecision } from "./emergency.ts";
 import type { TranscriptTurn } from "./types.ts";
 
@@ -28,6 +28,11 @@ export type ConversationOrchestratorOptions = {
    * to turn it on, once. Absent: never.
    */
   cameraNeedsVideo?: () => boolean;
+  /**
+   * Whether the quiet window is still running (not cut short, for example by a stalled camera), asked every
+   * second of it: when it is not, the window ends at once instead of counting down to nothing. Absent: always.
+   */
+  measurementActive?: () => boolean;
   quietMeasurementMs: number;
   speak: (text: string) => Promise<void>;
   /**
@@ -71,6 +76,7 @@ export class ConversationOrchestrator {
   /** She said yes and the quiet reading was started: it is never offered or asked for again. */
   #measurementDone = false;
   #measurementTimer: ReturnType<typeof setTimeout> | undefined;
+  #countdownTimer: ReturnType<typeof setInterval> | undefined;
   /** Her FinchNode record, read on the first turn that needs it (see #loadContext). */
   #record: Promise<HealthRecord> | undefined;
   #phase: "interview" | "quiet_measurement" | "screening" = "interview";
@@ -141,6 +147,7 @@ export class ConversationOrchestrator {
   close(): void {
     this.#completed = true;
     clearTimeout(this.#measurementTimer);
+    clearInterval(this.#countdownTimer);
   }
 
   async #handlePatientTurn(text: string, seq: number): Promise<void> {
@@ -287,6 +294,7 @@ export class ConversationOrchestrator {
   }
 
   async #afterMeasurement(): Promise<void> {
+    clearInterval(this.#countdownTimer);
     if (this.#completed) return;
     this.#phase = "screening";
     const vitals = this.#options.getVitals();
@@ -311,6 +319,35 @@ export class ConversationOrchestrator {
     this.#options.beginQuietMeasurement();
     this.#measurementTimer = setTimeout(() => void this.#afterMeasurement(), this.#options.quietMeasurementMs + 500);
     this.#measurementTimer.unref?.();
+    this.#runCountdown();
+  }
+
+  /**
+   * Once a second of the quiet window: says how many seconds are left at the marks (copy.ts), and ends the
+   * window at once, with the usual "no clear reading" words, if it was cut short, instead of counting down
+   * to nothing.
+   */
+  #runCountdown(): void {
+    const total = Math.round(this.#options.quietMeasurementMs / 1000);
+    const marks = QUIET_COUNTDOWN_SECONDS.filter((left) => left <= total - 5);
+    let elapsed = 0;
+    clearInterval(this.#countdownTimer);
+    this.#countdownTimer = setInterval(() => {
+      elapsed += 1;
+      if (this.#completed || this.#phase !== "quiet_measurement" || elapsed >= total) {
+        clearInterval(this.#countdownTimer);
+        return;
+      }
+      if (this.#options.measurementActive && !this.#options.measurementActive()) {
+        clearInterval(this.#countdownTimer);
+        clearTimeout(this.#measurementTimer);
+        void this.#afterMeasurement().catch((error) => this.#log("call_turn_failed", { error: summary(error) }));
+        return;
+      }
+      const left = total - elapsed;
+      if (marks.includes(left)) void this.#speak(quietCountdown(left)).catch((error) => this.#log("call_countdown_failed", { error: summary(error) }));
+    }, 1000);
+    this.#countdownTimer.unref?.();
   }
 
   /** The reading is set up, her camera is off, and she has not been told yet, said no, or had it taken. */

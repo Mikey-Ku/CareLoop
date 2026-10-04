@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, callClosing, callFirstMessage } from "../src/calls/copy.ts";
+import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, callClosing, callFirstMessage, quietCountdown } from "../src/calls/copy.ts";
 import { emptyCallVitals } from "../src/calls/screening.ts";
 import { ConversationOrchestrator, type ConversationOrchestratorOptions } from "../src/calls/orchestrator.ts";
 import { crisisReply, urgentReply } from "../src/checkin/copy.ts";
@@ -390,7 +390,7 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
     expect(onComplete).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(30_500);
     await vi.waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
-    expect(spoken).toEqual([CAMERA_OFFER_AT_END, spoken[1], "I couldn't get a clear camera reading this time. That's okay.", callClosing("Harriet")]);
+    expect(spoken).toEqual([CAMERA_OFFER_AT_END, spoken[1], quietCountdown(20), quietCountdown(10), "I couldn't get a clear camera reading this time. That's okay.", callClosing("Harriet")]);
     expect(offers(spoken)).toBe(1);
     expect(turnInputs(llm).map((input) => input.canMeasure)).toEqual([true, false]); // Gemini is told it is taken
     flow.close();
@@ -878,5 +878,69 @@ describe("ConversationOrchestrator: her camera is off, so she is told how to tur
     await declined.say("I have had a bit of a cough.");
     await declined.say("No thanks.");
     expect(declined.spoken.filter((text) => text === CAMERA_GUIDANCE)).toHaveLength(1);
+  });
+});
+
+describe("ConversationOrchestrator: the quiet window counts down", () => {
+  const NO_READING = "I couldn't get a clear camera reading this time. That's okay.";
+  function window(extra: Partial<ConversationOrchestratorOptions> = {}) {
+    vi.useFakeTimers();
+    const llm = new FakeLlmClient({ callTurn: () => plan() });
+    const flow = buildFlow(llm, { canMeasure: () => true, ...extra });
+    return { ...flow, llm };
+  }
+  const started = async (f: ReturnType<typeof window>) => {
+    await f.say("I have had a bit of a cough.");
+    await f.say("Yes, please.");
+    expect(f.beginQuietMeasurement).toHaveBeenCalledOnce();
+  };
+
+  it("says how many seconds are left at 20 and at 10, and nothing in between", async () => {
+    const f = window();
+    await started(f);
+    const before = f.spoken.length;
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(f.spoken.length).toBe(before);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(f.spoken.at(-1)).toBe("Twenty seconds left.");
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(f.spoken.at(-1)).toBe("Twenty seconds left.");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(f.spoken.at(-1)).toBe("Ten seconds left.");
+    await vi.advanceTimersByTimeAsync(20_500);
+    await vi.waitFor(() => expect(f.onComplete).toHaveBeenCalledOnce());
+    expect(f.spoken.slice(before)).toEqual([quietCountdown(20), quietCountdown(10), NO_READING, callClosing("Harriet")]);
+    f.flow.close();
+  });
+
+  it("a window cut short ends at the next second with the no-reading words, with no countdown over nothing", async () => {
+    let active = true;
+    const f = window({ measurementActive: () => active });
+    await started(f);
+    const before = f.spoken.length;
+    await vi.advanceTimersByTimeAsync(4_000);
+    active = false; // the camera stalled
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(f.onComplete).toHaveBeenCalledOnce());
+    expect(f.spoken.slice(before)).toEqual([NO_READING, callClosing("Harriet")]);
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(f.spoken.slice(before)).toEqual([NO_READING, callClosing("Harriet")]); // nothing more, and the end timer did not fire a second readback
+    f.flow.close();
+  });
+
+  it("stops when the call is closed", async () => {
+    const f = window();
+    await started(f);
+    const before = f.spoken.length;
+    f.flow.close();
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(f.spoken.length).toBe(before);
+  });
+
+  it("the prompt says how long the window is and that she will hear the time counted down", async () => {
+    const f = window({ quietMeasurementMs: 30_000 });
+    await started(f);
+    expect(f.spoken.at(-1)).toMatch(/30 seconds once I stop talking.*count down/i);
+    f.flow.close();
   });
 });

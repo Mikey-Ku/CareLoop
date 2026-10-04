@@ -331,6 +331,7 @@ export class CallService implements CallEventHandler {
         getVitals: () => active.bridge?.result() ?? emptyCallVitals(),
         canMeasure: () => Boolean(active.bridge) && videoOn,
         cameraNeedsVideo: () => Boolean(active.bridge) && !videoOn,
+        measurementActive: () => active.bridge?.quiet.status !== "interrupted",
         quietMeasurementMs: calls.quietMeasurementMs,
         speak: (text) => tts.speak(text),
         beforeGreeting: async () => {
