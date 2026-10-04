@@ -449,6 +449,28 @@ describe("ConversationOrchestrator: the start of the call", () => {
     expect(onComplete).not.toHaveBeenCalled();
   });
 
+  it("knows when the greeting has been spoken, so nothing is let to cut it off until then", async () => {
+    let finish!: () => void;
+    const speak = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const { flow } = buildFlow(llm(), { speak });
+    expect(flow.greeted).toBe(false);
+    flow.start();
+    await settle();
+    expect(flow.greeted).toBe(false); // still playing
+    finish();
+    await vi.waitFor(() => expect(flow.greeted).toBe(true));
+  });
+
+  it("counts the greeting as over when it failed, or when the call ended before it", async () => {
+    const failed = buildFlow(llm(), { speak: async () => { throw new Error("ElevenLabs TTS returned HTTP 500"); } });
+    failed.flow.start();
+    await vi.waitFor(() => expect(failed.flow.greeted).toBe(true));
+    const dropped = buildFlow(llm(), { beforeGreeting: () => new Promise<void>(() => {}) });
+    dropped.flow.start();
+    await settle();
+    expect(dropped.flow.greeted).toBe(false);
+  });
+
   it("is for the greeting only: started twice or followed by turns, the hook runs once", async () => {
     const beforeGreeting = vi.fn(async () => {});
     const { flow, spoken, say } = buildFlow(llm(), { beforeGreeting });

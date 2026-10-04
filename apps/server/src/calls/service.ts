@@ -20,7 +20,7 @@ import { emergencyDecision } from "./emergency.ts";
 import { callResult, emptyCallVitals, loadUsualRange } from "./screening.ts";
 import { RelayPresageBridge } from "./video.ts";
 import type { ScreeningResult, TranscriptTurn } from "./types.ts";
-import { ElevenLabsRealtimeStt, ElevenLabsTts, relayAudioToStt } from "./audio.ts";
+import { ElevenLabsRealtimeStt, ElevenLabsTts, isBargeIn, relayAudioToStt } from "./audio.ts";
 import { ConversationOrchestrator } from "./orchestrator.ts";
 
 // A video check-in call (docs/CALLS.md). Relay carries the call, ElevenLabs provides streaming STT/TTS,
@@ -277,8 +277,11 @@ export class CallService implements CallEventHandler {
       transport.on("trackSubscribed", () => { videoOn = true; });
       transport.on("trackUnsubscribed", () => { videoOn = false; });
       transport.on("remoteVideo", (enabled) => { videoOn = enabled; });
+      // She may talk over the assistant, but a cough, a noise or her first "hello?" must not cut it off mid-word.
+      // The greeting (it says this is an AI) and a fixed safety reply are never interrupted; after them it
+      // takes two real words (isBargeIn).
       stt.onPartial((text) => {
-        if (text.trim() && tts.isSpeaking) tts.cancel();
+        if (tts.isSpeaking && active.conversation?.greeted && active.safetyLevel < 4 && isBargeIn(text)) tts.cancel();
       });
       stt.onCommitted((text) => this.#onPatientTranscript(active, text));
       const elapsedSinceRinging = call.ringing_at ? Date.parse(this.#wallNow()) - Date.parse(call.ringing_at) : 0;

@@ -44,6 +44,7 @@ export class ConversationOrchestrator {
   #summary = "";
   #lastQuestion: string | undefined;
   #started = false;
+  #greeted = false;
   #completed = false;
   #waitingForMeasurementConsent = false;
   #measurementDeclined = false;
@@ -69,16 +70,25 @@ export class ConversationOrchestrator {
     });
   }
 
+  /** The greeting, which says this is an AI, has been spoken (or failed, or was dropped): until then the call service lets nothing cut it off. */
+  get greeted(): boolean {
+    return this.#greeted;
+  }
+
   async #greet(): Promise<void> {
-    if (this.#options.beforeGreeting) {
-      try {
-        await this.#options.beforeGreeting();
-      } catch (error) {
-        this.#log("call_greeting_lead_in_failed", { error: summary(error) }); // a missing lead-in never costs her the greeting
+    try {
+      if (this.#options.beforeGreeting) {
+        try {
+          await this.#options.beforeGreeting();
+        } catch (error) {
+          this.#log("call_greeting_lead_in_failed", { error: summary(error) }); // a missing lead-in never costs her the greeting
+        }
+        if (this.#completed) return; // the call ended while we waited: nobody to greet
       }
-      if (this.#completed) return; // the call ended while we waited: nobody to greet
+      await this.#speak(callFirstMessage(this.#options.firstName));
+    } finally {
+      this.#greeted = true;
     }
-    await this.#speak(callFirstMessage(this.#options.firstName));
   }
 
   handlePatientTurn(text: string): Promise<void> {

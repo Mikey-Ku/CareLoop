@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ElevenLabsRealtimeStt, ElevenLabsTts, relayAudioToStt, softLimit } from "../src/calls/audio.ts";
+import { ElevenLabsRealtimeStt, ElevenLabsTts, isBargeIn, relayAudioToStt, softLimit } from "../src/calls/audio.ts";
 
 class FakeWebSocket {
   static latest: FakeWebSocket | undefined;
@@ -167,5 +167,12 @@ describe("voice gain (soft limiter)", () => {
     const boosted = await speakWith(1.6);
     expect(boosted[0]).toBeGreaterThan(1600);
     expect(boosted[1]).toBe(-boosted[0]!);
+  });
+});
+
+describe("her talking over the assistant", () => {
+  it("needs two real words: a cough, noise, a lone hello or punctuation does not count", () => {
+    for (const noise of ["", "   ", "hello", "Hello?", "yes.", "(coughs)", "[noise]", "(coughs) hello", "[laughter] yes", "(laughs softly", "...", "- -"]) expect(isBargeIn(noise), noise).toBe(false);
+    for (const speech of ["wait a moment", "no thanks", "Hello, can you hear me", "(coughs) wait a moment", "[noise] yes please", "ok then", "I do not"]) expect(isBargeIn(speech), speech).toBe(true);
   });
 });

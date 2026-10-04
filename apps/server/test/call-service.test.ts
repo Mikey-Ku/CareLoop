@@ -71,12 +71,14 @@ class FakeBridge {
 
 class FakeStt {
   committed: ((text: string) => void | Promise<void>) | undefined;
+  partial: ((text: string) => void | Promise<void>) | undefined;
   readonly connect = vi.fn(async () => {});
   readonly send = vi.fn();
   readonly close = vi.fn();
   onCommitted(handler: (text: string) => void | Promise<void>): this { this.committed = handler; return this; }
-  onPartial(): this { return this; }
+  onPartial(handler: (text: string) => void | Promise<void>): this { this.partial = handler; return this; }
   emit(text: string): void { void this.committed?.(text); }
+  emitPartial(text: string): void { void this.partial?.(text); }
 }
 
 class FakeTts {
@@ -211,6 +213,61 @@ const modelPlan = (overrides: Partial<CallTurnLlmOutput> = {}): CallTurnLlmOutpu
   evidence: [],
   uncertainty: [],
   ...overrides,
+});
+
+describe("her talking over the assistant", () => {
+  /** The next thing the assistant says takes a few seconds to play, as real speech does. */
+  const playsForAWhile = () => {
+    let end!: () => void;
+    tts.speak.mockImplementationOnce(async (text) => {
+      tts.spoken.push(text);
+      tts.isSpeaking = true;
+      await new Promise<void>((resolve) => { end = resolve; });
+      tts.isSpeaking = false;
+    });
+    return () => end();
+  };
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  it("cannot cut off the greeting; after it a cough or one word does not either, two real words do", async () => {
+    const service = setup();
+    const endGreeting = playsForAWhile();
+    await service.handle(created(relayCall("harriet")));
+    await vi.waitFor(() => expect(tts.spoken).toHaveLength(1));
+    stt.emitPartial("Hello, can you hear me");
+    expect(tts.cancel).not.toHaveBeenCalled(); // the AI disclosure plays to the end
+    endGreeting();
+    await settle();
+    tts.isSpeaking = true; // the assistant is speaking again
+    for (const partial of ["(coughs)", "Hello?", "(coughs) hello", "[noise]", ""]) stt.emitPartial(partial);
+    expect(tts.cancel).not.toHaveBeenCalled();
+    stt.emitPartial("wait a moment");
+    expect(tts.cancel).toHaveBeenCalledOnce();
+    await service.end("call-1");
+  });
+
+  it("does nothing while the assistant is silent", async () => {
+    const service = setup();
+    await start(service);
+    await settle();
+    stt.emitPartial("wait a moment please");
+    expect(tts.cancel).not.toHaveBeenCalled();
+    await service.end("call-1");
+  });
+
+  it("cannot cut off a fixed safety reply either", async () => {
+    const service = setup();
+    await start(service);
+    await settle();
+    const endReply = playsForAWhile();
+    stt.emit("I have chest pain right now");
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(urgentReply("Harriet", [])));
+    tts.cancel.mockClear(); // the service itself stops what was playing before the reply
+    stt.emitPartial("yes it hurts a lot and my arm too");
+    expect(tts.cancel).not.toHaveBeenCalled();
+    endReply();
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+  });
 });
 
 describe("her audio goes to the transcriber", () => {

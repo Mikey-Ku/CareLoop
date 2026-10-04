@@ -60,6 +60,16 @@ function floatToPcm16(values: Float32Array): Int16Array {
   return output;
 }
 
+/**
+ * Whether a partial transcript is her really talking over the assistant: at least two words once sound tags
+ * such as "(coughs)" or "[noise]" are taken out (an unfinished tag counts as a tag). A cough, a breath, noise
+ * or a lone "hello?" must not cut the assistant off mid-word.
+ */
+export function isBargeIn(partial: string): boolean {
+  const words = partial.replace(/[([][^)\]]*(?:[)\]]|$)/g, " ").split(/\s+/).filter((word) => /[\p{L}\p{N}]/u.test(word));
+  return words.length >= 2;
+}
+
 export type RealtimeSttOptions = {
   apiKey: string;
   modelId?: string;
