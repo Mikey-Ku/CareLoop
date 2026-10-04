@@ -86,7 +86,7 @@ All commands run in `apps/server`.
 | `npm run relay:check` | Checks your Relay setup: token, no webhook subscriptions, who has messaged the agent. |
 | `npm run agent` | Runs the Relay agent (WebSocket, daily scheduler, free text through Gemini). `--checkin-now` sends today's check-in right away. |
 | `npm run llm:check` | One live call of each Gemini job, with timings. |
-| `npm run content:eval` | Runs 119 realistic messages through the safety screen and Gemini; writes `docs/content-eval.md`. |
+| `npm run content:eval` | Runs 145 realistic messages (history questions and answers that need the context digest included) through the safety screen and Gemini; writes `docs/content-eval.md`. |
 
 ### Simulator
 

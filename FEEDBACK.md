@@ -16,6 +16,8 @@ Open:
 
 - [ ] Safety phrase lists (`apps/server/src/safety/screen.ts`, crisis and urgent symptom): a demo starting point. Someone review them against `docs/content-eval.md` before the demo.
 
+- [ ] Family words are now stored (`family_messages.text`, migration 14, capped at 500 characters) so Harriet can ask "what did Sarah say?" and the context digest can quote them to Gemini as reference facts. Until 2026-10-04 only who and when were kept, and DESIGN.md said their words are never read by a model. Keep it, or drop the column and answer only "Sarah sent you a message on Sep 1"? Their words reach the digest as quoted strings with instruction-like text left out; real use needs their consent as well as hers.
+
 - [ ] Red-flag cadence numbers: `redFlagEveryDays = 2` and `followUpDays = 3` in `apps/server/src/context/questions.ts`. Product values, not clinical cutoffs; change them if they feel wrong in rehearsal.
 
 ## Presage video spike (2026-10-03)
