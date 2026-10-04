@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { extname, isAbsolute, join, resolve } from "node:path";
 import { createCheckinEngine } from "../checkin/engine.ts";
 import type { CheckinEngine, Clock, EngineDeps } from "../checkin/engine-types.ts";
 import { SHARING_BUTTONS, SHARING_MENU_BUTTON } from "../checkin/copy.ts";
 import { loadConfig, normalizeHandle, resolveCheckinDate, type Config } from "../config.ts";
+import { addDays } from "../days.ts";
 import { familyChats, linkFamilyMember, syncFamilyMembers, type FamilyChat } from "../db/family.ts";
 import { nextFollowUp } from "../db/follow-ups.ts";
+import { nextNudge } from "../db/meds.ts";
 import { getSharing, openDatabase, upsertPatient, type Db, type SharingLevel } from "../db/index.ts";
 import { latestPaperScan, type PaperScanRow } from "../db/paper-scans.ts";
 import { ConsentInactiveError, FinchNodeClient } from "../finchnode/client.ts";
@@ -19,6 +21,7 @@ import {
   type Amount,
   type Change,
   type CheckinExtraction,
+  type ImageReading,
   type LlmClient,
   type MessageClassification,
   type MessageKind,
@@ -29,7 +32,11 @@ import { patientIdFor } from "../patient-id.ts";
 import { FakeMessenger } from "../relay/fake-messenger.ts";
 import type { InboundMessage, SentMessage } from "../relay/messenger.ts";
 import type { ExtractedPaper } from "../rules/paper-diff.ts";
-import { HELP_LINES, clockTime, painter, renderMessage, renderTable, type Painter, type Style } from "./sim-render.ts";
+import { EXAMPLE_CONTACTS_PATH, parseCareContacts } from "../care/contacts.ts";
+import { startCareRuntime } from "../care/runtime.ts";
+import { GeminiCareWriter } from "../care/writer.ts";
+import { FakeCareMessenger, type FakeCareText } from "../photon/fake-care-messenger.ts";
+import { CARE_HELP_LINES, HELP_LINES, clockTime, painter, renderMessage, renderTable, type Painter, type Style } from "./sim-render.ts";
 
 // Terminal simulator of the daily check-in (npm run simulate). Drives the real
 // check-in engine with a FakeMessenger, a simulated clock and recorded FinchNode
@@ -51,7 +58,12 @@ import { HELP_LINES, clockTime, painter, renderMessage, renderTable, type Painte
 // greeting, or what she types while a question waits).
 //
 // Follow-ups: after a red flag or a safety hit the engine schedules a follow-up check-in
-// some hours later; /later jumps the clock to it and runs the follow-up job.
+// some hours later; /later jumps the clock to it (or to a medicines re-reminder) and runs the job.
+//
+// Medication helper: /meds sends the morning medicines reminder now, /evening the evening one (the
+// clock moves to 20:00), /refills runs the refill check, /photo <file> sends a photo as hers. Offline,
+// `/photo <file> --as label:<name>,<strength>,<instructions>` (or `--as papers`, `--as unreadable`,
+// `--as other`) stands in for the LLM's reading of it, so the demo runs the same way every time.
 
 export const DEFAULT_SUBJECT = "patient-demo-polypharmacy";
 export const DEFAULT_DB_PATH = join(REPO_ROOT, "data", "simulator.db");
@@ -70,11 +82,6 @@ export function isDay(value: string): boolean {
 
 export function isSharingLevel(value: string): value is SharingLevel {
   return (SHARING_LEVELS as readonly string[]).includes(value);
-}
-
-/** The day after a YYYY-MM-DD date. */
-export function nextDay(day: string): string {
-  return new Date(Date.parse(day) + 86_400_000).toISOString().slice(0, 10);
 }
 
 /** Pinned to a check-in date at 09:00 local time; moves a minute per input. */
@@ -134,6 +141,8 @@ export type SimulatorOptions = {
   /** Family members' handles, each with their own pre-linked family chat. Defaults to DEFAULT_FAMILY; [] for none. */
   family?: readonly string[];
   output: (line: string) => void;
+  /** Text the care summaries over (fake) Photon on their own when a day ends, as the agent does. /summary works either way. */
+  photon?: boolean;
   color?: boolean;
   config?: Config;
   /** Injected snapshot reader (tests); defaults to fixtures or the live API. */
@@ -152,6 +161,8 @@ export type Simulator = {
   readonly db: Db;
   /** Each linked family member's chat, in --family order. */
   readonly family: readonly FamilyChat[];
+  /** Care summaries and replies texted over (fake) Photon to the example doctor and emergency contact. */
+  readonly photon: FakeCareMessenger;
   /** Banner and the day's startDay. */
   start(): Promise<void>;
   /** One line typed as Harriet: a button number, free text or a /command. */
@@ -218,6 +229,31 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
       if (event.kind === "set") note(`${chatLabel(event.chatId)} shows "${event.label}".`);
     },
   });
+  // Care summaries over Photon, faked: the example contacts. With --llm the texts are worded by the
+  // LLM (src/care/writer.ts) inside their fixed parts; without it, the fixed templates.
+  const careContacts = parseCareContacts(readFileSync(EXAMPLE_CONTACTS_PATH, "utf8"), EXAMPLE_CONTACTS_PATH);
+  const photonLabel = (phone: string) =>
+    phone === careContacts.doctor.phone
+      ? `${careContacts.doctor.name}'s phone (Photon, doctor)`
+      : `${careContacts.emergencyContact.name}'s phone (Photon, emergency contact)`;
+  const photon = new FakeCareMessenger({
+    onSend: (t: FakeCareText) => {
+      out("");
+      out(paint(`--- ${photonLabel(t.phone)}, ${clockTime(clock.now())} ---`, "bold", "yellow"));
+      for (const line of t.text.split("\n")) out(line);
+    },
+  });
+  const care = startCareRuntime({
+    db,
+    patientId,
+    contacts: careContacts,
+    clock,
+    messenger: photon,
+    ...(options.llm ? { writer: new GeminiCareWriter(options.llm) } : {}),
+    log: (line) => note(line.replace(/^\[care\] /, "Photon: ")),
+  });
+  let photonCount = 0;
+  const autoPhoton = options.photon ?? false;
   // `/as <kind>` readings wait here; while one does, it stands in for the LLM (small talk still
   // goes to the real LLM if there is one).
   // `/as extract` readings for the understanding pass wait in `extractions` the same way. While only an
@@ -226,6 +262,7 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
   // the kind alone is used, as before.
   const scripted: MessageClassification[] = [];
   const extractions: CheckinExtraction[] = [];
+  const images: ImageReading[] = [];
   const scriptLlm: LlmClient = {
     provider: "script",
     classifyMessage: async () => {
@@ -240,6 +277,12 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     },
     smallTalk: (input, o) => (options.llm ? options.llm.smallTalk(input, o) : Promise.reject(new LlmUnavailableError("sim: no LLM"))),
     mapAnswer: (input, o) => (options.llm ? options.llm.mapAnswer(input, o) : Promise.reject(new LlmUnavailableError("sim: no LLM"))),
+    readImage: async (input, o) => {
+      const next = images.shift();
+      if (next) return next;
+      return options.llm ? options.llm.readImage(input, o) : Promise.reject(new LlmUnavailableError("sim: no /photo --as reading left"));
+    },
+    writeCareMessage: (input, o) => (options.llm ? options.llm.writeCareMessage(input, o) : Promise.reject(new LlmUnavailableError("sim: no LLM"))),
   };
   const deps: EngineDeps = {
     db,
@@ -248,15 +291,22 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     loadSnapshot,
     // Read by the engine on each message.
     get llm() {
-      return scripted.length > 0 || extractions.length > 0 ? scriptLlm : options.llm;
+      return scripted.length > 0 || extractions.length > 0 || images.length > 0 ? scriptLlm : options.llm;
     },
   };
-  const engine: CheckinEngine = createCheckinEngine(deps, { missedCheckinTime: config.missedCheckinTime, rxnav });
+  const engine: CheckinEngine = createCheckinEngine(deps, {
+    missedCheckinTime: config.missedCheckinTime,
+    rxnav,
+    medsNudgeMinutes: config.meds.nudgeMinutes,
+    refillRemindDays: config.meds.refillRemindDays,
+    ...(autoPhoton ? { onDayFinished: care.onDayFinished } : {}),
+  });
 
   // The engine dedupes inbound messages by id across the DB, so ids must be unique per run.
   const runId = randomUUID().slice(0, 8);
   let inboundCount = 0;
   let paperCount = 0;
+  let photoCount = 0;
 
   const latestInSeniorChat = (): SentMessage | undefined => messenger.lastIn(seniorChat);
   const latestWithButtons = (): SentMessage | undefined => {
@@ -336,16 +386,90 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     return "ok";
   }
 
-  /** /later: jump the clock to the next follow-up check-in and run the follow-up job. */
+  /** /later: jump the clock to the next follow-up check-in or medicines re-reminder and run their jobs. */
   async function laterCommand(): Promise<InputResult> {
-    const next = nextFollowUp(db, patientId);
-    if (!next) {
-      note("No follow-up check-in is waiting.");
+    const due = [nextFollowUp(db, patientId)?.dueAt, nextNudge(db, patientId)?.nudgeDueAt].filter((d): d is string => typeof d === "string").sort();
+    if (due.length === 0) {
+      note("No follow-up check-in or medicines re-reminder is waiting.");
       return "ok";
     }
-    clock.jumpTo(next.dueAt);
+    clock.jumpTo(due[0]!);
     const sent = await engine.runDueFollowUps(clock.now());
-    note(`Later, ${clockTime(clock.now())}: ${sent} follow-up check-in${sent === 1 ? "" : "s"} sent.`);
+    const nudged = await engine.runMedsNudges(clock.now());
+    const parts = [`${sent} follow-up check-in${sent === 1 ? "" : "s"}`, ...(nudged > 0 ? [`${nudged} medicines re-reminder${nudged === 1 ? "" : "s"}`] : [])];
+    note(`Later, ${clockTime(clock.now())}: ${parts.join(" and ")} sent.`);
+    return "ok";
+  }
+
+  /** /meds and /evening: the medicines reminder now (the evening one moves the clock to MEDS_EVENING_TIME). */
+  async function medsCommand(slot: "morning" | "evening"): Promise<InputResult> {
+    if (slot === "evening") {
+      const [hour, minute] = config.meds.eveningTime.split(":").map(Number);
+      clock.setTime(hour ?? 20, minute ?? 0);
+    }
+    const result = await engine.sendMedsReminder(patientId, day, slot);
+    const said: Record<typeof result, string> = {
+      sent: `${slot} medicines reminder sent.`,
+      already_sent: `the ${slot} medicines reminder for ${day} already went out in this database.`,
+      nothing_to_send: `no medicines are scheduled for the ${slot}, so no reminder.`,
+      no_record: "record consent has ended, so there is no medication list to remind from.",
+    };
+    note(`Medicines, ${clockTime(clock.now())}: ${said[result]}`, result === "sent" ? "dim" : "yellow");
+    return "ok";
+  }
+
+  /** /refills: the morning refill check now. */
+  async function refillsCommand(): Promise<InputResult> {
+    const sent = await engine.runRefillCheck(patientId, day);
+    note(sent > 0 ? `Refill check for ${day}: ${sent} reminder${sent === 1 ? "" : "s"} sent.` : `Refill check for ${day}: no fill runs out within ${config.meds.refillRemindDays} days.`);
+    return "ok";
+  }
+
+  /**
+   * /photo <file> [--as label:<name>,<strength>,<instructions> | papers | unreadable | other]: a photo sent
+   * as hers. With --as the reading is a stand-in for the LLM (the file may then be missing); without it
+   * the real LLM reads it (--llm), else she gets the "can't read photos yet" reply.
+   */
+  async function photoCommand(args: string[]): Promise<InputResult> {
+    const usage = () => {
+      note("usage: /photo <file.png> [--as label:<name>,<strength>,<instructions> | papers | unreadable | other]", "red");
+      return "error" as const;
+    };
+    const asAt = args.indexOf("--as");
+    const fileArg = (asAt < 0 ? args : args.slice(0, asAt)).join(" ").trim();
+    const spec = asAt < 0 ? undefined : args.slice(asAt + 1).join(" ").trim();
+    if (!fileArg) return usage();
+    let reading: ImageReading | undefined;
+    if (spec !== undefined) {
+      if (spec === "papers") {
+        const paper = JSON.parse(readFileSync(PAPER_FIXTURE, "utf8")) as ExtractedPaper;
+        reading = { kind: "discharge_papers", paper: { organization: paper.organization, date: paper.date, medications: paper.medications } };
+      } else if (spec === "unreadable") reading = { kind: "unreadable", reason: "sim stand-in" };
+      else if (spec === "other") reading = { kind: "other", description: "sim stand-in" };
+      else if (spec.startsWith("label:")) {
+        const [medicineName = "", strength = "", ...rest] = spec.slice("label:".length).split(",").map((x) => x.trim());
+        if (!medicineName) return usage();
+        const instructions = rest.join(", ").trim();
+        reading = {
+          kind: "medicine_label",
+          label: { medicineName, ...(strength ? { strength } : {}), ...(instructions ? { instructions } : {}), confidence: "high" },
+        };
+      } else return usage();
+    }
+    const path = [isAbsolute(fileArg) ? fileArg : resolve(fileArg), join(REPO_ROOT, fileArg)].find((p) => existsSync(p));
+    if (!path && !reading) {
+      note(`no such file: ${fileArg}`, "red");
+      return "error";
+    }
+    const image = path ? new Uint8Array(readFileSync(path)) : new Uint8Array();
+    const mimeType = MIME_TYPES[extname(fileArg).toLowerCase()] ?? "image/jpeg";
+    if (reading) images.push(reading);
+    photoCount += 1;
+    clock.tick();
+    out(paint(`   (sends a photo: ${fileArg})`, "green"));
+    const outcome = await engine.handlePhoto(patientId, image, mimeType, `sim-${runId}-photo-${photoCount}`);
+    images.length = 0; // an unused stand-in never reads a later photo
+    note(`Photo ${photoCount}: ${outcome}${reading ? " (read by the --as stand-in)" : ""}.`);
     return "ok";
   }
 
@@ -404,6 +528,7 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     switch (name) {
       case "/help":
         for (const l of HELP_LINES) out(l);
+        for (const l of CARE_HELP_LINES) out(l);
         return "ok";
       case "/quit":
       case "/exit":
@@ -413,10 +538,33 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
         clock.setTime(hour ?? 12, minute ?? 0);
         const result = await engine.runMissedCheckin(patientId, day);
         note(result === "marked_missed" ? `Noon: the ${day} check-in was missed; family told.` : `Noon: nothing to do for ${day}.`);
+        if ((await engine.runMedsMissed(patientId, day)) === "marked_missed") note(`Noon: the ${day} morning medicines reminder was not confirmed (family status at "all" only).`);
+        if (autoPhoton) await care.afterMissedCheckin(day);
         return "ok";
       }
+      case "/summary": {
+        const result = await care.service.sendSummaries(day);
+        note(`Care summary ${result.summaryId} for ${day}: doctor ${result.doctor}, emergency contact ${result.family}.`);
+        return "ok";
+      }
+      case "/doctor":
+      case "/family": {
+        const text = line.trim().slice(name.length).trim();
+        if (!text) {
+          note(`usage: ${name} <text they text back>`, "red");
+          return "error";
+        }
+        const from = name === "/doctor" ? careContacts.doctor : careContacts.emergencyContact;
+        clock.tick();
+        photonCount += 1;
+        out("");
+        out(paint(`${from.name}> ${text}`, "bold", "yellow"));
+        const result = await care.service.handleInbound({ messageId: `sim-${runId}-photon-${photonCount}`, fromPhone: from.phone, text, at: clock.now() });
+        if (result === "duplicate") note("Photon: already handled that text.");
+        return result === "failed" ? "error" : "ok";
+      }
       case "/next":
-        return goToDay(nextDay(day));
+        return goToDay(addDays(day, 1));
       case "/day": {
         const target = args[0];
         if (!target || !isDay(target)) {
@@ -452,6 +600,14 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
         return "ok";
       case "/later":
         return laterCommand();
+      case "/meds":
+        return medsCommand("morning");
+      case "/evening":
+        return medsCommand("evening");
+      case "/refills":
+        return refillsCommand();
+      case "/photo":
+        return photoCommand(args);
       case "/as":
         return asCommand(args);
       case "/db":
@@ -507,6 +663,7 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     messenger,
     db,
     family,
+    photon,
     async start() {
       const sharing = getSharing(db, patientId) ?? "status";
       out(paint(`Check-in simulator: ${seniorName} (${subject}), patient id ${patientId}, sharing ${sharing}`, "bold"));
@@ -525,10 +682,21 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     },
     handle,
     close() {
+      void care.stop();
       db.close();
     },
   };
 }
+
+/** A photo's type from its file extension, as Relay would report it. */
+const MIME_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".heic": "image/heic",
+  ".heif": "image/heif",
+};
 
 /** "sarah" -> "Sarah": the name a family pane is labelled with. */
 export function displayName(handle: string): string {

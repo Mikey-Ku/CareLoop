@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  MAX_BUTTONS,
+  MAX_QUESTION_BUTTONS,
   MAX_QUESTIONS_PER_DAY,
   QUESTION_BANK,
   QUESTION_CADENCE,
@@ -50,11 +50,11 @@ function run(
 }
 
 describe("question bank", () => {
-  it("has Relay-safe buttons and no em dashes, at most MAX_BUTTONS (4) so one more fits", () => {
-    expect(MAX_BUTTONS).toBe(4);
+  it("has Relay-safe buttons and no em dashes, at most MAX_QUESTION_BUTTONS (4) so one more fits", () => {
+    expect(MAX_QUESTION_BUTTONS).toBe(4);
     for (const q of QUESTION_BANK) {
       expect(q.buttons.length).toBeGreaterThanOrEqual(1);
-      expect(q.buttons.length).toBeLessThanOrEqual(MAX_BUTTONS);
+      expect(q.buttons.length).toBeLessThanOrEqual(MAX_QUESTION_BUTTONS);
       for (const b of q.buttons) expect(b.length).toBeLessThanOrEqual(80);
       for (const answer of q.redFlagAnswers) expect(q.buttons).toContain(answer);
       expect(`${q.text} ${q.buttons.join(" ")}`).not.toMatch(/\u2014/);

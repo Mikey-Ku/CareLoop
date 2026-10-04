@@ -27,6 +27,11 @@ import {
   familyRelayWaiting,
   familyUrgentAlert,
   familyWelcome,
+  familySays,
+  familyPassedOn,
+  familyCantPassOn,
+  familyEmergencyAbout,
+  familyCrisisAbout,
   feelingLowReply,
   flagDetail,
   flagNotedReply,
@@ -71,6 +76,7 @@ import { MAX_ACTIVITY_LABEL, assertValidActivityLabel } from "../src/relay/messe
 import { loadRxNavCache, loadSnapshot } from "../src/finchnode/fixtures.ts";
 import { normalizeHealthRecord } from "../src/finchnode/normalize.ts";
 import { runRules } from "../src/rules/index.ts";
+import { MEDS_COPY_FUNCTIONS, medsOutputs } from "./meds-samples.ts";
 
 const NAME = "Harriet";
 const LEVELS: SharingLevel[] = ["status", "status_vitals", "all"];
@@ -123,6 +129,8 @@ function allOutputs(): string[] {
   }
   for (const topic of TOPICS) out.push(followUpReply(NAME, "better", topic), followUpReply(NAME, "same", topic));
   out.push(familyWelcome(NAME));
+  out.push(familySays("Sarah", "Love you mom, see you Sunday"), familySays("Sarah", 'she said "hi" \u2014 then left'));
+  out.push(familyPassedOn(NAME), familyCantPassOn(NAME), familyEmergencyAbout(NAME), familyCrisisAbout(NAME));
   out.push(flagDetail(FLAG_MESSAGE), ...ruleFlagMessages.map(flagDetail));
   out.push(didntUnderstand([BUTTON.start, BUTTON.notToday]), didntUnderstand(["Yes"]));
   out.push(explainPrompt(NAME), openReplyUnavailable(NAME));
@@ -130,6 +138,7 @@ function allOutputs(): string[] {
   out.push(sharingMenu());
   out.push(complaintReply(NAME), smallTalkFallback(NAME));
   out.push(...levelZeroToTwoOutputs());
+  out.push(...medsOutputs());
   for (const words of HER_WORDS) for (const q of QUESTION_BANK) out.push(freeTextConfirm(words, q.text));
   out.push(copy.PAPER_REJECTED_REPLY, copy.PAPER_LATER_REPLY, copy.PAPER_NOTHING_TO_COMPARE, copy.PAPER_NO_RECORD_REPLY);
   for (const level of LEVELS) {
@@ -222,6 +231,8 @@ describe("copy: style rules across every output", () => {
       "recordLinkEndedFamily", "recordLinkEndedSenior", "redFlagAdvice", "sharingChangedFamily", "sharingChangedSenior", "sharingLevelFromButton",
       "sharingMenu", "smallTalkFallback", "sorryNotGreat", "symptomNotedReply", "topicWords", "typedReplyUnavailable", "urgentReply", "withLead",
       "withTypingHint", "answerPhrase", "suggestedConfirm", "understoodLine",
+      "familySays", "familyPassedOn", "familyCantPassOn", "familyEmergencyAbout", "familyCrisisAbout",
+      ...MEDS_COPY_FUNCTIONS,
     ].sort();
     expect(fns).toEqual(sampled);
   });

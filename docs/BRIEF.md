@@ -26,7 +26,7 @@ Older adults with several conditions face two problems at once: medicines and re
 | --- | --- | --- |
 | Harriet (senior) | A daily check-in by text or by video call, help with her medicines, heart rate as a wellness estimate, messages from family | Relay chat and Relay calls |
 | Sarah (daughter, caregiver) | Daily status, alerts when something needs attention, limited to what Harriet allows | Her own Relay chat with the agent (Relay chats hold at most one person, so there is no shared group) |
-| Doctor | A weekly summary: symptoms by severity, her words, vitals, medicine questions, flags with sources | A one-page printable report and a link |
+| Doctor | A weekly summary: symptoms by severity, her words, vitals, medicine questions, flags with sources | A printable report (page 1 stands alone, labs and medicines on page 2) and a link |
 
 Demo patient: Harriet Lindqvist, FinchNode synthetic scenario `polypharmacy-senior` (patient id `patient-demo-polypharmacy`): 78, CKD stage 3, atrial fibrillation, heart failure, type 2 diabetes, 14 medicines.
 
@@ -43,8 +43,8 @@ Everything we build serves one of these. `docs/TEAM_PLAN.md` says who builds whi
 ### Defaults for the open questions (change them in FEEDBACK.md if you disagree)
 
 - **Dosing:** the agent reads back what her prescription or label says ("Your metformin label says: take 1 tablet with your evening meal"). It never tells her to change, skip, double or stop a dose. If a photo and her record disagree: "These don't match. Please check with your pharmacist before taking it."
-- **Refills:** guide, don't act. Detect running low from her fill dates, remind her, give her a ready-to-read refill request (medicine, strength, prescriber) and offer to tell her family. No automated calls or orders to pharmacies.
-- **Doctor delivery:** a one-page printable report and a shareable link. Optional: the same data as a FHIR bundle, to show it speaks the hospital's format.
+- **Refills:** guide, don't act. Detect running low from her fill dates, remind her, give her a ready-to-read refill request (medicine and strength) and offer to tell her family. No automated calls or orders to pharmacies.
+- **Doctor delivery:** a printable report (two pages; page 1 stands alone) and a shareable link. Optional: the same data as a FHIR bundle, to show it speaks the hospital's format.
 - **Family channel:** Relay family chats. SMS or iMessage only if time allows after everything else.
 
 ### Already built (2026-10-03)
@@ -69,7 +69,7 @@ Later, not MVP: smart pillbox, other languages, weekly family summary, voice mem
 - A video call that checks in by voice and reads her heart rate, recorded the same way as a text check-in.
 - A text check-in that takes one message on a good day and reacts in proportion (no alarm for small things).
 - A morning medication reminder that matches her record, and a photographed bottle recognised and checked against it.
-- A one-page doctor report built from a week of check-ins.
+- A doctor report built from a week of check-ins, page 1 readable on its own.
 - Family updates reaching a second phone.
 - Medication rules match the answer key; the paper check catches the planted change.
 

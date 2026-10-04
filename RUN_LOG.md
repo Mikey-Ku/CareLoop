@@ -167,3 +167,115 @@ Split by lanes in `docs/TEAM_PLAN.md`. Lane 1 (Relay live) first: token, two pho
 Retest on the phone with `FOLLOW_UP_DELAY_MINUTES=2`; add a second phone as family; then tick the remaining M1 boxes in `docs/DEFINITION_OF_DONE.md` and open the lane 1 PR.
 
 **Open questions:** `FEEDBACK.md` (phrase list review, held-out eval, demo-day LLM backup).
+
+## Run 2d: 2026-10-03 (branch photon/care-summaries)
+
+**Goal of this run:** After the check-in (and, once lanes 2 and 3 land, the call), text a data summary to her doctor and a plain-language one to her emergency contact over Photon, and answer their replies in the right tone.
+
+**What was built:**
+- **Contacts:** `care-contacts.json` (copy of `care-contacts.example.json`, gitignored). It holds the doctor's and the emergency contact's names and numbers, normalized to E.164. It's validated without echoing values, and the example 555-01xx numbers leave the step off.
+- **Facts and wording:**
+  - `src/care/facts.ts` builds the day's `CareFacts` from the database.
+  - `src/care/copy.ts` writes `doctorSummary` (data) and `familySummary` (plain words; only flags she has heard).
+  - `src/care/copy.ts` also holds the fixed replies. The urgent family reply says to contact the doctor first, because an automated assistant lacks the medical knowledge to act on symptoms. It ends with the 911 line.
+- **Service:** `src/care/service.ts` sends both summaries once per day. Each text is planned in `care_messages` before it's sent (migration 6 adds `care_summaries` and `care_messages`). A failure for one contact doesn't block the other.
+- **Replies:** inbound texts are routed by phone number and deduped. Rules come first (acknowledgment, urgent family text, dose question, doctor asking it to act). Otherwise Claude (`src/care/claude-writer.ts`) words an answer from the frozen facts. `guardReply` checks it, and template answers are the fallback.
+- **Transport:** `src/photon/` wraps the Spectrum SDK behind a small port, with a fake for tests and the simulator.
+- **Engine and agent:**
+  - The engine gets an optional `onDayFinished` hook. It is called after delivery, and its errors are swallowed.
+  - The agent connects care when the contacts file and the Photon credentials are present. The noon job calls `ensureDaySummary`.
+  - New `npm run care:send` CLI.
+- **Simulator:** `/summary`, `/doctor <text>`, `/family <text>` and `--photon`. New demo script `scripts/demo/harriet-care-summary.txt`.
+- 575 tests passing (was 525); lint clean.
+
+**What was skipped or changed from spec:**
+- Dependencies added, with approval: `@spectrum-ts/core`, `@spectrum-ts/imessage` and `@anthropic-ai/sdk`.
+  - A top-level npm override pins Spectrum's TypeScript peer to the repo's TS 7.
+  - The lockfile was generated with npm 10, because npm 11.5.1 drops the rolldown native bindings (npm/cli#4828).
+- In the simulator the automatic Photon send is opt-in (`--photon`), so existing simulator output is unchanged.
+- Not tested against a live Photon line (no credentials). `connectPhoton` typechecks against the real Spectrum types.
+
+**Files touched:**
+- New: `apps/server/src/care/*`, `src/photon/*`, `src/db/care.ts`, `src/cli/care-send.ts`, `test/care.test.ts`, `test/care-contacts.test.ts`, `care-contacts.example.json`, `scripts/demo/harriet-care-summary.txt`.
+- Additions only: `src/checkin/engine.ts` (hook), `src/agent.ts` (wiring), `src/db/schema.ts` (migration 6), `src/cli/{simulator,simulate,sim-render}.ts`, `test/db.test.ts` (table list), `package.json`, `package-lock.json`, `.env.example`, `.gitignore`, `README.md`, `docs/DESIGN.md`, `FEEDBACK.md`.
+
+**Recommended next step:** Create the Photon project, fill in `care-contacts.json`, have both contacts text the line once, then `npm run care:send -- --dry-run` and `npm run agent -- --checkin-now`.
+
+**Open questions:** `FEEDBACK.md` (Photon setup).
+
+## Lane A (check-in and medicines): 2026-10-03, merge PR #6 and care summaries on Gemini
+
+**Goal of this run:** Merge Griz-Bit's care summaries over Photon (PR #6) with the medication helper, word them with Gemini (one LLM provider), and add the day's new data to them.
+
+**What was built:**
+- Merge: PR #6's migration is migration 11 (after the medication helper's 10). The engine's `onDayFinished` hook fires at the new finish points (finishCheckedIn, notToday, runMissedCheckin), after delivery, errors swallowed. Simulator keeps `--llm`, `/as` and the meds commands with `--photon`, `/summary`, `/doctor`, `/family`.
+- `LlmClient.writeCareMessage` (Gemini adapter, FakeLlmClient scripted). `src/care/writer.ts` (`GeminiCareWriter`) replaces `claude-writer.ts`; `@anthropic-ai/sdk` removed. Doctor: Gemini overview lines over the fixed data sections. Family: fixed greeting (AI disclosure), fixed urgent paragraph, Gemini body, fixed closing. Replies: Gemini from the facts, the summary as sent and the thread. `checkWritten` rejects dashes, dosing advice, diagnosis words, 911 and numbers not in the facts; any failure sends the template.
+- Care facts: severity ladder by topic, her notes, visit questions, medicine doses, label mismatches, refills, sharing level. Red flags also from the day's level-3+ observations (typed, "Worse" follow-ups, safety 4 and 5) and `concern_at`. Doctor template gets them as data lines.
+- PR #6 review fixes: the emergency contact's summary, template replies and Gemini's family view follow the sharing level like the family's Relay messages (no such "full summary whatever the level" decision existed); family texts follow the ladder (emergency: 911 now then her doctor; crisis: 988; a symptom: her doctor, no 911; read by the safety screen in first person); noon sends only a really missed day, under its own trigger, so a finished day always sends; the care hook is waited on for at most 10 s; no phone numbers go to the model; a care copy scan.
+
+**What was skipped or changed from spec:** In a live test Gemini writing the whole doctor summary left out a level-3 follow-up, so the doctor's data lines stay fixed and Gemini writes only the overview. Visit questions, label checks and refills are matched to the day by their UTC date.
+
+**Note:** anyone who ran the photon/care-summaries branch has a database with its tables as migration 6: delete `data/*.db` (the app and simulator databases) before running this branch.
+
+## Lane 3: Presage video spike: 2026-10-03 17:44
+
+**Goal of this run:** Add a file-based SmartSpectra spike and prepare the Relay video-frame seam.
+
+**What was built:**
+- Added the pinned `@smartspectra/node-sdk` 3.4.0 dependency and kept `PRESAGE_API_KEY` documented only as an environment variable.
+- Added `npm run vitals:video -- <video.mp4>`, which requests pulse and breathing metrics from `useFile()`, decodes the SDK messages, prints normalized JSON, and exits nonzero without both readings.
+- Added normalized vitals types, metric merging, confidence handling, validation events, SDK error handling and timeout handling.
+- Added the Relay frame adapter design with format mapping, stride preservation, monotonic timestamps and explicit rejection results.
+- Added offline tests for metric normalization, file-runner failures and Relay-frame handling.
+- Documented the spike result and current limitations in `FEEDBACK.md`.
+
+**What was skipped or changed from spec:**
+- No real video was committed. A human-provided 1620 x 1080, 56.45 second clip was smoke-tested with an authorized key. The corrected runner produced heart rate 71.44/min and breathing 11.88/min with no SDK errors; pulse confidence was 13.16, breathing confidence was 0, both stability flags were false, and validation briefly reported that the face was not forward.
+- The file runner now defaults to 33 ms interframe pacing, exposes `--interframe-delay-ms` and `--metrics pulse-breathing|all`, ignores SmartSpectra's initial idle status, waits for actual playback completion, coalesces repeated validation events, anchors relative file timestamps to the run start, and preserves per-metric confidence/stability without rejecting provisional zero-confidence readings. Native timestamp warnings remain an open quality issue for this Photo Booth file.
+- The Relay frame adapter is intentionally not wired into the live call handler because the call/vitals handler does not exist yet and the real `VideoStream` payload shape is unverified.
+- `.env.example` already contained the required empty `PRESAGE_API_KEY` entry, so it required no change.
+
+**Files touched:**
+- `apps/server/package.json`, `apps/server/package-lock.json`: SmartSpectra dependency and reproducible lockfile.
+- `apps/server/src/vitals/`: normalized result types, file runner, and Relay frame adapter.
+- `apps/server/src/cli/vitals-video.ts`: file-based spike CLI.
+- `apps/server/test/vitals-*.test.ts`, `apps/server/test/relay-frame-adapter.test.ts`: offline coverage.
+- `FEEDBACK.md`: spike result and limitations.
+
+**Commits:**
+- Pending: `build: lane3: add Presage video spike`.
+
+**Recommended next step:**
+Re-record a well-lit face-and-chest clip longer than 30 seconds, set `PRESAGE_API_KEY` in `.env`, then run `npm run vitals:video -- /absolute/path/to/face.mp4 --metrics all`. The corrected runner now reaches normal Presage processing; next connect the verified Relay `VideoStream` frame shape to `createRelayVideoFrameAdapter`.
+
+**Open questions:** Confirm the live Relay `VideoStream` pixel format and whether it supplies a usable source timestamp; if it supplies I420, add and test a conversion path before sending frames to SmartSpectra.
+## 2026-10-03, Relay video-call screening lane
+
+- Read `CLAUDE_CODE_BRIEF.md`, `docs/DESIGN.md`, `docs/TEAM_PLAN.md`, and this run log before changing code.
+- Inspected current Relay Calls, VideoStream, WebSocket, and ElevenLabs bridge declarations. The installed bridge uses `ElevenLabsCall.connect`, joins a call while it is ringing, and exposes the underlying `RelayCallTransport`; Relay `VideoStream` can provide RGBA frames and capture timestamps.
+- Added `@relaymessenger/elevenlabs@0.1.1`, pinned `@relaymessenger/sdk@0.5.1`, and added `node-webcodecs@1.3.0`.
+- Added durable call routing for `call.created`, `call.updated`, and `call.ended`; call events remain deduplicated by `event_id` and are acknowledged after SQLite insertion.
+- Added the `apps/server/src/calls/` lifecycle, interview, deterministic emergency precedence, quiet measurement, Gemini screening contract, ElevenLabs bridge, Relay VideoStream to Presage adapter, backend tool routes, cleanup, and diagnostics.
+- Added schema migration 9 for call metadata and bounded transcript turns. No raw audio or video columns are present.
+- Added `docs/CALLS.md` with setup, agent prompt, tool routes, phone test steps, SDK versions, and Presage limitations.
+- Verification: `pnpm lint` passed. The complete `pnpm test` suite passed with 40 files and 1,364 tests after allowing the existing app and agent tests to bind ephemeral loopback ports.
+
+## Lane A integration: 2026-10-04 (branch laneA/meds-and-care, combined PR)
+
+**Merged:** PR #6 (care summaries, on Gemini), PR #7 (video call), the medication helper, and three fix branches:
+- `laneA/fix-calls`: PR #7 review fixes. The call says it's an AI first; the rules (not Gemini) set the call's level through the same ladder as text; each spoken turn is screened; family alerts on level 3+; only pulse and breathing rate are requested from SmartSpectra, with no usual-range readback for AFib; readings saved to `vitals_readings`; wrong callers get a text and nothing else. Call shape about 3 minutes (`CALL_MAX_MINUTES`, default 4), yesterday's notes and memories as context, one post-call text ("Here's what I noted from our call") with "That's right" / "Something's wrong". `docs/CALLS.md` rewritten with the agent prompt, dashboard settings and tunnel setup.
+- `laneA/fix-text-meds`: typed text goes to the latest open prompt (the live "I have a question" bug); a medicine her discharge papers stopped keeps its reminder line, with "please check with your pharmacist" (R6); family messages reach her as `Sarah says: "..."` after the safety screen; care-summary items match by her local day. Migration 13 (`waiting_prompts`).
+- `laneA/doctor-report`: `npm run report` and `GET /report/:patientId`, a week as a clinical summary (Subjective, Objective, Medications, Items for clinician review; SNOMED CT, LOINC, RxNorm, UCUM; ISMP-safe medicine names). Two printed pages; page 1 stands alone (flags, symptoms, her questions), labs and medicines on page 2.
+
+**Integration fixes:** a video call counts as checking in (no "hasn't checked in" alert after a call with no answers); `npm run agent` serves the report and logs its link.
+
+**Cleanup:** removed the `/webhooks/relay` 501 placeholder (delivery is WebSocket, ADR 0002); `LLM_PROVIDER` is gemini only (the anthropic option had no adapter); Photon summaries marked optional in README and `.env.example`; DESIGN diagram and migration comments corrected; DoD scoreboard updated.
+
+**Migrations:** 10 medication helper, 11 care summaries, 12 call sessions, 13 waiting prompts. Anyone who ran `photon/care-summaries` or `lane3/presage-spike` has those tables under other numbers: delete `data/*.db` and `apps/server/data/*.db` once (synthetic data only).
+
+**Verification:** `tsc --noEmit` clean; full suite passes; all 13 `scripts/demo/*.txt` exit 0 with the flags in their headers. Not verified live: the call (needs the ElevenLabs agent and an HTTPS tunnel), label photos, a second phone as Sarah.
+
+**QA pass and library scout (same day, same branch):**
+- `docs/QA.md` added (every capability, 12 phone scripts, edge cases, feedback template). Fixed from that pass: the family's heart-rate line at "status_vitals"/"all" (never passed in before); plain wording on the R6 papers message; doc contradictions (tool secret required, no "Call me" button, two-page report, no prescriber on refills).
+- Library scout (`@relaymessenger/sdk` helpers, `Intl.ListFormat`, one module per duplicated helper, dead code removed; no new dependencies). One real bug fixed: ElevenLabs call events are read by their exact types (the bridge forwards the raw Agents WebSocket messages). Only a final `user_transcript` is stored as her turn and safety-screened; a correction rewrites the voice's last turn instead of adding one; tentative and partial events are ignored. Skipped as not worth it this close to the demo: `@google/genai`, Vercel AI SDK, XState, croner, Kysely/Drizzle. Worth doing next: RxNav brand-to-generic lookup, so a real "Eliquis" label matches "apixaban".
+- Verification: `tsc` clean, 1519 tests in 48 files, all 13 demo scripts exit 0.

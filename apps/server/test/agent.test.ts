@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentStartError,
   CHECKIN_JOB,
+  MEDS_EVENING_JOB,
+  MEDS_MORNING_JOB,
   MISSED_JOB,
+  REFILL_JOB,
   MISSING_HANDLE_MESSAGE,
   MISSING_TOKEN_MESSAGE,
   llmStatus,
@@ -135,7 +138,7 @@ describe("startAgent", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true });
 
-    expect(agent.scheduler.upcoming().map((u) => u.name)).toEqual([CHECKIN_JOB, MISSED_JOB]);
+    expect(agent.scheduler.upcoming().map((u) => u.name)).toEqual([CHECKIN_JOB, MISSED_JOB, MEDS_MORNING_JOB, MEDS_EVENING_JOB, REFILL_JOB]);
     expect(lines).toContain("[agent] Waiting for @harriet to send the agent a message in Relay");
     expect(lines.join("\n")).not.toContain(TOKEN);
   });
@@ -384,7 +387,17 @@ describe("follow-up job", () => {
     linkedBeforeStart(db);
     const agent = await start();
     await agent.engine.handleInbound({ chatId: "chat_harriet", messageId: "in_1", text: "I have chest pain", at: BEFORE_CHECKIN.toISOString() });
-    expect(nextFollowUp(db, "harriet")?.dueAt).toBe(new Date(BEFORE_CHECKIN.getTime() + 2 * 60_000).toISOString());
+    // With CLOCK_DATE the data clock starts at CHECKIN_TIME (09:00 EDT) on that day: due 2 minutes later.
+    expect(nextFollowUp(db, "harriet")?.dueAt).toBe("2026-09-01T13:02:00.000Z");
+  });
+
+  it("with CLOCK_DATE, what the agent records lands on that day, even in a late-night session", async () => {
+    const lateNight = new Date("2026-10-04T03:45:00Z"); // 23:45 on Oct 3 in Detroit
+    const { db, start } = setup({ deps: { now: () => lateNight, followUpDelayMinutes: 2 } });
+    linkedBeforeStart(db);
+    const agent = await start();
+    await agent.engine.handleInbound({ chatId: "chat_harriet", messageId: "in_1", text: "I have chest pain", at: lateNight.toISOString() });
+    expect(nextFollowUp(db, "harriet")?.dueAt).toBe("2026-09-01T13:02:00.000Z");
   });
 
   it("FOLLOW_UP_DELAY_MINUTES: unset or blank uses the default, a positive number is used, anything else is refused", async () => {

@@ -7,6 +7,7 @@ import {
   type HealthRecord,
   type ScenarioList,
 } from "./types.ts";
+import { retryAfterMs } from "../http.ts";
 
 export class FinchNodeError extends Error {
   readonly status: number;
@@ -49,16 +50,6 @@ export type FinchNodeClientOptions = {
 };
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-/** Retry-After is either delta-seconds or an HTTP date. */
-export function retryAfterMs(header: string | null, now = Date.now()): number | undefined {
-  // Number("  ") is 0, so a blank header would otherwise mean "retry now".
-  if (!header?.trim()) return undefined;
-  const seconds = Number(header);
-  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
-  const date = Date.parse(header);
-  return Number.isNaN(date) ? undefined : Math.max(0, date - now);
-}
 
 export class FinchNodeClient {
   readonly #baseUrl: string;

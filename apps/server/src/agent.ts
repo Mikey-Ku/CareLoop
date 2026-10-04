@@ -1,13 +1,18 @@
 import type { Server } from "node:http";
+import type Relay from "@relaymessenger/sdk";
 import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createApp } from "./app.ts";
+import { doctorReportRoute } from "./report/index.ts";
+import { loadCareConfig } from "./care/config.ts";
+import { connectCareRuntime, type CareRuntime } from "./care/runtime.ts";
 import { createCheckinEngine } from "./checkin/engine.ts";
 import type { CheckinEngine, Clock } from "./checkin/engine-types.ts";
 import { snapshotLoader } from "./cli/simulator.ts";
 import { ConfigError, loadConfig, type Config } from "./config.ts";
+import { errorSummary } from "./errors.ts";
 import { getCheckin, getCheckinPatient } from "./db/checkins.ts";
 import { familyMembers, syncFamilyMembers } from "./db/family.ts";
 import { openDatabase, upsertPatient, type Db } from "./db/index.ts";
@@ -21,6 +26,7 @@ import { assertNoWebhookSubscriptions, runRelayInbox } from "./relay/inbox.ts";
 import type { Messenger } from "./relay/messenger.ts";
 import { createRelayClient, type RelayClient, type RelayLog } from "./relay/relay-client.ts";
 import { RelayMessenger } from "./relay/relay-messenger.ts";
+import { CallService } from "./calls/service.ts";
 import { patientIdFor } from "./patient-id.ts";
 import { createDailyScheduler, localDate, zonedInstant, type CancelTimer, type DailyScheduler } from "./scheduler.ts";
 
@@ -42,9 +48,18 @@ import { createDailyScheduler, localDate, zonedInstant, type CancelTimer, type D
 // Follow-ups: every minute the agent sends follow-up check-ins that are due (after a red
 // flag or a safety hit, FOLLOW_UP_DELAY_MINUTES later, default 180) and passes on family
 // messages she left while no family chat was linked yet.
+//
+// Medication helper (src/meds): the morning reminder (MEDS_MORNING_TIME, default 08:00) and the
+// refill check run each morning, the evening reminder at MEDS_EVENING_TIME (20:00); the one
+// re-reminder after "Not yet" (MEDS_NUDGE_MINUTES) goes out from the every-minute job; the missed
+// check-in job also marks an unanswered morning reminder missed. Photos she sends are downloaded
+// by the inbox and read by the engine (handlePhoto).
 
 export const CHECKIN_JOB = "checkin";
 export const MISSED_JOB = "missed-checkin";
+export const MEDS_MORNING_JOB = "meds-morning";
+export const MEDS_EVENING_JOB = "meds-evening";
+export const REFILL_JOB = "refill-check";
 const LINK_POLL_MS = 3_000;
 /** How often the follow-up job runs. */
 export const FOLLOW_UP_POLL_MS = 60_000;
@@ -64,6 +79,8 @@ export type AgentDeps = {
   config: Config;
   db: Db;
   relay: RelayClient;
+  /** The concrete Relay SDK client used by the WebRTC call transport. */
+  callRelay?: Relay;
   /** Defaults to a RelayMessenger over `relay`. */
   messenger?: Messenger;
   /** Reads what she types instead of tapping (main passes createLlmClient(config)). Without it: buttons only. */
@@ -76,6 +93,8 @@ export type AgentDeps = {
    * with no check-in for today yet (late-start catch-up).
    */
   checkinNow?: boolean;
+  /** Send the morning medicines reminder and run the refill check as soon as she's linked (--meds-now), for demos. */
+  medsNow?: boolean;
   log?: (line: string) => void;
   /** Current time for the scheduler and stored rows. */
   now?: () => Date;
@@ -90,6 +109,11 @@ export type AgentDeps = {
   /** Port for /health; defaults to config.port. 0 picks a free one (tests). */
   port?: number;
   relayOps?: Partial<RelayOps>;
+  /**
+   * Care summaries over Photon (src/care/runtime.ts), built once the patient id is known.
+   * Undefined (or returning undefined) leaves them off.
+   */
+  care?: (ctx: { patientId: string; db: Db; clock: Clock; log: (line: string) => void; llm: LlmClient | undefined }) => Promise<CareRuntime | undefined>;
 };
 
 export type RunningAgent = {
@@ -122,6 +146,13 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
     });
   const ops: RelayOps = { assertNoWebhookSubscriptions, runRelayInbox, ...deps.relayOps };
   const { finchnodeSubject: subject, relayHandle, timezone } = config.patient;
+  // With CLOCK_DATE (demos), what the agent records lands on that day: its data clock starts at
+  // CHECKIN_TIME on CLOCK_DATE and runs forward in real time, so even a late-night session stays on
+  // the pinned day. Without it, the data clock is the real clock. Job times, the late start and
+  // Relay's call deadlines always use the real clock.
+  const startedAtMs = now().getTime();
+  const dataAnchorMs = config.clockDate ? zonedInstant(config.clockDate, config.checkinTime, timezone) : undefined;
+  const dataNow = dataAnchorMs === undefined ? now : () => new Date(dataAnchorMs + (now().getTime() - startedAtMs));
   if (!relayHandle) throw new AgentStartError(MISSING_HANDLE_MESSAGE);
   // Her own handle as a family member would send her the family's alerts about herself.
   const familyHandles = config.patient.familyHandles.filter((h) => h !== relayHandle);
@@ -130,8 +161,8 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
 
   log(
     `[agent] starting: subject ${subject}, senior @${relayHandle}, ${familyHandles.length} family handle(s), ` +
-      `check-in ${config.checkinTime} and missed check-in ${config.missedCheckinTime} ${timezone}` +
-      (config.clockDate ? `, demo check-in date pinned to ${config.clockDate}` : "") +
+      `check-in ${config.checkinTime} and missed check-in ${config.missedCheckinTime}, medicines ${config.meds.morningTime} and ${config.meds.eveningTime} ${timezone}` +
+      (config.clockDate ? `, demo check-in date pinned to ${config.clockDate} (records stamped from ${config.checkinTime} that day)` : "") +
       `, Relay ${config.relay.apiUrl}`,
   );
 
@@ -167,13 +198,41 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
 
   // 3. Engine over Relay, with free text when an LLM is configured.
   const relayLog: RelayLog = (event, fields) => log(`[relay] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`);
-  const clock: Clock = { now: () => now().toISOString() };
+  const clock: Clock = { now: () => dataNow().toISOString() };
   const messenger = deps.messenger ?? new RelayMessenger(relay, { log: relayLog });
   log(`[agent] ${llmStatus(config, deps.llm)}`);
+  // 3a. Care summaries to her doctor and emergency contact over Photon, when configured.
+  let care: CareRuntime | undefined;
+  try {
+    // The care texts are worded by the same LLM as the check-in (Gemini), templates as the fallback.
+    care = await deps.care?.({ patientId, db, clock, log, llm: deps.llm });
+  } catch (error) {
+    log(`[agent] care summaries over Photon are off: ${errorSummary(error)}`);
+  }
   const engine = createCheckinEngine(
     { db, messenger, clock, loadSnapshot: deps.loadSnapshot, llm: deps.llm },
-    { missedCheckinTime: config.missedCheckinTime, ...(deps.followUpDelayMinutes !== undefined ? { followUpDelayMinutes: deps.followUpDelayMinutes } : {}) },
+    {
+      missedCheckinTime: config.missedCheckinTime,
+      medsNudgeMinutes: config.meds.nudgeMinutes,
+      refillRemindDays: config.meds.refillRemindDays,
+      ...(deps.followUpDelayMinutes !== undefined ? { followUpDelayMinutes: deps.followUpDelayMinutes } : {}),
+      ...(care ? { onDayFinished: care.onDayFinished } : {}),
+    },
   );
+
+  const calls = deps.callRelay
+    ? new CallService({
+        db,
+        config,
+        relay: deps.callRelay,
+        loadSnapshot: deps.loadSnapshot,
+        engine,
+        today: () => config.clockDate ?? localDate(now(), timezone),
+        log: (event, fields) => log(`[calls] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`),
+        now: () => dataNow().toISOString(),
+        wallNow: () => now().toISOString(),
+      })
+    : undefined;
 
   // 4. WebSocket delivery needs zero webhook subscriptions.
   await ops.assertNoWebhookSubscriptions(relay);
@@ -182,7 +241,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
 
   // 5. Inbox: holds the socket until stop().
   const abort = new AbortController();
-  const inboxDone = ops.runRelayInbox({ relay, db, engine, patientHandle: relayHandle, signal: abort.signal, log: relayLog });
+  const inboxDone = ops.runRelayInbox({ relay, db, engine, patientHandle: relayHandle, signal: abort.signal, log: relayLog, ...(calls ? { callHandler: calls } : {}) });
   inboxDone.then(
     () => log("[agent] Relay inbox closed"),
     (error: unknown) => log(`[agent] Relay inbox stopped: ${errorSummary(error)}`),
@@ -216,6 +275,34 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
           if (!isLinked()) return;
           const result = await engine.runMissedCheckin(patientId, day);
           log(`[agent] missed check-in ${day}: ${result === "marked_missed" ? "marked missed, family told" : "nothing to do"}`);
+          const meds = await engine.runMedsMissed(patientId, day);
+          if (meds === "marked_missed") log(`[agent] morning medicines ${day}: not confirmed, marked missed`);
+          await care?.afterMissedCheckin(day);
+        },
+      },
+      {
+        name: MEDS_MORNING_JOB,
+        time: config.meds.morningTime,
+        run: async (day) => {
+          if (!isLinked()) return;
+          log(`[agent] morning medicines reminder ${day}: ${await engine.sendMedsReminder(patientId, day, "morning")}`);
+        },
+      },
+      {
+        name: MEDS_EVENING_JOB,
+        time: config.meds.eveningTime,
+        run: async (day) => {
+          if (!isLinked()) return;
+          log(`[agent] evening medicines reminder ${day}: ${await engine.sendMedsReminder(patientId, day, "evening")}`);
+        },
+      },
+      {
+        name: REFILL_JOB,
+        time: config.meds.morningTime,
+        run: async (day) => {
+          if (!isLinked()) return;
+          const sent = await engine.runRefillCheck(patientId, day);
+          log(`[agent] refill check ${day}: ${sent} reminder(s) sent`);
         },
       },
     ],
@@ -229,8 +316,10 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
     if (ticking) return;
     ticking = true;
     try {
-      const sent = await engine.runDueFollowUps(now().toISOString());
+      const sent = await engine.runDueFollowUps(dataNow().toISOString());
       if (sent > 0) log(`[agent] sent ${sent} follow-up check-in(s)`);
+      const nudged = await engine.runMedsNudges(dataNow().toISOString());
+      if (nudged > 0) log(`[agent] sent ${nudged} medicines re-reminder(s)`);
       const passed = await engine.passOnFamilyMessages(patientId);
       if (passed > 0) log(`[agent] passed on ${passed} message(s) she left for her family`);
     } catch (error) {
@@ -241,9 +330,26 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   }
 
   // 7. /health.
-  const server = await listen(createApp({ config }), deps.port ?? config.port);
+  const server = await listen(
+    createApp({
+      config,
+      doctorReport: doctorReportRoute(db),
+      ...(calls
+        ? {
+            calls: {
+              screen: (callId) => calls.screen(callId),
+              beginQuietMeasurement: (callId, permissionGranted) => calls.beginQuietMeasurement(callId, permissionGranted),
+              vitalsReadback: (callId) => calls.vitalsReadback(callId),
+              toolSecret: config.calls.elevenLabsToolSecret,
+            },
+          }
+        : {}),
+    }),
+    deps.port ?? config.port,
+  );
   const port = (server.address() as AddressInfo).port;
   log(`[agent] health check on http://localhost:${port}/health`);
+  log(`[agent] doctor report on http://localhost:${port}/report/<patient id> (her first name in lower case, e.g. /report/harriet)`);
   const followUpTimer = setInterval(() => void followUpTick(), deps.followUpPollMs ?? FOLLOW_UP_POLL_MS);
 
   // 8. Once she's linked: --checkin-now, else the late-start catch-up. The scheduler only
@@ -252,10 +358,15 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   let stopping = false;
   async function onLinked(): Promise<void> {
     log(`[agent] @${relayHandle} is linked to the agent`);
+    if (deps.medsNow) {
+      await scheduler.runNow(MEDS_MORNING_JOB);
+      await scheduler.runNow(REFILL_JOB);
+    }
     if (deps.checkinNow) {
       await scheduler.runNow(CHECKIN_JOB);
       return;
     }
+    if (deps.medsNow) return;
     const at = now();
     const localDay = localDate(at, timezone);
     const day = config.clockDate ?? localDay;
@@ -304,6 +415,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
         scheduler.stop();
         abort.abort();
         await inboxDone.catch(() => {});
+        await care?.stop();
         await closeServer(server);
         log("[agent] stopped");
       })();
@@ -374,21 +486,17 @@ export function parseFollowUpDelay(raw: string | undefined): number | undefined 
   return Number.isFinite(minutes) && minutes > 0 ? minutes : null;
 }
 
-function errorSummary(error: unknown): string {
-  if (error instanceof Error) return `${error.name}: ${error.message}`;
-  return "non-error thrown";
-}
-
 // ---- process entry point ----
 
-const USAGE = "usage: npm run agent [-- --checkin-now]";
+const USAGE = "usage: npm run agent [-- --checkin-now] [--meds-now]";
 
 export async function main(argv: string[] = process.argv.slice(2), env: Record<string, string | undefined> = process.env): Promise<number> {
   let checkinNow = false;
+  let medsNow = false;
   try {
     ({
-      values: { "checkin-now": checkinNow = false },
-    } = parseArgs({ args: argv, options: { "checkin-now": { type: "boolean" } }, strict: true }));
+      values: { "checkin-now": checkinNow = false, "meds-now": medsNow = false },
+    } = parseArgs({ args: argv, options: { "checkin-now": { type: "boolean" }, "meds-now": { type: "boolean" } }, strict: true }));
   } catch (error) {
     console.error(`error: ${errorSummary(error)}\n${USAGE}`);
     return 2;
@@ -419,16 +527,20 @@ export async function main(argv: string[] = process.argv.slice(2), env: Record<s
   }
 
   const db = openDatabase(config.databasePath);
+  const relay = createRelayClient({ agentToken: token, apiUrl: config.relay.apiUrl });
   let agent: RunningAgent;
   try {
     agent = await startAgent({
       config,
       db,
-      relay: createRelayClient({ agentToken: token, apiUrl: config.relay.apiUrl }),
+      relay,
+      callRelay: relay as unknown as Relay,
       loadSnapshot: snapshotLoader(config, true),
       llm: createLlmClient(config),
       checkinNow,
+      medsNow,
       ...(followUpDelayMinutes !== undefined ? { followUpDelayMinutes } : {}),
+      care: (ctx) => connectCareRuntime({ config: loadCareConfig(env), ...ctx }),
     });
   } catch (error) {
     console.error(`[agent] could not start: ${errorSummary(error)}`);

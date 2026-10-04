@@ -1,0 +1,113 @@
+# A week of Harriet's check-ins (Wed 2026-08-26 to Tue 2026-09-01) for the doctor report.
+# Calm days, knee pain that is level 1 twice and level 2 the third time (3 of her last 5 days),
+# one level-3 day (breathing) with its follow-up, a missed day, medicines taken most days, one
+# label photo that doesn't match her list, one refill reminder, the hospital papers (R6), a
+# medicine question for her visit and a "Let me explain" note. Synthetic data, offline: the /as
+# lines stand in for the LLM's reading of her next typed message.
+#   npm run simulate -- --reset --day 2026-08-26 --script ../../scripts/demo/harriet-week.txt
+#   npm run report -- --db ../../data/simulator.db
+# The report covers the 7 days ending on her latest check-in date (2026-09-01).
+#
+# ===== Wed Aug 26: calm. Quick questions: breathing Fine, bleeding No, mood Good.
+1
+1
+1
+1
+# The first flag (R1, metformin and her kidney test): Tell me more, I'll ask my doctor
+1
+1
+# Morning medicines: Taken, then the memory check: 1
+/meds
+1
+1
+# Her knee, in chat: level 1, noted for her doctor
+/as chat | knee pain, a_little, same
+my knee aches a bit today
+/evening
+1
+/next
+# ===== Thu Aug 27: calm, all three answers in one message
+/as extract hf-ankle-swelling=No; dizzy-on-standing=No; morning-medicines=Yes
+Morning! Slept well, ankles look normal, no dizziness, and I took my pills with breakfast
+# The next flag (R3, bleeding risk): Tell me more, I'll ask my doctor
+1
+1
+/meds
+1
+1
+# Her knee again: level 1
+/as chat | knee pain, a_little, same
+the knee is sore again after my walk
+# Her hospital discharge papers: read back, "Yes, that's right", then R6 (aspirin): I'll ask my doctor
+/paper
+1
+1
+/evening
+1
+/next
+# ===== Fri Aug 28: level 3. Hard to breathe lying flat: her doctor today, Sarah alerted, a follow-up
+/as extract hf-breathing-lying-flat=Yes, it was hard; anticoagulant-bleeding=No; mood=Okay
+Rough night. Lying flat made it hard to breathe so I slept sitting up in my chair. No bruises. Feeling okay otherwise
+# "It sounds like no unusual bruising or bleeding. Is that right?" -> Yes, that's right
+1
+/meds
+1
+1
+# The follow-up this afternoon: "How is your breathing now?" -> Better
+/later
+1
+/evening
+1
+/next
+# ===== Sat Aug 29: missed. The reminders go out, nothing comes back; at noon the check-in is missed
+/meds
+/noon
+/evening
+/next
+# ===== Sun Aug 30: calm check-in; knee pain a third time (level 2, a follow-up); a label photo
+1
+1
+1
+1
+# The next flag (R4, potassium): Tell me more, Later
+1
+2
+/meds
+1
+1
+/as chat | knee pain, a_little, same
+my knee is aching again today
+# The follow-up: "How are you feeling now?" -> About the same
+/later
+2
+# A photo of an apixaban 2.5 mg bottle: her list has 5 mg, so her pharmacist checks it
+/photo fixtures/labels/apixaban-2-5mg.png --as label:Apixaban,2.5 mg,Take 1 tablet by mouth twice daily
+/evening
+1
+/next
+# ===== Mon Aug 31: "Not today", and a question about her medicines for her visit
+2
+/as medicine_question
+Is the aspirin still on my list after the hospital?
+/meds
+1
+1
+/evening
+1
+/next
+# ===== Tue Sep 1: calm; she explains her dizziness in her own words; a refill reminder
+1
+1
+1
+# Dizziness: Let me explain, her words, then Sometimes (level 1)
+4
+Only when I get up fast from the couch, and it goes away in a few seconds
+2
+/meds
+1
+1
+# Trazodone runs out around Sep 3: I've asked for it
+/refills
+1
+/evening
+1

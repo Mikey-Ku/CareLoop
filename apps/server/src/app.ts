@@ -1,6 +1,9 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import express from "express";
 import type { ErrorRequestHandler, Express, RequestHandler } from "express";
 import type { Config } from "./config.ts";
+import { isCalendarDay } from "./days.ts";
+import { errorSummary } from "./errors.ts";
 
 // The HTTP app. Kept separate from src/server.ts so tests can start it on port 0.
 
@@ -8,6 +11,19 @@ export const SERVICE_NAME = "mhacks2026-server";
 
 export type AppDeps = {
   config: Pick<Config, "finchnode">;
+  /** Narrow server-tool surface exposed to ElevenLabs. It accepts identifiers and structured state only, never media. */
+  calls?: {
+    screen(callId: string): Promise<unknown>;
+    beginQuietMeasurement(callId: string, permissionGranted: boolean): Promise<unknown>;
+    /** After the quiet minute: the heart rate as a camera estimate and the ladder's line, as fixed copy. */
+    vitalsReadback?(callId: string): Promise<{ status: string; patientResponseText: string }>;
+    toolSecret?: string | undefined;
+  };
+  /**
+   * The doctor report page for a patient and the week ending on `day` (default her latest check-in date),
+   * or undefined for an unknown patient (src/report). Without it, /report is not served.
+   */
+  doctorReport?: (patientId: string, day: string | undefined) => string | undefined;
   /** Where server-side errors are reported. Never receives request bodies or secrets. */
   logError?: (line: string) => void;
 };
@@ -23,7 +39,29 @@ export function createApp(deps: AppDeps): Express {
     res.json({ ok: true, service: SERVICE_NAME, finchnode: finchnodeHost });
   });
 
-  app.use("/webhooks/relay", relayWebhookRouter());
+  if (deps.calls) app.use("/integrations/elevenlabs", callToolRouter(deps.calls));
+
+  // The doctor report, the shareable link (docs/BRIEF.md feature 4). Local only, synthetic data.
+  const doctorReport = deps.doctorReport;
+  if (doctorReport)
+    app.get("/report/:patientId", (req, res, next) => {
+      const day = typeof req.query.day === "string" ? req.query.day : undefined;
+      if (day !== undefined && !isCalendarDay(day)) {
+        res.status(400).json({ error: "bad_request" });
+        return;
+      }
+      try {
+        const html = doctorReport(req.params.patientId, day);
+        if (html === undefined) {
+          res.status(404).json({ error: "not_found" });
+          return;
+        }
+        res.set("Cache-Control", "no-store").type("html").send(html);
+      } catch (error) {
+        next(error);
+      }
+    });
+
 
   const notFound: RequestHandler = (_req, res) => {
     res.status(404).json({ error: "not_found" });
@@ -42,17 +80,69 @@ export function createApp(deps: AppDeps): Express {
   return app;
 }
 
-/**
- * Placeholder for the Relay webhook (docs/DESIGN.md "Relay"). The body is kept raw
- * because the Standard Webhooks signature check in run 2 must run on the exact bytes.
- */
-function relayWebhookRouter(): express.Router {
+function callToolRouter(calls: NonNullable<AppDeps["calls"]>): express.Router {
   const router = express.Router();
-  router.use(express.raw({ type: "*/*", limit: "1mb" }));
-  router.all("/", (_req, res) => {
-    res.status(501).json({ error: "not_implemented", message: "not implemented until run 2" });
+  router.use(express.json({ limit: "32kb" }));
+  router.use((req, res, next) => {
+    const expected = calls.toolSecret;
+    const received = req.header("authorization")?.replace(/^Bearer\s+/i, "");
+    if (!expected || received === undefined || !sameSecret(received, expected)) {
+      res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    next();
+  });
+  router.post("/screen-symptoms", async (req, res, next) => {
+    const callId = typeof req.body?.callId === "string" ? req.body.callId.trim() : "";
+    if (!callId) {
+      res.status(400).json({ error: "callId_required" });
+      return;
+    }
+    try {
+      // Only the fixed words she hears; the level and everything else stay on the server.
+      const result = (await calls.screen(callId)) as { patientResponseText?: unknown };
+      res.json({ patientResponseText: typeof result.patientResponseText === "string" && result.patientResponseText ? result.patientResponseText : "Thank you for telling me." });
+    } catch (error) {
+      next(error);
+    }
+  });
+  router.post("/quiet-measurement", async (req, res, next) => {
+    const callId = typeof req.body?.callId === "string" ? req.body.callId.trim() : "";
+    const permissionGranted = req.body?.permissionGranted === true;
+    if (!callId) {
+      res.status(400).json({ error: "callId_required" });
+      return;
+    }
+    try {
+      res.json(await calls.beginQuietMeasurement(callId, permissionGranted));
+    } catch (error) {
+      next(error);
+    }
+  });
+  router.post("/vitals-result", async (req, res, next) => {
+    const callId = typeof req.body?.callId === "string" ? req.body.callId.trim() : "";
+    if (!callId) {
+      res.status(400).json({ error: "callId_required" });
+      return;
+    }
+    if (!calls.vitalsReadback) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    try {
+      const result = await calls.vitalsReadback(callId);
+      res.json({ status: result.status, patientResponseText: result.patientResponseText });
+    } catch (error) {
+      next(error);
+    }
   });
   return router;
+}
+
+/** Constant-time comparison of the tool secret (hashed first, so lengths never leak through timing). */
+function sameSecret(received: string, expected: string): boolean {
+  const digest = (s: string) => createHash("sha256").update(s, "utf8").digest();
+  return timingSafeEqual(digest(received), digest(expected));
 }
 
 function hostOf(url: string): string {
@@ -69,10 +159,4 @@ function statusOf(err: unknown): number {
     if (typeof s === "number" && s >= 400 && s <= 599) return s;
   }
   return 500;
-}
-
-/** Error name and message only: no stack, no request data. */
-function errorSummary(err: unknown): string {
-  if (err instanceof Error) return `${err.name}: ${err.message}`;
-  return "non-error thrown";
 }

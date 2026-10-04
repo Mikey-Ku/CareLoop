@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ConfigError, loadConfig, type Config } from "../config.ts";
 import { formatAttempt, type AttemptLogEntry } from "../llm/fallback.ts";
@@ -7,6 +8,7 @@ import type {
   CheckinExtraction,
   ClassifyInput,
   ExtractCheckinInput,
+  ImageReading,
   MapAnswerInput,
   MessageClassification,
   SymptomMention,
@@ -14,10 +16,11 @@ import type {
 
 // `npm run llm:check`: does free-text understanding work from this laptop?
 // Maps three sample replies onto their questions' buttons, asks for one
-// small-talk reply, sorts eight sample messages into kinds (two with symptoms)
-// and extracts answers and symptoms from four replies to the open question,
-// printing each result, the model that answered and the timings. The only
-// script that calls the LLM on purpose. Prints no secrets.
+// small-talk reply, sorts eight sample messages into kinds (two with symptoms),
+// extracts answers and symptoms from four replies to the open question and
+// reads the four synthetic medicine labels in fixtures/labels, printing each
+// result, the model that answered and the timings. The only script that calls
+// the LLM on purpose. Prints no secrets.
 
 type Sample = MapAnswerInput & { expect: string };
 
@@ -96,6 +99,45 @@ export const EXTRACT_SAMPLES: { message: string; expect: string }[] = [
   },
 ];
 
+/** The synthetic label photos (fixtures/labels/*.png, rendered from the .html next to them). */
+export const LABELS_DIR = fileURLToPath(new URL("../../../../fixtures/labels/", import.meta.url));
+
+export const LABEL_SAMPLES: { file: string; expect: string }[] = [
+  { file: "apixaban-5mg.png", expect: 'medicine_label Apixaban 5 mg "Take 1 tablet by mouth twice daily" (matches her record)' },
+  { file: "apixaban-2-5mg.png", expect: "medicine_label Apixaban 2.5 mg (her record says 5 mg: the planted mismatch)" },
+  {
+    file: "metformin-500mg.png",
+    expect: 'medicine_label Metformin HCl 500 mg "Take 1 tablet by mouth once daily with the evening meal" (matches)',
+  },
+  { file: "ibuprofen-200mg.png", expect: "medicine_label Ibuprofen 200 mg, over the counter (not on her list)" },
+];
+
+/** kind, then what was read: for a label, name, strength and directions as printed. */
+export function describeImageReading(r: ImageReading): string {
+  switch (r.kind) {
+    case "medicine_label": {
+      const l = r.label;
+      const parts = [`kind=medicine_label name=${JSON.stringify(l.medicineName)}`];
+      if (l.strength) parts.push(`strength=${JSON.stringify(l.strength)}`);
+      if (l.instructions) parts.push(`instructions=${JSON.stringify(l.instructions)}`);
+      if (l.quantity) parts.push(`quantity=${JSON.stringify(l.quantity)}`);
+      if (l.refillsLeft) parts.push(`refillsLeft=${JSON.stringify(l.refillsLeft)}`);
+      if (l.prescriber) parts.push(`prescriber=${JSON.stringify(l.prescriber)}`);
+      if (l.pharmacy) parts.push(`pharmacy=${JSON.stringify(l.pharmacy)}`);
+      parts.push(`confidence=${l.confidence}`);
+      return parts.join(" ");
+    }
+    case "discharge_papers": {
+      const meds = r.paper.medications.map((m) => `${m.change}:${[m.name, m.strength].filter(Boolean).join(" ")}`);
+      return `kind=discharge_papers organization=${JSON.stringify(r.paper.organization ?? "")} date=${r.paper.date ?? "?"} medications=[${meds.join(", ")}]`;
+    }
+    case "unreadable":
+      return `kind=unreadable reason=${JSON.stringify(r.reason)}`;
+    case "other":
+      return `kind=other description=${JSON.stringify(r.description)}`;
+  }
+}
+
 /** One symptom as `topic amount/change "her words"`. */
 export function describeSymptom(s: SymptomMention): string {
   return `${s.topic} ${s.amount}/${s.change} ${JSON.stringify(s.words)}`;
@@ -124,7 +166,6 @@ export function describeClassification(c: MessageClassification): string {
 /** What .env needs before the check can call anything. Empty when ready. */
 export function missingSetup(config: Config): string[] {
   const missing: string[] = [];
-  if (config.llm.provider !== "gemini") missing.push(`LLM_PROVIDER=gemini (it is ${config.llm.provider}, which has no adapter yet)`);
   if (!config.llm.geminiApiKey) missing.push("GEMINI_API_KEY (a free key from https://aistudio.google.com/apikey, in the repo-root .env)");
   if (config.llm.geminiModels.length === 0) missing.push("GEMINI_MODELS (or leave it unset for the defaults)");
   return missing;
@@ -134,6 +175,7 @@ export async function main(
   env: Record<string, string | undefined> = process.env,
   out = (line: string) => console.log(line),
   deps: CreateLlmDeps = {},
+  labelsDir: string = LABELS_DIR,
 ): Promise<number> {
   let config: Config;
   try {
@@ -196,6 +238,21 @@ export async function main(
       `extractCheckin: "${sample.message}"\n  expect: ${sample.expect}`,
       () => llm.extractCheckin({ seniorName: "Harriet", message: sample.message, questions: TODAY_QUESTIONS }),
       describeExtraction,
+    );
+  }
+
+  for (const sample of LABEL_SAMPLES) {
+    let image: Uint8Array;
+    try {
+      image = await readFile(join(labelsDir, sample.file));
+    } catch {
+      out(`readImage: ${sample.file} skipped (no PNG; render the .html next to it with qlmanage -t -s 1200)`);
+      continue;
+    }
+    await timed(
+      `readImage: ${sample.file} (${Math.round(image.byteLength / 1024)} KB)\n  expect: ${sample.expect}`,
+      () => llm.readImage({ seniorName: "Harriet", image, mimeType: "image/png" }),
+      describeImageReading,
     );
   }
 

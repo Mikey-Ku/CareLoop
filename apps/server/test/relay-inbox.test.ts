@@ -1,8 +1,8 @@
 import type { Chat, MessageSendParams, RelayWebhookEvent, WebhookSubscription, WebSocketRunOptions } from "@relaymessenger/sdk";
 import { describe, expect, it, vi } from "vitest";
-import { familyWelcome, photoNotYet } from "../src/checkin/copy.ts";
+import { familyWelcome, photoCouldNotOpen, photoNotYet, photoRejected } from "../src/checkin/copy.ts";
 import { familyChats, familyMembers, linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
-import { openDatabase, upsertPatient, type Db } from "../src/db/index.ts";
+import { getSharing, openDatabase, upsertPatient, type Db } from "../src/db/index.ts";
 import { FakeMessenger } from "../src/relay/fake-messenger.ts";
 import { acceptEvent, assertNoWebhookSubscriptions, createRelayInbox, processEvent, runRelayInbox } from "../src/relay/inbox.ts";
 import type { InboundMessage } from "../src/relay/messenger.ts";
@@ -70,6 +70,23 @@ function contactAdded(handle: string, chatId: string) {
   });
 }
 
+function callCreated(callId = nextId()) {
+  return envelope("call.created", {
+    call: {
+      id: callId,
+      chat_id: HARRIET_CHAT,
+      from: person("harriet.demo"),
+      to: [{ id: AGENT_ID, handle: "agent.demo", kind: "agent" }],
+      status: "ringing",
+      revision: 1,
+      created_at: T,
+      ringing_at: T,
+      answered_at: null,
+      ended_at: null,
+    },
+  });
+}
+
 function fakeRelay(overrides: { chats?: Chat[]; subscriptions?: unknown[] } = {}) {
   const chats = overrides.chats ?? [];
   return {
@@ -124,6 +141,10 @@ const rows = (db: Db) =>
     error: string | null;
   }[];
 
+/** The texts sent to one chat through the fake Relay client, in order. */
+const sentTexts = (relay: ReturnType<typeof fakeRelay>, chatId: string) =>
+  relay.chats.messages.send.mock.calls.filter(([c]) => c === chatId).map(([, body]) => (body.message.parts[0]?.type === "text" ? body.message.parts[0].value : ""));
+
 const chatIdOf = (db: Db) => (db.prepare("SELECT relay_chat_id AS c, relay_handle AS h FROM patients WHERE id = 'harriet'").get() as { c: string | null; h: string | null });
 
 describe("onEvent: commit before ACK", () => {
@@ -136,6 +157,18 @@ describe("onEvent: commit before ACK", () => {
     await inbox.drain();
     expect(engine.handleInbound).toHaveBeenCalledTimes(1);
     expect(rows(db)[0]!.processedAt).toBe(T);
+  });
+
+  it("routes a durable call.created event without waiting for the call lifetime", async () => {
+    const { db, relay } = setup();
+    const handler = { handle: vi.fn(async () => undefined) };
+    const inbox = createRelayInbox({ db, engine: { handleInbound: vi.fn() }, patientHandle: "harriet.demo", relay, callHandler: handler, log: () => {}, now: () => T });
+    const event = callCreated();
+    await inbox.onEvent(event, { sequence: "call-1" });
+    await inbox.drain();
+    expect(handler.handle).toHaveBeenCalledTimes(1);
+    expect(await processEvent({ db, engine: { handleInbound: vi.fn() }, patientHandle: "harriet.demo", relay, callHandler: handler, log: () => {}, now: () => T }, event)).toBe("call_started");
+    expect(handler.handle).toHaveBeenCalledTimes(2);
   });
 
   it("ignores a duplicate event_id: one row, handled once", async () => {
@@ -244,6 +277,61 @@ describe("message.received", () => {
     expect(relay.chats.markAsRead).toHaveBeenCalledWith(HARRIET_CHAT);
   });
 
+  describe("photos read by the engine", () => {
+    const SIGNED = "https://files.example.org/signed?token=synthetic-secret";
+    function photoSetup(fetchImpl: typeof fetch) {
+      const db = openDatabase(":memory:");
+      upsertPatient(db, { id: "harriet", finchnodePatientId: "patient-demo-polypharmacy", preferredName: "Harriet", relayHandle: "harriet.demo", relayChatId: HARRIET_CHAT });
+      const photos: { patientId: string; bytes: number[]; mimeType: string; attachmentId: string }[] = [];
+      const engine = {
+        handleInbound: vi.fn(async () => undefined),
+        handlePhoto: vi.fn(async (patientId: string, image: Uint8Array, mimeType: string, attachmentId: string) => {
+          photos.push({ patientId, bytes: [...image], mimeType, attachmentId });
+          return "label" as const;
+        }),
+      };
+      const relay = fakeRelay();
+      const log = vi.fn();
+      const inbox = createRelayInbox({ db, engine, patientHandle: "harriet.demo", relay, log, now: () => T, fetch: fetchImpl });
+      return { inbox, engine, photos, relay, log };
+    }
+    const media = (size: number) => ({ type: "media", id: "media_1", url: SIGNED, filename: "label.png", mime_type: "image/png", size_bytes: size, reactions: null });
+
+    it("downloads the signed URL and hands the bytes to handlePhoto; the URL is never logged", async () => {
+      const fetchImpl = vi.fn(async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-length": "3" } })) as unknown as typeof fetch;
+      const { inbox, engine, photos, relay, log } = photoSetup(fetchImpl);
+      await inbox.onEvent(textMessage({ chatId: HARRIET_CHAT, parts: [media(3), { type: "text", value: "my pills", reactions: null }] }), { sequence: "1" });
+      await inbox.drain();
+      expect(photos).toEqual([{ patientId: "harriet", bytes: [1, 2, 3], mimeType: "image/png", attachmentId: "media_1" }]);
+      expect(engine.handleInbound).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledWith("relay_photo_handled", expect.objectContaining({ outcome: "label" }));
+      expect(JSON.stringify(log.mock.calls)).not.toContain("synthetic-secret");
+      expect(relay.chats.markAsRead).toHaveBeenCalledWith(HARRIET_CHAT);
+    });
+
+    it("a photo over 8 MB is never downloaded and she is asked for a regular one", async () => {
+      const fetchImpl = vi.fn() as unknown as typeof fetch;
+      const { inbox, engine, relay } = photoSetup(fetchImpl);
+      await inbox.onEvent(textMessage({ chatId: HARRIET_CHAT, parts: [media(9 * 1024 * 1024)] }), { sequence: "1" });
+      await inbox.drain();
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(engine.handlePhoto).not.toHaveBeenCalled();
+      expect(relay.chats.messages.send).toHaveBeenCalledWith(HARRIET_CHAT, expect.objectContaining({ message: expect.objectContaining({ parts: [{ type: "text", value: photoRejected() }] }) }));
+    });
+
+    it("a failed download gets a kind ask to send it again", async () => {
+      const fetchImpl = vi.fn(async () => new Response("gone", { status: 404 })) as unknown as typeof fetch;
+      const { inbox, engine, relay } = photoSetup(fetchImpl);
+      await inbox.onEvent(textMessage({ chatId: HARRIET_CHAT, parts: [media(10)] }), { sequence: "1" });
+      await inbox.drain();
+      expect(engine.handlePhoto).not.toHaveBeenCalled();
+      expect(relay.chats.messages.send).toHaveBeenCalledWith(
+        HARRIET_CHAT,
+        expect.objectContaining({ message: expect.objectContaining({ parts: [{ type: "text", value: photoCouldNotOpen("Harriet") }] }) }),
+      );
+    });
+  });
+
   it("a photo in a family chat gets no reply", async () => {
     const { db, inbox, relay } = setup();
     linkFamilyMember(db, "sarah.demo", SARAH_CHAT, null, T);
@@ -271,19 +359,30 @@ describe("message.received", () => {
     await inbox.drain();
     expect(familyChats(db, "harriet")).toEqual([{ handle: "tom.demo", displayName: null, chatId: TOM_CHAT }]);
     expect(engine.handleInbound).not.toHaveBeenCalled();
-    expect(relay.chats.markAsRead).not.toHaveBeenCalled();
+    expect(relay.chats.markAsRead).toHaveBeenCalledWith(TOM_CHAT);
     expect(log).toHaveBeenCalledWith("relay_family_linked", expect.objectContaining({ handle: "tom.demo", chat_id: TOM_CHAT }));
-    expect(log).toHaveBeenCalledWith("relay_family_message_ignored", { event_id: expect.any(String), event_type: "message.received", handle: "tom.demo", chat_id: TOM_CHAT, patient_ids: ["harriet"] });
+    // Passed on to her as plain text (no display name: the handle), never through the engine.
+    expect(sentTexts(relay, HARRIET_CHAT)).toEqual(['tom.demo says: "Hi, this is Tom"']);
+    expect(log).toHaveBeenCalledWith("relay_family_message", {
+      event_id: expect.any(String),
+      event_type: "message.received",
+      handle: "tom.demo",
+      chat_id: TOM_CHAT,
+      patient_ids: ["harriet"],
+      outcomes: ["passed_on"],
+    });
   });
 
-  it("a linked family chat's messages are logged without their text and never answer her check-in", async () => {
-    const { db, inbox, engine, log } = setup();
-    linkFamilyMember(db, "sarah.demo", SARAH_CHAT, null, T);
+  it("a linked family chat's messages are passed on as plain text, logged without their text, and never answer her check-in", async () => {
+    const { db, inbox, engine, log, relay } = setup();
+    linkFamilyMember(db, "sarah.demo", SARAH_CHAT, "Sarah", T);
     for (const [i, text] of ["Let's start", "Not today", "Sharing", "Everything"].entries())
       await inbox.onEvent(textMessage({ chatId: SARAH_CHAT, sender: "sarah.demo", text }), { sequence: String(i + 1) });
     await inbox.drain();
     expect(engine.handleInbound).not.toHaveBeenCalled();
-    expect(log.mock.calls.filter(([event]) => event === "relay_family_message_ignored")).toHaveLength(4);
+    expect(sentTexts(relay, HARRIET_CHAT)).toEqual(['Sarah says: "Let\'s start"', 'Sarah says: "Not today"', 'Sarah says: "Sharing"', 'Sarah says: "Everything"']);
+    expect(getSharing(db, "harriet")).toBe("status");
+    expect(log.mock.calls.filter(([event]) => event === "relay_family_message")).toHaveLength(4);
     expect(JSON.stringify(log.mock.calls)).not.toContain("Not today");
     expect(rows(db).every((r) => r.processedAt === T && r.error === null)).toBe(true);
   });
@@ -392,7 +491,8 @@ describe("family welcome", () => {
     await inbox.onEvent(contactAdded("sarah.demo", SARAH_CHAT), { sequence: "4" });
     await inbox.drain();
     expect(welcomesTo(relay, SARAH_CHAT)).toHaveLength(1);
-    expect(relay.chats.messages.send).toHaveBeenCalledTimes(1);
+    // Besides the one welcome, only her "Hi" passed on to Harriet and its acknowledgement.
+    expect(relay.chats.messages.send).toHaveBeenCalledTimes(3);
   });
 
   it("a family member's first message, when contact.added never came, gets the welcome; the engine never sees it", async () => {

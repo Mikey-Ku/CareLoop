@@ -1,4 +1,5 @@
 import type { AnswerHistoryEntry } from "../context/questions.ts";
+import { addDays } from "../days.ts";
 import type { StoredAnswer } from "./checkins.ts";
 import type { Db } from "./index.ts";
 
@@ -11,9 +12,8 @@ import type { Db } from "./index.ts";
  * it: a "not today" or missed day leaves nothing here, so its questions stay due.
  */
 export function answerHistory(db: Db, patientId: string, beforeDay: string, days = 14): AnswerHistoryEntry[] {
-  const before = Date.parse(beforeDay);
-  if (Number.isNaN(before)) throw new Error(`answerHistory: beforeDay must be YYYY-MM-DD, got "${beforeDay}"`);
-  const from = new Date(before - days * 86_400_000).toISOString().slice(0, 10);
+  if (Number.isNaN(Date.parse(beforeDay))) throw new Error(`answerHistory: beforeDay must be YYYY-MM-DD, got "${beforeDay}"`);
+  const from = addDays(beforeDay, -days);
   const rows = db
     .prepare(
       `SELECT date, answers_json AS answersJson FROM checkins

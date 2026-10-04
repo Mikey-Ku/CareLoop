@@ -9,6 +9,7 @@ import {
   type Question,
 } from "../context/questions.ts";
 import { answerHistory } from "../db/answer-history.ts";
+import { addDays } from "../days.ts";
 import {
   getCheckin,
   getCheckinById,
@@ -17,6 +18,7 @@ import {
   finishedCheckinsBefore,
   insertCheckin,
   latestCheckin,
+  latestCheckinPromptAt,
   markInboundHandled,
   patientForChat,
   recordCheckinPrompt,
@@ -54,19 +56,24 @@ import {
   scheduleFollowUp,
   type FollowUpRow,
 } from "../db/follow-ups.ts";
+import { dueNudges, getDose, latestMedPromptAt, markNudged, openDose, openRefill, pendingMemoryCheck, recordMedPrompt } from "../db/meds.ts";
+import { closeWaitingPrompts, openWaitingPrompt, openWaitingPrompts } from "../db/waiting-prompts.ts";
 import { addMemories, recentMemories } from "../db/memories.ts";
+import { latestHeartRateSince } from "../db/vitals.ts";
 import { addCheckinNote, addVisitQuestion, checkinNotes } from "../db/notes.ts";
 import { addObservation, highestOfDay, observationsBetween, type ObservationSource } from "../db/observations.ts";
 import { inboundSeen, insertPaperScan, paperScanForAttachment } from "../db/paper-scans.ts";
 import { ConsentInactiveError } from "../finchnode/client.ts";
 import { loadRxNavCache } from "../finchnode/fixtures.ts";
-import { asOf, normalizeHealthRecord } from "../finchnode/normalize.ts";
+import { activeMedications, asOf, normalizeHealthRecord, type PatientRecord } from "../finchnode/normalize.ts";
 import type { RxNavCache } from "../finchnode/rxnav.ts";
+import type { HealthRecord } from "../finchnode/types.ts";
 import type { SharingLevel } from "../db/index.ts";
 import type {
   CheckinExtraction,
   Change,
   ClassifyInput,
+  ImageReading,
   ExtractCheckinInput,
   MessageClassification,
   MessageKind,
@@ -74,6 +81,10 @@ import type {
   SmallTalkReply,
   SymptomMention,
 } from "../llm/types.ts";
+import { ImageRejectedError } from "../llm/types.ts";
+import { DEFAULT_MEDS_NUDGE_MINUTES, MEDS_LABELS, createMedsFlow, paperFromReading, type MedPromptRef } from "../meds/flow.ts";
+import { DEFAULT_REFILL_REMIND_DAYS, refillsDue } from "../meds/refills.ts";
+import { medicationSchedule } from "../meds/schedule.ts";
 import type { InboundMessage, OutboundMessage } from "../relay/messenger.ts";
 import { runRules } from "../rules/index.ts";
 import type { ExtractedPaper } from "../rules/paper-diff.ts";
@@ -111,13 +122,20 @@ import {
   freeTextConfirm,
   keepAnEye,
   keepAnEyeReply,
+  labelNoRecord,
+  labelUnreadable,
   medicineQuestionReply,
   notedForDoctor,
   noteSaved,
   notTodayReply,
   openReplyThanks,
   openReplyUnavailable,
+  photoNotYet,
+  photoOther,
+  photoReadFailed,
+  photoRejected,
   READING_ACTIVITY,
+  READING_PHOTO_ACTIVITY,
   recordLinkEndedFamily,
   recordLinkEndedSenior,
   redFlagAdvice,
@@ -141,7 +159,11 @@ import {
   type FollowUpAnswer,
   type UnderstoodItem,
 } from "./copy.ts";
-import type { CheckinEngine, DayResult, EngineDeps, FreeTextAnswer } from "./engine-types.ts";
+import type { CheckinEngine, DayResult, EngineDeps, FreeTextAnswer, MedsReminderResult, PhotoOutcome } from "./engine-types.ts";
+import type { CallCheckinContext, SpokenCheckinResult, SpokenTurn } from "./engine-types.ts";
+import { CALL_SUMMARY_BUTTONS, callSummary, callSummaryThanks } from "../calls/copy.ts";
+import { callForSummaryMessage, wasOnCallSince } from "../db/calls.ts";
+import { SAFETY_LEVELS } from "./severity.ts";
 import { PAPER_CONFIRM_BUTTONS, paperReadback } from "./paper-check.ts";
 import {
   createPaperFlow,
@@ -188,12 +210,31 @@ import {
 // "Better" / "About the same" / "Worse" answers the follow-up. Each re-sends whatever
 // the check-in was waiting for, so she can carry on.
 //
+// Medication helper (src/meds/flow.ts, planned here in the same transactions): taps on a medicines
+// reminder ("Taken" / "Not yet" / "I have a question"), the memory check and a refill reminder are
+// found by the message they reply to (med_prompts); a typed label is the helper's unless the
+// check-in's waiting step shows the same label ("Not yet" on morning-medicines). "Taken" on the
+// morning reminder records the check-in's morning-medicines question as "Yes" (asked no more that
+// day). Photos come through handlePhoto: the LLM reads, fixed rules compare a label with her list.
+//
 // Stale taps: every message that carries a check-in step's buttons is remembered
 // with that step (checkin_prompts). A tap names the message it replies to
 // (InboundMessage.replyTo); a tap on a message sent for another step, another day
 // or no step at all doesn't answer what is pending now. It re-sends the current
 // prompt instead. "Not today" from the greeting or any question of the pending
-// check-in still ends the day. Typed text (no replyTo) is matched as before.
+// check-in still ends the day.
+//
+// Latest prompt wins (live bug 2026-10-04: after "I have a question" on the medicines reminder, an older
+// open check-in's greeting took her question "What does it look like :(" as her open reply). Typed text
+// with no replyTo that isn't one of our labels goes to the MOST RECENTLY SENT prompt still waiting for her
+// (newestWaiting): the check-in's latest step (checkin_prompts, or "Let me explain"), an open follow-up,
+// "I have a question" ("Go ahead", src/db/waiting-prompts.ts), a medicines reminder, memory check or refill
+// reminder (med_prompts), the paper check, or the sharing menu. A check-in whose latest prompt is older than
+// another waiting prompt doesn't take it: a follow-up gets it as before, "I have a question" makes it her
+// medicine question (fixed reply, visit_questions), a paper check leaves it alone, and anything else reads
+// it as plain chat with nothing pending (then the check-in's step again). On a tie the check-in keeps it.
+// A waiting_prompts row waits for one typed message and closes once one is planned. Taps (replyTo) still
+// go to their own message, labels to whoever shows them, and the safety screen still runs first.
 //
 // Severity ladder (src/checkin/severity.ts, docs/DESIGN.md): every answer, typed symptom,
 // follow-up answer and safety hit gets a level from fixed tables, saved in symptom_observations.
@@ -306,7 +347,27 @@ export type EngineOptions = {
   rxnav?: RxNavCache;
   /** Minutes from a red flag or safety hit to its follow-up check-in. Defaults to DEFAULT_FOLLOW_UP_DELAY_MINUTES. */
   followUpDelayMinutes?: number;
+  /** MEDS_NUDGE_MINUTES: from "Not yet" on a medicines reminder to its one re-reminder. Defaults to 60. */
+  medsNudgeMinutes?: number;
+  /** REFILL_REMIND_DAYS: a fill is reminded about when it runs out within this many days. Defaults to 5. */
+  refillRemindDays?: number;
+  /**
+   * Called once a day's check-in is over (checked in, "not today", or marked missed), after
+   * her messages and the family's went out. The care summaries over Photon hang off this
+   * (src/care/service.ts). Errors it throws are swallowed: it can't undo or fail the check-in.
+   */
+  onDayFinished?: (event: DayFinished) => Promise<void> | void;
+  /** Longest wait for onDayFinished before her chat moves on. Defaults to DAY_FINISHED_TIMEOUT_MS. */
+  dayFinishedTimeoutMs?: number;
 };
+
+/** onDayFinished is waited on for at most this long (it keeps running after). */
+export const DAY_FINISHED_TIMEOUT_MS = 10_000;
+
+export type DayFinished = { patientId: string; day: string; outcome: DayOutcome };
+
+/** The check-in question a "Taken" on the morning medicines reminder answers ("Yes"). */
+export const MORNING_MEDICINES_QUESTION = "morning-medicines";
 
 /** A follow-up check-in comes this many minutes after a red flag or a safety hit (a morning concern: early afternoon). */
 export const DEFAULT_FOLLOW_UP_DELAY_MINUTES = 180;
@@ -320,6 +381,8 @@ type Send = {
   prompt?: PromptRef;
   /** This send is a follow-up check-in: its message id is stored once it is out. */
   followUpId?: number;
+  /** This send carries the medication helper's buttons (src/meds/flow.ts): stored with its message id. */
+  medPrompt?: MedPromptRef;
 };
 
 /** What a check-in step shows: its text and buttons. */
@@ -330,7 +393,21 @@ type TypedContext =
   | { at: "question"; c: CheckinRow; q: Question }
   | { at: "step"; c: CheckinRow; prompt: Prompt }
   | { at: "follow_up"; f: FollowUpRow }
+  /** "I have a question" on a medicines reminder: her next typed message is her medicine question. */
+  | { at: "meds_question"; promptId: number }
   | { at: "none" };
+
+/** A prompt waiting for her reply, and when it last went out (see "Latest prompt wins"). */
+type Waiting =
+  | { kind: "checkin"; at: string }
+  | { kind: "follow_up"; at: string; f: FollowUpRow }
+  | { kind: "meds_question"; at: string; promptId: number }
+  | { kind: "meds" | "paper" | "sharing_menu"; at: string };
+
+/** The latest of some ISO timestamps, ignoring missing ones. */
+function latestOf(...xs: (string | null | undefined)[]): string | undefined {
+  return xs.reduce<string | undefined>((m, x) => (x && (m === undefined || x > m) ? x : m), undefined);
+}
 
 /** Typed text the first planning pass found, which needs the LLM before it can be planned. */
 type FreeTextNeed = {
@@ -528,9 +605,13 @@ const ALL_LABELS = new Set(
     ...PAPER_CONFIRM_BUTTONS,
     ...FOLLOW_UP_LABELS,
     ...Object.values(CLARIFY_BUTTONS),
+    ...MEDS_LABELS,
   ].map(norm),
 );
 const isButtonLabel = (text: string) => ALL_LABELS.has(norm(text));
+
+/** Typed text that is neither a tap (no replyTo) nor one of our labels: see "Latest prompt wins". */
+const isFreeText = (msg: InboundMessage) => msg.replyTo === undefined && msg.text.trim().length > 0 && !isButtonLabel(msg.text);
 
 function questionById(id: string): Question {
   const q = QUESTIONS_BY_ID.get(id);
@@ -555,6 +636,8 @@ function contextKey(ctx: TypedContext): string {
       return `step:${ctx.c.id}:${ctx.prompt.step}`;
     case "follow_up":
       return `follow_up:${ctx.f.id}`;
+    case "meds_question":
+      return `meds_question:${ctx.promptId}`;
     case "none":
       return "none";
   }
@@ -589,11 +672,6 @@ function clarifyLabels(questionId: string): { a_little: string; a_lot: string } 
   return aLittle && aLot ? { a_little: aLittle, a_lot: aLot } : undefined;
 }
 
-/** The YYYY-MM-DD `days` days before `day`. */
-function daysBefore(day: string, days: number): string {
-  return new Date(Date.parse(day) - days * 86_400_000).toISOString().slice(0, 10);
-}
-
 export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {}): CheckinEngine {
   const { db, messenger, clock } = deps;
   const missedCheckinTime = options.missedCheckinTime ?? "12:00";
@@ -601,6 +679,52 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
   let rxnav = options.rxnav;
   const rxnavCache = () => (rxnav ??= loadRxNavCache());
   const paperFlow = createPaperFlow({ db, clock, rxnav: rxnavCache });
+  const refillRemindDays = options.refillRemindDays ?? DEFAULT_REFILL_REMIND_DAYS;
+  // The medication helper (src/meds/flow.ts), with what it needs from the check-in. Function
+  // declarations below are hoisted, so the hooks can name them here.
+  const meds = createMedsFlow({
+    db,
+    clock,
+    options: { nudgeMinutes: options.medsNudgeMinutes ?? DEFAULT_MEDS_NUDGE_MINUTES },
+    hooks: {
+      toFamily: (patient, text, prefix) => toFamily(patient, text, prefix),
+      familyNames: (patientId) => familyChats(db, patientId).map(familyName),
+      morningTaken: (patient, day, chatId) => medsMorningTaken(patient, day, chatId),
+      reprompt: (patient, chatId, messageId) => reprompt(patient, chatId, messageId),
+      checkinBusy: (patientId) => pendingCheckin(patientId) !== undefined,
+      checkinTakes: (patient, text) => {
+        const c = pendingCheckin(patient.id);
+        const p = c && currentPrompt(patient, c);
+        if (p === undefined || !p.buttons.some((b) => is(b, text))) return false;
+        // A label both show ("Not yet") is the helper's when its prompt is the newer one.
+        const newest = newestWaiting(patient, c);
+        return newest?.kind !== "meds" && newest?.kind !== "meds_question";
+      },
+    },
+  });
+  // Days the current inbound plan finished; read right after its transaction commits.
+  let finishedDays: DayFinished[] = [];
+
+  /**
+   * The onDayFinished hook for each finished day, after her messages went out. Errors are swallowed, and
+   * it is waited on for at most DAY_FINISHED_TIMEOUT_MS (a hung Photon send can't stall her chat; the
+   * hook keeps running in the background).
+   */
+  async function notifyFinished(events: DayFinished[]): Promise<void> {
+    const hook = options.onDayFinished;
+    if (!hook) return;
+    for (const event of events) {
+      const run = Promise.resolve()
+        .then(() => hook(event))
+        .catch(() => {}); // the hook owns its errors (the care service logs and never throws)
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, options.dayFinishedTimeoutMs ?? DAY_FINISHED_TIMEOUT_MS);
+      });
+      await Promise.race([run, timeout]);
+      clearTimeout(timer);
+    }
+  }
 
   /**
    * Send in order. Every send is attempted even if an earlier one fails, so one family
@@ -614,6 +738,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         const sent = await messenger.send(s.chatId, s.message, s.key);
         if (s.prompt) recordCheckinPrompt(db, { messageId: sent.messageId, ...s.prompt, sentAt: clock.now() });
         if (s.followUpId !== undefined) markFollowUpSent(db, s.followUpId, sent.messageId, clock.now());
+        if (s.medPrompt) recordMedPrompt(db, { messageId: sent.messageId, ...s.medPrompt, sentAt: clock.now() });
       } catch (error) {
         failures.push(error);
       }
@@ -625,9 +750,9 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
   // Typed messages (see "Typed messages" above). The LLM and the activity label are best effort:
   // whatever goes wrong there, she still gets the buttons or a fixed reply.
 
-  async function showActivity(chatId: string): Promise<void> {
+  async function showActivity(chatId: string, label: string = READING_ACTIVITY): Promise<void> {
     try {
-      await messenger.setActivity?.(chatId, READING_ACTIVITY);
+      await messenger.setActivity?.(chatId, label);
     } catch {
       // A missing label never holds up her reply.
     }
@@ -725,6 +850,11 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     const notes = all ? checkinNotes(db, c.id).map((n) => ({ questionText: noteHeading(n), text: n.text })) : [];
     // The day's highest level, said in words at "all" ("we're keeping an eye on it").
     const top = all ? highestOfDay(db, patient.id, c.date) : undefined;
+    // Her morning medicines reminder had no "Taken" by MISSED_CHECKIN_TIME: one line at "all" (src/meds/flow.ts).
+    const medsNotConfirmed = all && getDose(db, patient.id, c.date, "morning")?.status === "missed";
+    // Today's call heart rate, at "status_vitals" and "all". Never compared with her usual range here
+    // (AFib, or no usual range): familyDailyStatus then shows it as an estimate only.
+    const heartRate = sharing !== "status" && c.sentAt !== null ? latestHeartRateSince(db, patient.id, c.sentAt) : undefined;
     const text = familyDailyStatus({
       seniorName: patient.preferredName,
       sharing,
@@ -733,6 +863,8 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       flags,
       notes,
       ...(top && top.level > 0 ? { highest: { level: top.level, topic: top.topic } } : {}),
+      ...(medsNotConfirmed ? { medsNotConfirmed: true } : {}),
+      ...(heartRate !== undefined ? { vitals: { heartRate: Math.round(heartRate) } } : {}),
     });
     return toFamily(patient, text, `${patient.id}:${c.date}:status`);
   }
@@ -762,7 +894,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
 
   /** What the repetition rule needs: her observations on the last REPETITION.days check-in dates up to `day`. */
   function historyFor(patientId: string, day: string): SeverityHistory {
-    return { today: day, observations: observationsBetween(db, patientId, daysBefore(day, REPETITION.days - 1), day) };
+    return { today: day, observations: observationsBetween(db, patientId, addDays(day, -(REPETITION.days - 1)), day) };
   }
 
   function observe(
@@ -834,6 +966,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
 
   function finishCheckedIn(patient: CheckinPatient, c: CheckinRow, chatId: string, lead?: string): Send[] {
     updateCheckin(db, c.id, { step: "done", pendingFlagId: null, finishedAt: clock.now() });
+    finishedDays.push({ patientId: patient.id, day: c.date, outcome: "checked_in" });
     // While a follow-up for today is still to come (a concern, or something worth watching), she hears
     // we'll check on her again this afternoon.
     const waiting = nextFollowUp(db, patient.id);
@@ -870,6 +1003,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
 
   function notToday(patient: CheckinPatient, c: CheckinRow, chatId: string): Send[] {
     updateCheckin(db, c.id, { status: "skipped", step: "done", pendingFlagId: null, finishedAt: clock.now() });
+    finishedDays.push({ patientId: patient.id, day: c.date, outcome: "not_today" });
     return [
       { chatId, message: { text: notTodayReply(patient.preferredName) }, key: `${patient.id}:${c.date}:not-today` },
       ...familyStatus(patient, "not_today", c),
@@ -995,6 +1129,44 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     return [{ chatId: msg.chatId, message: { text: symptomNotedReply(name, topics) }, key }];
   }
 
+  // Medication helper hooks (src/meds/flow.ts).
+
+  /**
+   * "Taken" on the morning medicines reminder of `day`: the check-in's morning-medicines question that
+   * day is "Yes" and not asked. When it is the question waiting, it is answered like a tap (her next
+   * question follows: `advanced`); otherwise it is recorded quietly. A finished check-in is left alone.
+   */
+  function medsMorningTaken(patient: CheckinPatient, day: string, chatId: string): { sends: Send[]; advanced: boolean } {
+    const c = getCheckin(db, patient.id, day);
+    const answered = (row: CheckinRow) => row.answers.some((a) => a.questionId === MORNING_MEDICINES_QUESTION);
+    if (!c || c.finishedAt !== null || !c.questionIds.includes(MORNING_MEDICINES_QUESTION) || answered(c)) return { sends: [], advanced: false };
+    if (c.step === "question" && c.questionIds[c.questionIndex] === MORNING_MEDICINES_QUESTION && pendingCheckin(patient.id)?.id === c.id)
+      return { sends: answerQuestion(patient, c, questionById(MORNING_MEDICINES_QUESTION), "Yes", chatId), advanced: true };
+    recordMorningMedicines(patient, c);
+    return { sends: [], advanced: false };
+  }
+
+  /** The morning-medicines question recorded as "Yes" without asking it (her "Taken" on the reminder), levelled like a tap. */
+  function recordMorningMedicines(patient: CheckinPatient, c: CheckinRow): void {
+    const q = questionById(MORNING_MEDICINES_QUESTION);
+    const sev = levelFor({ source: "button", questionId: q.id, label: "Yes" }, historyFor(patient.id, c.date));
+    const stored: StoredAnswer = { questionId: q.id, questionText: q.text, answer: "Yes", at: clock.now(), level: sev.level };
+    updateCheckin(db, c.id, { answers: [...c.answers, stored], suggestions: withoutSuggestion(c, q.id) });
+    observe(patient, c.date, c, sev, { source: "button", questionId: q.id });
+  }
+
+  /** Her record as it stood on `day` (asOf), or undefined when record consent has ended. */
+  async function recordOn(patient: CheckinPatient, day: string): Promise<{ raw: HealthRecord; record: PatientRecord } | undefined> {
+    let raw: HealthRecord;
+    try {
+      raw = await deps.loadSnapshot(patient.finchnodePatientId);
+    } catch (error) {
+      if (error instanceof ConsentInactiveError) return undefined;
+      throw error;
+    }
+    return { raw, record: asOf(normalizeHealthRecord(raw, { rxnav: rxnavCache() }), day) };
+  }
+
   /** The check-in still waiting for her, if any. */
   function pendingCheckin(patientId: string): CheckinRow | undefined {
     const c = latestCheckin(db, patientId);
@@ -1042,6 +1214,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     const chatId = msg.chatId;
     if (is(msg.text, SHARING_MENU_BUTTON)) {
       const current = getSharing(db, patient.id);
+      openWaitingPrompt(db, { patientId: patient.id, kind: "sharing_menu", at: clock.now() });
       return [
         {
           chatId,
@@ -1056,6 +1229,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (!level) return undefined;
     const before = getSharing(db, patient.id);
     setSharing(db, patient.id, level);
+    closeWaitingPrompts(db, patient.id, clock.now(), "sharing_menu");
     return [
       { chatId, message: { text: sharingChangedSenior(level) }, key: `${patient.id}:sharing-changed:${msg.messageId}` },
       // The family hears that it changed, not why; nothing if she picked the level she already had.
@@ -1184,6 +1358,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         return [...ctx.prompt.buttons];
       case "follow_up":
         return [...FOLLOW_UP_LABELS];
+      case "meds_question":
       case "none":
         return [];
     }
@@ -1197,7 +1372,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
   /** A reply carrying the pending buttons, remembered as that step's prompt so a tap on it answers it. */
   function withButtons(patient: CheckinPatient, ctx: TypedContext, msg: InboundMessage, text: string, slot: string): Send {
     const key = `${patient.id}:${slot}:${msg.messageId}`;
-    const message = { text, ...(ctx.at === "none" ? {} : { buttons: buttonsOf(ctx) }) };
+    const message = { text, ...(ctx.at === "none" || ctx.at === "meds_question" ? {} : { buttons: buttonsOf(ctx) }) };
     if (ctx.at === "question") return { chatId: msg.chatId, message, key: `${patient.id}:${ctx.c.date}:${slot}:${msg.messageId}`, prompt: promptFor(ctx.c, "question") };
     if (ctx.at === "step") return { chatId: msg.chatId, message, key: `${patient.id}:${ctx.c.date}:${slot}:${msg.messageId}`, prompt: promptFor(ctx.c, ctx.prompt.step) };
     return { chatId: msg.chatId, message, key };
@@ -1217,6 +1392,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         return { question: ctx.prompt.text, options: [...ctx.prompt.buttons] };
       case "follow_up":
         return { question: followUpQuestion(name, followUpTopic(ctx.f.reason)), options: [...FOLLOW_UP_LABELS] };
+      case "meds_question":
       case "none":
         return undefined;
     }
@@ -1254,9 +1430,10 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         needs: {
           kind: "classify",
           context,
-          at: ctx.at,
+          at: ctx.at === "meds_question" ? "none" : ctx.at,
           about: here,
-          noSmallTalk: redFlagYes !== undefined,
+          // An explicit yes on a red-flag question, or her medicine question: the reply is fixed.
+          noSmallTalk: redFlagYes !== undefined || ctx.at === "meds_question",
           classify: { seniorName: name, message: text, pending: pendingFor(ctx, name) },
           smallTalk: { seniorName: name, message: text, memories: recentMemories(db, patient.id, SMALL_TALK_MEMORIES) },
           // The understanding pass, while a question waits (an explicit yes on a red-flag question needs none).
@@ -1282,6 +1459,8 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
 
     if (cls?.kind === "crisis" || cls?.kind === "urgent_symptom") return { sends: planSafety(patient, msg, cls.kind) };
     if (cls) addMemories(db, patient.id, [...cls.memories, ...cls.complaints], clock.now());
+    // Her words after "I have a question" (see "Latest prompt wins"): her medicine question.
+    if (ctx.at === "meds_question") return { sends: planMedsQuestion(patient, msg, text, cls) };
 
     // An explicit yes on a red-flag question is her "Yes": a fixed rule, with or without the LLM.
     if (ctx.at === "question" && redFlagYes !== undefined && !stale) {
@@ -1388,9 +1567,23 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         if (answer === undefined) return didnt();
         return planFollowUpAnswer(patient, ctx.f, answer, msg);
       }
+      case "meds_question": // planned before any reaction (planMedsQuestion)
       case "none":
         return [];
     }
+  }
+
+  /**
+   * Her message after "I have a question" on a medicines reminder: never answered here. The fixed "ask your
+   * doctor or pharmacist" reply and it goes on her visit list (instruction-like text is not kept), unless the
+   * model read it as feeling low or a message for her family (their own replies). Then the check-in's step again.
+   */
+  function planMedsQuestion(patient: CheckinPatient, msg: InboundMessage, text: string, cls: MessageClassification | undefined): Send[] {
+    closeWaitingPrompts(db, patient.id, clock.now(), "meds_question");
+    const again = reprompt(patient, msg.chatId, msg.messageId);
+    if (cls?.kind === "feeling_low" || cls?.kind === "family_message") return [...kindReply(patient, msg, cls, text), ...again];
+    if (!looksLikeInstructions(text)) addVisitQuestion(db, { patientId: patient.id, text, createdAt: clock.now() });
+    return [{ chatId: msg.chatId, message: { text: medicineQuestionReply(patient.preferredName) }, key: `${patient.id}:reply:${msg.messageId}` }, ...again];
   }
 
   /**
@@ -1420,7 +1613,11 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (!patient) return { sends: [] };
     if (inboundSeen(db, msg.messageId)) return { sends: [] };
     const planned = routeInbound(patient, msg, fresh, understood);
-    if (!("needs" in planned)) markInboundHandled(db, msg.messageId, msg.chatId, clock.now());
+    if (!("needs" in planned)) {
+      markInboundHandled(db, msg.messageId, msg.chatId, clock.now());
+      // "Go ahead" and the sharing menu wait for one typed message: once one is planned, whatever took it, they close.
+      if (isFreeText(msg)) closeWaitingPrompts(db, patient.id, clock.now());
+    }
     return planned;
   }
 
@@ -1428,9 +1625,12 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     // 1. The safety screen, before anything else: a hit wins even mid-question.
     const hit = screenMessage(msg.text);
     if (hit) return { sends: planSafety(patient, msg, hit.kind) };
+    // A tap on the post-call message ("Video check-in calls" below).
+    const callTap = planCallSummaryTap(patient, msg);
+    if (callTap) return { sends: callTap };
 
     // 2. Buttons that live outside the check-in.
-    const outside = planSharing(patient, msg) ?? planPaper(patient, msg, fresh) ?? planFollowUpTap(patient, msg);
+    const outside = planSharing(patient, msg) ?? planPaper(patient, msg, fresh) ?? planFollowUpTap(patient, msg) ?? meds.planTap(patient, msg);
     if (outside) return { sends: outside };
 
     const typed = understood?.kind === "classify" ? understood : undefined;
@@ -1448,10 +1648,26 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (onFollowUp && onFollowUp.patientId === patient.id && !onFollowUp.answeredAt)
       return planTyped(patient, msg, { at: "follow_up", f: onFollowUp }, typed);
 
+    // Latest prompt wins (see above): typed text goes to the newest prompt still waiting for her.
+    const newest = isFreeText(msg) ? newestWaiting(patient, c) : undefined;
+    if (newest?.kind === "meds_question") return planTyped(patient, msg, { at: "meds_question", promptId: newest.promptId }, typed);
+    if (c && newest && newest.kind !== "checkin") {
+      // Something was sent after anything the check-in asked: her words are not the check-in's.
+      if (newest.kind === "follow_up") return planTyped(patient, msg, { at: "follow_up", f: newest.f }, typed);
+      if (newest.kind === "paper") return { sends: [] }; // left alone, as with no check-in
+      // Plain chat with nothing pending, then the check-in's step again so she can carry on (not after a safety reply).
+      const planned = planTyped(patient, msg, { at: "none" }, typed);
+      if ("needs" in planned) return planned;
+      const kind = typed?.classification?.kind;
+      if (kind === "crisis" || kind === "urgent_symptom") return planned;
+      return { sends: [...planned.sends, ...reprompt(patient, msg.chatId, msg.messageId)] };
+    }
+
     if (!c) {
       // Nothing pending: a late tap (one of our labels) or a paper check waiting for her is left alone.
       if (isButtonLabel(msg.text) || pendingReadback(db, patient.id) || pendingPaperFollowUp(db, patient.id)) return { sends: [] };
-      const f = openFollowUp(db, patient.id);
+      // An open follow-up takes typed text unless something newer waits (then it is plain chat).
+      const f = newest ? (newest.kind === "follow_up" ? newest.f : undefined) : openFollowUp(db, patient.id);
       return planTyped(patient, msg, f ? { at: "follow_up", f } : { at: "none" }, typed);
     }
     const chatId = msg.chatId;
@@ -1482,6 +1698,30 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (c.step === "greeting") return planOpenReply(patient, msg, c, understood?.kind === "extract" ? understood : undefined);
     const prompt = currentPrompt(patient, c);
     return planTyped(patient, msg, prompt ? { at: "step", c, prompt } : { at: "none" }, typed);
+  }
+
+  /**
+   * The prompt still waiting for her that went out last (see "Latest prompt wins"), or undefined when nothing
+   * waits. `c`: the pending check-in. On a tie the check-in wins (it is first, and only a newer one replaces it).
+   */
+  function newestWaiting(patient: CheckinPatient, c: CheckinRow | undefined): Waiting | undefined {
+    const all: Waiting[] = [];
+    if (c) all.push({ kind: "checkin", at: latestOf(latestCheckinPromptAt(db, c.id), c.explainAt, c.sentAt) ?? "" });
+    const f = openFollowUp(db, patient.id);
+    if (f?.sentAt) all.push({ kind: "follow_up", at: f.sentAt, f });
+    for (const w of openWaitingPrompts(db, patient.id))
+      all.push(w.kind === "meds_question" ? { kind: "meds_question", at: w.openedAt, promptId: w.id } : { kind: "sharing_menu", at: w.openedAt });
+    const dose = openDose(db, patient.id);
+    const refill = openRefill(db, patient.id);
+    const medsAt = latestOf(
+      dose && latestOf(latestMedPromptAt(db, "dose", dose.id), dose.sentAt, dose.nudgedAt),
+      pendingMemoryCheck(db, patient.id)?.askedAt,
+      refill?.status === "reminded" ? latestOf(latestMedPromptAt(db, "refill", refill.id), refill.updatedAt) : undefined,
+    );
+    if (medsAt) all.push({ kind: "meds", at: medsAt });
+    const paperAt = latestOf(pendingReadback(db, patient.id)?.createdAt, pendingPaperFollowUp(db, patient.id)?.confirmedAt);
+    if (paperAt) all.push({ kind: "paper", at: paperAt });
+    return all.reduce<Waiting | undefined>((best, w) => (best === undefined || w.at > best.at ? w : best), undefined);
   }
 
   /** She tapped "Let me explain" on the pending question: an invitation to type, no buttons, and the question marked. */
@@ -1753,6 +1993,325 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     }
   }
 
+  async function startPaperCheck(patientId: string, paper: ExtractedPaper, attachmentId?: string): Promise<{ scanId: number }> {
+    const patient = requirePatient(patientId);
+    if (!patient.relayChatId) throw new Error(`Patient "${patientId}" has no Relay chat yet`);
+    const chatId = patient.relayChatId;
+    const scanId = db.transaction((): number => {
+      // The same photo delivered twice is one paper check.
+      const existing = attachmentId ? paperScanForAttachment(db, patientId, attachmentId) : undefined;
+      return existing?.id ?? insertPaperScan(db, { patientId, paper, attachmentId: attachmentId ?? null, createdAt: clock.now() });
+    })();
+    await messenger.send(chatId, { text: paperReadback(paper), buttons: [...PAPER_CONFIRM_BUTTONS] }, `${patientId}:paper:${scanId}:readback`);
+    return { scanId };
+  }
+
+  /**
+   * A photo she sent (see CheckinEngine.handlePhoto). The model only reads; fixed rules compare a label
+   * with her list (src/meds/flow.ts checkLabel). Her chat shows READING_PHOTO_ACTIVITY while it works.
+   */
+  async function handlePhoto(patientId: string, image: Uint8Array, mimeType: string, attachmentId: string): Promise<PhotoOutcome> {
+    const patient = requirePatient(patientId);
+    if (!patient.relayChatId) throw new Error(`Patient "${patientId}" has no Relay chat yet`);
+    const chatId = patient.relayChatId;
+    const name = patient.preferredName;
+    const say = async (text: string, outcome: PhotoOutcome): Promise<PhotoOutcome> => {
+      await deliver([{ chatId, message: { text }, key: `${patientId}:photo:${attachmentId}` }]);
+      return outcome;
+    };
+    const llm = deps.llm;
+    if (!llm) return say(photoNotYet(name), "not_read");
+    await showActivity(chatId, READING_PHOTO_ACTIVITY);
+    try {
+      let reading: ImageReading;
+      try {
+        reading = await llm.readImage({ seniorName: name, image, mimeType });
+      } catch (error) {
+        // Too large or not a photo type: hers to fix. Anything else (LlmUnavailableError): our trouble.
+        return say(error instanceof ImageRejectedError ? photoRejected() : photoReadFailed(name), error instanceof ImageRejectedError ? "rejected" : "failed");
+      }
+      switch (reading?.kind) {
+        case "discharge_papers":
+          await startPaperCheck(patientId, paperFromReading(reading.paper), attachmentId);
+          return "papers";
+        case "medicine_label": {
+          const day = dayFor(patientId);
+          let loaded;
+          try {
+            loaded = await recordOn(patient, day);
+          } catch {
+            return say(photoReadFailed(name), "failed");
+          }
+          if (!loaded) return say(labelNoRecord(), "label");
+          const active = activeMedications(loaded.record);
+          const label = reading.label;
+          const planned = db.transaction(() => meds.planLabel(patient, attachmentId, label, active, { day, checkinId: getCheckin(db, patientId, day)?.id ?? null }))();
+          await deliver(planned.sends);
+          return planned.outcome === "unreadable" ? "unreadable" : "label";
+        }
+        case "other":
+          return say(photoOther(name), "other");
+        default:
+          return say(labelUnreadable(), "unreadable");
+      }
+    } finally {
+      await clearActivity(chatId);
+    }
+  }
+
+  // Video check-in calls (src/calls, docs/CALLS.md). What she says on a call is read like what she
+  // types. Each turn gets the safety screen as it arrives (screenSpokenTurn: the typed safety path, once
+  // per turn id). After the call, everything else she said goes through the understanding pass
+  // (recordSpokenCheckin): extraction against today's unanswered questions with the classifier alongside
+  // (its crisis or urgent reading wins, as for a typed message), the same fixed rules (understandWords),
+  // answers stored via "voice", observations and notes as for typed words, memories saved. The ladder's
+  // effects follow: a follow-up at 2, every family chat alerted at 3 (her own advice is in the post-call
+  // message), the safety path at 4 and 5. Then ONE message to her chat says back what was noted, with
+  // "That's right" (the check-in carries on: the next question she didn't cover, or the close) and
+  // "Something's wrong" (the call's answers are taken back and Let me explain opens on the first of them).
+  // A call before the morning check-in creates the day's check-in without a greeting, so the voice can
+  // ask today's questions.
+
+  /** Today's check-in for a call that comes before the morning one: created as startDay does, no greeting sent. */
+  async function openCallCheckin(patient: CheckinPatient, day: string): Promise<CheckinRow | undefined> {
+    let raw: HealthRecord;
+    try {
+      raw = await deps.loadSnapshot(patient.finchnodePatientId);
+    } catch {
+      return undefined; // no record (consent ended, FinchNode down): the call goes on without questions
+    }
+    const record = normalizeHealthRecord(raw, { rxnav: rxnavCache() });
+    const questionIds = pickQuestions(asOf(record, day), day, { history: answerHistory(db, patient.id, day) }).map((q) => q.id);
+    db.transaction(() => {
+      if (getCheckin(db, patient.id, day)) return;
+      const now = clock.now();
+      saveSnapshot(db, { patientId: patient.id, fetchedAt: now, syncStatus: raw.meta.syncStatus, raw });
+      syncFlags(db, patient.id, runRules({ record, checkinDate: day }), now);
+      const id = insertCheckin(db, { patientId: patient.id, date: day, questionIds, sentAt: now });
+      const c = questionIds.includes(MORNING_MEDICINES_QUESTION) && getDose(db, patient.id, day, "morning")?.status === "taken" ? getCheckinById(db, id) : undefined;
+      if (c) recordMorningMedicines(patient, c);
+    })();
+    return getCheckin(db, patient.id, day);
+  }
+
+  /** The day's check-in while it still takes answers. */
+  function openOn(patientId: string, day: string): CheckinRow | undefined {
+    const c = getCheckin(db, patientId, day);
+    return c && c.finishedAt === null && c.step !== "done" ? c : undefined;
+  }
+
+  /** A crisis or urgent symptom she said on a call: the typed safety path, once per turn id. Her chat's reply only when it is linked. */
+  function planSpokenSafety(patient: CheckinPatient, turn: SpokenTurn, kind: SafetyKind): Send[] {
+    if (inboundSeen(db, turn.id)) return [];
+    const chatId = patient.relayChatId ?? "";
+    markInboundHandled(db, turn.id, chatId || "call", clock.now());
+    return planSafety(patient, { chatId, messageId: turn.id, text: turn.text, at: clock.now() }, kind).filter((s) => s.chatId !== "");
+  }
+
+  type SpokenReading = {
+    c: CheckinRow | undefined;
+    u: Understanding | undefined;
+    others: { m: SymptomMention; sev: Severity }[];
+    /** Answers and symptoms (suggestions included, for the level and the read-back line). */
+    items: UnderstoodItem[];
+    level: number;
+    memories: string[];
+  };
+
+  /** The fixed rules over a call's extraction: against the day's open check-in, else her symptoms by topic. Writes nothing. */
+  function readSpoken(patient: CheckinPatient, day: string, x: CheckinExtraction, words: string): SpokenReading {
+    const c = openOn(patient.id, day);
+    const history = historyFor(patient.id, day);
+    if (c) {
+      const u = understandWords(patient, c, x, words);
+      const items: UnderstoodItem[] = [
+        ...u.recorded.map((r) => ({ topic: r.q.id, level: r.own.level, answer: r.label })),
+        ...u.others.map((o) => ({ topic: o.sev.topic, level: o.sev.level })),
+        ...u.suggested.map((s) => ({ topic: s.q.id, level: levelFor({ source: "button", questionId: s.q.id, label: s.answer }, history).level })),
+      ];
+      return { c, u, others: u.others, items, level: Math.max(0, ...items.map((i) => i.level)), memories: x.memories };
+    }
+    const others = cleanMentions(x.symptoms)
+      .filter((m) => m.amount !== "none")
+      .map((m) => ({ m, sev: levelFor({ source: "typed", mention: m }, history) }));
+    const items = others.map((o) => ({ topic: o.sev.topic, level: o.sev.level }));
+    return { c: undefined, u: undefined, others, items, level: Math.max(0, ...items.map((i) => i.level)), memories: x.memories };
+  }
+
+  /** Record a call's reading, as applyUnderstanding records a typed one (via "voice"). Returns the family's level-3 alert, if any. */
+  function applySpoken(patient: CheckinPatient, day: string, r: SpokenReading, words: string): Send[] {
+    const now = clock.now();
+    addMemories(db, patient.id, r.memories, now);
+    let c = r.c;
+    if (c && r.u) {
+      for (const n of r.u.notes) saveTopicNote(patient, c, n);
+      const answers: StoredAnswer[] = [...c.answers];
+      const suggestions: Record<string, Suggestion> = { ...c.suggestions };
+      let mood: string | undefined;
+      for (const rec of r.u.recorded) {
+        answers.push({ questionId: rec.q.id, questionText: rec.q.text, answer: rec.label, at: now, level: rec.own.level, via: "voice", freeText: rec.words });
+        delete suggestions[rec.q.id];
+        if (rec.q.id === "mood") mood = rec.label;
+        const asked = openClarification(db, c.id, rec.q.id);
+        if (asked) closeClarification(db, asked.id, rec.label, now);
+        observe(patient, c.date, c, rec.own, {
+          source: "typed",
+          questionId: rec.q.id,
+          ...(rec.raisedBy ? { amount: rec.raisedBy.amount, change: rec.raisedBy.change } : {}),
+          words: rec.words,
+        });
+      }
+      for (const s of r.u.suggested) suggestions[s.q.id] = { answer: s.answer, words };
+      updateCheckin(db, c.id, { answers, suggestions, ...(mood !== undefined ? { mood } : {}) });
+      c = { ...c, answers, suggestions, ...(mood !== undefined ? { mood } : {}) };
+    }
+    for (const o of r.others) observe(patient, day, c, o.sev, { source: "typed", amount: o.m.amount, change: o.m.change, words: o.m.words });
+
+    type Told = { topic: string; level: number; words: string; q?: Question; answer?: string };
+    const told: Told[] = [
+      ...(r.u?.recorded ?? []).map((rec): Told => ({ topic: rec.q.id, level: rec.own.level, words: rec.words, q: rec.q, answer: rec.label })),
+      ...r.others.map((o): Told => ({ topic: o.sev.topic, level: o.sev.level, words: o.m.words })),
+    ];
+    for (const t of told) if (t.level === 2) followUpLater(patient, c, t.topic, 2);
+    const top = highest(told);
+    if (!top || top.level < 3) return [];
+    const herChat = patient.relayChatId ?? "";
+    const detail = top.q && top.answer !== undefined ? { questionText: top.q.text, answer: top.answer, words: top.words } : { words: top.words || words };
+    return levelThree(patient, c, top.topic, herChat, `${patient.id}:${day}:red-flag:${top.topic}`, detail).sends.filter((s) => s.chatId !== herChat);
+  }
+
+  /** ONE message to her chat after the call, with "That's right" / "Something's wrong". Undefined when her chat isn't linked. */
+  async function sendCallSummary(
+    patient: CheckinPatient,
+    callId: string,
+    level: number,
+    items: UnderstoodItem[],
+    reading: { heartRate: number | null; breathingRate: number | null } | undefined,
+  ): Promise<string | undefined> {
+    if (!patient.relayChatId) return undefined;
+    const text = callSummary({ name: patient.preferredName, level, items, reading });
+    const buttons = [CALL_SUMMARY_BUTTONS.right, CALL_SUMMARY_BUTTONS.wrong];
+    const sent = await messenger.send(patient.relayChatId, { text, buttons }, `${patient.id}:call:${callId}:summary`);
+    return sent.messageId;
+  }
+
+  /**
+   * Her tap on the post-call message. "That's right": the check-in carries on (the next question she
+   * didn't cover, or the close). "Something's wrong": the call's answers are taken back and the Let me
+   * explain path opens on the first question they answered; her next message is read for it.
+   */
+  function planCallSummaryTap(patient: CheckinPatient, msg: InboundMessage): Send[] | undefined {
+    const right = is(msg.text, CALL_SUMMARY_BUTTONS.right);
+    if (msg.replyTo === undefined || (!right && !is(msg.text, CALL_SUMMARY_BUTTONS.wrong))) return undefined;
+    const call = callForSummaryMessage(db, msg.replyTo);
+    if (!call || call.patientId !== patient.id) return undefined;
+    const c = call.day ? openOn(patient.id, call.day) : undefined;
+    const key = `${patient.id}:call:${call.callId}:${right ? "right" : "wrong"}:${msg.messageId}`;
+    if (right) return c ? nextStep(patient, c, msg.chatId, undefined, msg.messageId) : [{ chatId: msg.chatId, message: { text: callSummaryThanks(patient.preferredName) }, key }];
+    if (c) {
+      const fromCall = (a: StoredAnswer) => a.via === "voice" && a.at >= call.startedAt;
+      const answers = c.answers.filter((a) => !fromCall(a));
+      const taken = new Set(c.answers.filter(fromCall).map((a) => a.questionId));
+      const first = c.questionIds.findIndex((id) => taken.has(id));
+      const index = first >= 0 ? first : firstUnanswered({ answers, questionIds: c.questionIds });
+      if (index !== undefined) {
+        updateCheckin(db, c.id, { answers, step: "question", questionIndex: index, explainAt: null });
+        return planExplain(patient, { ...c, answers, step: "question", questionIndex: index }, msg.chatId, msg.messageId);
+      }
+    }
+    return [{ chatId: msg.chatId, message: { text: explainPrompt(patient.preferredName) }, key }];
+  }
+
+  /** See "Video check-in calls" above and CheckinEngine.recordSpokenCheckin. */
+  async function recordSpokenCheckin(
+    patientId: string,
+    day: string,
+    turns: readonly SpokenTurn[],
+    options: { callId?: string; assessOnly?: boolean; reading?: { heartRate: number | null; breathingRate: number | null } } = {},
+  ): Promise<SpokenCheckinResult> {
+    const patient = requirePatient(patientId);
+    const sends: Send[] = [];
+    let level = 0;
+    let safety: SafetyKind | undefined;
+    const raise = (kind: SafetyKind) => {
+      safety = safety === "crisis" || kind === "crisis" ? "crisis" : kind;
+      level = Math.max(level, SAFETY_LEVELS[kind]);
+    };
+    // 1. The safety screen on every turn (a turn already handled is not acted on again).
+    const calm: string[] = [];
+    for (const t of turns) {
+      const hit = screenMessage(t.text);
+      if (!hit) {
+        if (t.text.trim()) calm.push(t.text.trim());
+        continue;
+      }
+      raise(hit.kind);
+      sends.push(...db.transaction(() => planSpokenSafety(patient, t, hit.kind))());
+    }
+    // 2. The understanding pass over everything else she said. Instruction-like text counts as nothing read.
+    const words = calm.join("\n");
+    let reading: SpokenReading | undefined;
+    if (words && deps.llm && !looksLikeInstructions(words)) {
+      const open = openOn(patientId, day);
+      const read = await readOpenReply({
+        kind: "extract",
+        context: open ? openContext(open) : `call:${day}`,
+        extract: { seniorName: patient.preferredName, message: words, questions: open ? unansweredForExtraction(open) : [] },
+        classify: { seniorName: patient.preferredName, message: words, pending: undefined },
+      });
+      if (read.safety) {
+        // The model read a crisis or an urgent symptom the screen missed: it wins, nothing else is recorded.
+        const kind = read.safety;
+        raise(kind);
+        const id = `${options.callId ? `call:${options.callId}` : (turns[0]?.id ?? `call:${day}`)}:model`;
+        sends.push(...db.transaction(() => planSpokenSafety(patient, { id, text: words }, kind))());
+      } else if (read.extraction) reading = readSpoken(patient, day, read.extraction, words);
+    }
+    if (reading) level = Math.max(level, reading.level);
+    const items = reading?.items ?? [];
+    // 3. Record (unless only assessing), then the alerts, then ONE message to her chat.
+    if (!options.assessOnly && reading) {
+      const r = reading;
+      sends.push(...db.transaction(() => applySpoken(patient, day, r, words))());
+    }
+    let failure: unknown;
+    try {
+      await deliver(sends);
+    } catch (error) {
+      failure = error;
+    }
+    let summaryMessageId: string | undefined;
+    if (!options.assessOnly && options.callId && turns.length > 0) summaryMessageId = await sendCallSummary(patient, options.callId, level, items, options.reading);
+    if (failure !== undefined) throw failure;
+    return { level, ...(safety ? { safety } : {}), items, ...(summaryMessageId ? { summaryMessageId } : {}) };
+  }
+
+  async function callCheckinContext(patientId: string, day: string): Promise<CallCheckinContext> {
+    const patient = requirePatient(patientId);
+    const c = getCheckin(db, patientId, day) ?? (await openCallCheckin(patient, day));
+    const open = c && c.finishedAt === null && c.step !== "done" ? c : undefined;
+    const before = addDays(day, -1);
+    const yesterday = observationsBetween(db, patientId, before, before)
+      .filter((o) => o.level >= 1 && o.source !== "safety" && o.source !== "follow_up")
+      .map((o) => topicWords(o.topic))
+      .filter((w): w is string => w !== undefined);
+    return {
+      firstName: patient.preferredName,
+      questions: open ? unansweredForExtraction(open).map((q) => ({ id: q.id, text: q.question })) : [],
+      yesterday: [...new Set(yesterday)].slice(0, 3),
+      memories: recentMemories(db, patientId, 3),
+      familyNames: familyChats(db, patientId).map(familyName),
+    };
+  }
+
+  async function screenSpokenTurn(patientId: string, turn: SpokenTurn): Promise<{ kind: SafetyKind; level: number } | undefined> {
+    const hit = screenMessage(turn.text);
+    if (!hit) return undefined;
+    const patient = requirePatient(patientId);
+    await deliver(db.transaction(() => planSpokenSafety(patient, turn, hit.kind))());
+    return { kind: hit.kind, level: SAFETY_LEVELS[hit.kind] };
+  }
+
   /** Sends follow-ups due by `now`; at most one run at a time (the agent's timer may fire during a slow send). */
   let followUpRun: Promise<number> | undefined;
   async function sendDueFollowUps(now: string): Promise<number> {
@@ -1815,7 +2374,11 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         const now = clock.now();
         saveSnapshot(db, { patientId, fetchedAt: now, syncStatus: raw.meta.syncStatus, raw });
         syncFlags(db, patientId, runRules({ record, checkinDate: day }), now);
-        return insertCheckin(db, { patientId, date: day, questionIds, sentAt: now });
+        const id = insertCheckin(db, { patientId, date: day, questionIds, sentAt: now });
+        // She already tapped "Taken" on this morning's medicines reminder: that question isn't asked.
+        const c = questionIds.includes(MORNING_MEDICINES_QUESTION) && getDose(db, patientId, day, "morning")?.status === "taken" ? getCheckinById(db, id) : undefined;
+        if (c) recordMorningMedicines(patient, c);
+        return id;
       })();
       if (checkinId === undefined) return { kind: "already_started" };
 
@@ -1845,35 +2408,45 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
           }
         }
       }
-      const plan = (understood?: Reading) => db.transaction(() => planInbound(msg, fresh, understood))();
+      // Plans in one transaction; the days it finished are read right after it commits (synchronous,
+      // so no other message's plan can run in between).
+      const plan = (understood?: Reading): { planned: Planned; finished: DayFinished[] } => {
+        finishedDays = [];
+        try {
+          const planned = db.transaction(() => planInbound(msg, fresh, understood))();
+          return { planned, finished: finishedDays };
+        } finally {
+          finishedDays = [];
+        }
+      };
       const first = plan();
-      if (!("needs" in first)) {
-        await deliver(first.sends);
+      if (!("needs" in first.planned)) {
+        try {
+          await deliver(first.planned.sends);
+        } finally {
+          await notifyFinished(first.finished);
+        }
         return;
       }
       // Typed text: read it with the LLM (her chat shows that it's reading), then plan again with the reading.
       await showActivity(msg.chatId);
+      let finished: DayFinished[] = [];
       try {
-        const second = plan(await understand(first.needs));
+        const second = plan(await understand(first.planned.needs));
+        finished = second.finished;
         // The second pass has a reading, so it never asks again; if it somehow did, nothing is sent.
-        await deliver("needs" in second ? [] : second.sends);
+        await deliver("needs" in second.planned ? [] : second.planned.sends);
       } finally {
         await clearActivity(msg.chatId);
+        await notifyFinished(finished);
       }
     },
 
-    async startPaperCheck(patientId: string, paper: ExtractedPaper, attachmentId?: string): Promise<{ scanId: number }> {
-      const patient = requirePatient(patientId);
-      if (!patient.relayChatId) throw new Error(`Patient "${patientId}" has no Relay chat yet`);
-      const chatId = patient.relayChatId;
-      const scanId = db.transaction((): number => {
-        // The same photo delivered twice is one paper check.
-        const existing = attachmentId ? paperScanForAttachment(db, patientId, attachmentId) : undefined;
-        return existing?.id ?? insertPaperScan(db, { patientId, paper, attachmentId: attachmentId ?? null, createdAt: clock.now() });
-      })();
-      await messenger.send(chatId, { text: paperReadback(paper), buttons: [...PAPER_CONFIRM_BUTTONS] }, `${patientId}:paper:${scanId}:readback`);
-      return { scanId };
-    },
+    startPaperCheck,
+
+    callCheckinContext,
+    screenSpokenTurn,
+    recordSpokenCheckin,
 
     async runMissedCheckin(patientId: string, day: string): Promise<"marked_missed" | "nothing_to_do"> {
       const patient = requirePatient(patientId);
@@ -1882,11 +2455,17 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         // Only an untouched check-in is missed; a partly answered one is not. After a safety hit
         // the family already had an alert, and a follow-up is on its way.
         if (!c || c.status !== "sent" || c.answers.length > 0 || c.finishedAt !== null || c.concernAt !== null) return undefined;
+        // A video call counts as checking in, even one that recorded no answers.
+        if (c.sentAt !== null && wasOnCallSince(db, patientId, c.sentAt)) return undefined;
         updateCheckin(db, c.id, { status: "missed" });
         return toFamily(patient, familyMissedAlert(patient.preferredName, missedCheckinTime), `${patientId}:${day}:missed`);
       })();
       if (!sends) return "nothing_to_do";
-      await deliver(sends);
+      try {
+        await deliver(sends);
+      } finally {
+        await notifyFinished([{ patientId, day, outcome: "missed" }]);
+      }
       return "marked_missed";
     },
 
@@ -1896,6 +2475,61 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       });
       return followUpRun;
     },
+
+    async sendMedsReminder(patientId: string, day: string, slot: "morning" | "evening"): Promise<MedsReminderResult> {
+      const patient = requirePatient(patientId);
+      if (!patient.relayChatId) throw new Error(`Patient "${patientId}" has no Relay chat yet`);
+      const loaded = await recordOn(patient, day);
+      if (!loaded) return "no_record";
+      const schedule = medicationSchedule(activeMedications(loaded.record));
+      const sends = db.transaction(() => meds.planReminder(patient, day, slot, schedule))();
+      if (sends === undefined) return "already_sent";
+      if (sends.length === 0) return "nothing_to_send";
+      await deliver(sends);
+      return "sent";
+    },
+
+    async runMedsNudges(now: string): Promise<number> {
+      const failures: unknown[] = [];
+      let sent = 0;
+      for (const dose of dueNudges(db, now)) {
+        const patient = getCheckinPatient(db, dose.patientId);
+        const send = patient ? meds.nudgeSend(patient, dose) : undefined;
+        if (!send) continue; // not linked (any more): it waits
+        try {
+          await deliver([send]);
+          markNudged(db, dose.id, clock.now());
+          sent += 1;
+        } catch (error) {
+          failures.push(error); // the next run tries again with the same key
+        }
+      }
+      if (failures.length > 0) throw failures[0];
+      return sent;
+    },
+
+    async runRefillCheck(patientId: string, day: string): Promise<number> {
+      const patient = requirePatient(patientId);
+      if (!patient.relayChatId) return 0;
+      const loaded = await recordOn(patient, day);
+      if (!loaded) return 0;
+      const due = refillsDue(loaded.record, day, refillRemindDays);
+      const demo = loaded.record.demographics;
+      const who = { fullName: demo.name?.trim() || patient.preferredName, birthDate: demo.birthDate };
+      const sends = db.transaction(() => meds.planRefills(patient, day, due, who))();
+      await deliver(sends);
+      return sends.length;
+    },
+
+    async runMedsMissed(patientId: string, day: string): Promise<"marked_missed" | "nothing_to_do"> {
+      const patient = requirePatient(patientId);
+      const sends = db.transaction(() => meds.planMissed(patient, day))();
+      if (sends === undefined) return "nothing_to_do";
+      await deliver(sends);
+      return "marked_missed";
+    },
+
+    handlePhoto,
 
     async passOnFamilyMessages(patientId: string): Promise<number> {
       const patient = requirePatient(patientId);

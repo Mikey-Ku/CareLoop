@@ -1,13 +1,16 @@
-import type { MessageWebhookData, RelayWebhookEvent, WebSocketFullSyncContext } from "@relaymessenger/sdk";
-import { familyWelcome, photoNotYet } from "../checkin/copy.ts";
+import type { CallWebhookEvent, MessageWebhookData, RelayWebhookEvent, WebSocketFullSyncContext } from "@relaymessenger/sdk";
+import { familyWelcome, photoCouldNotOpen, photoNotYet, photoRejected } from "../checkin/copy.ts";
 import type { CheckinEngine } from "../checkin/engine-types.ts";
-import { normalizeHandle as familyHandle } from "../config.ts";
+import { normalizeHandle } from "../config.ts";
 import { getCheckinPatient, patientForChat } from "../db/checkins.ts";
 import { familyMembersForChat, linkFamilyMember } from "../db/family.ts";
 import type { Db } from "../db/index.ts";
+import { MAX_IMAGE_BYTES } from "../llm/types.ts";
 import type { InboundMessage, Messenger } from "./messenger.ts";
-import { consoleLog, describeRelayError, normalizeHandle, sameHandle, type RelayClient, type RelayLog } from "./relay-client.ts";
+import { consoleLog, describeRelayError, sameHandle, type RelayClient, type RelayLog } from "./relay-client.ts";
 import { RelayMessenger } from "./relay-messenger.ts";
+import type { CallEventHandler } from "../calls/service.ts";
+import { passOnFamilyMessage } from "./family-inbound.ts";
 
 // Durable inbox for Relay's acknowledged WebSocket, after Relay-SDK
 // cookbook/websocket-agent. `onEvent` commits the whole event by `event_id`
@@ -20,8 +23,14 @@ import { RelayMessenger } from "./relay-messenger.ts";
 // family member's own direct chat with the agent (a family chat) on
 // family_members.chat_id. Both are linked from contact.added, or from the first
 // direct message when that arrives first. Only the senior's chat reaches the
-// check-in engine; family messages are logged and otherwise ignored until family
-// replies and voice memos are built (build step 7).
+// check-in engine. A family member's text is passed on to her chat as plain text
+// (src/relay/family-inbound.ts: safety screen in the third person first, never an
+// answer or a sharing change); their photos get no reply. Voice memos are later.
+//
+// Photos: a media part in her chat is downloaded from its signed URL (promptly: it expires in
+// about an hour) with a size guard (MAX_IMAGE_BYTES, 8 MB), and the bytes go to the engine's
+// handlePhoto (src/checkin/engine.ts), which reads it with the LLM. The URL and the bytes are never
+// logged. An engine without handlePhoto (tests) gets the old kind reply, photoNotYet.
 //
 // Family welcome: the first time a family member's chat is linked for a senior
 // (it had no chat before), the agent sends familyWelcome there once, with the
@@ -29,9 +38,14 @@ import { RelayMessenger } from "./relay-messenger.ts";
 // rename or a repeat event sends nothing. Best effort: a failed send is logged
 // and never undoes the link or fails the event.
 
+/** The engine as the inbox uses it: every message, and her photos when it reads them. */
+export type InboxEngine = Pick<CheckinEngine, "handleInbound"> & Partial<Pick<CheckinEngine, "handlePhoto">>;
+
 export type InboxDeps = {
   db: Db;
-  engine: Pick<CheckinEngine, "handleInbound">;
+  engine: InboxEngine;
+  /** Downloads her photos from their signed URL. Defaults to the global fetch. */
+  fetch?: typeof fetch;
   /** The senior's Relay handle (PATIENT_RELAY_HANDLE). */
   patientHandle: string;
   /** Used to mark the senior's chat Read after her message is handled, to list chats on FULL sync, and to send the family welcome. */
@@ -40,6 +54,8 @@ export type InboxDeps = {
   messenger?: Messenger;
   log?: RelayLog;
   now?: () => string;
+  /** Starts or updates a call after its event is durably committed. */
+  callHandler?: CallEventHandler;
 };
 
 /** What the processor did with one event; stored in the log line, useful in tests. */
@@ -54,7 +70,10 @@ export type EventOutcome =
   | "agent_sender_ignored"
   | "unknown_chat"
   | "media_skipped"
+  | "photo_handled"
+  | "photo_not_downloaded"
   | "no_text"
+  | "call_started"
   | "ignored_type";
 
 // ---------------------------------------------------------------------------
@@ -132,7 +151,7 @@ type FamilyLink = { patientIds: string[]; changed: boolean; firstLinked: string[
  */
 function linkFamily(db: Db, handle: string, chatId: string, displayName: string | null, now: string): FamilyLink | undefined {
   const unlinked = new Set(
-    (db.prepare(`SELECT patient_id AS patientId FROM family_members WHERE handle = ? AND chat_id IS NULL`).all(familyHandle(handle)) as { patientId: string }[]).map(
+    (db.prepare(`SELECT patient_id AS patientId FROM family_members WHERE handle = ? AND chat_id IS NULL`).all(normalizeHandle(handle)) as { patientId: string }[]).map(
       (r) => r.patientId,
     ),
   );
@@ -145,7 +164,7 @@ function linkFamily(db: Db, handle: string, chatId: string, displayName: string 
 async function welcomeFamily(deps: InboxDeps, log: RelayLog, handle: string, chatId: string, patientIds: string[], fields: Record<string, unknown> = {}): Promise<void> {
   if (patientIds.length === 0) return;
   const messenger = deps.messenger ?? new RelayMessenger(deps.relay);
-  const normalized = familyHandle(handle);
+  const normalized = normalizeHandle(handle);
   for (const patientId of patientIds) {
     const patient = getCheckinPatient(deps.db, patientId);
     if (!patient) continue;
@@ -174,6 +193,18 @@ export async function processEvent(deps: InboxDeps, event: RelayWebhookEvent): P
   const log = deps.log ?? consoleLog;
   const now = deps.now ?? (() => new Date().toISOString());
   const base = { event_id: event.event_id, event_type: event.event_type };
+
+  if (event.event_type === "call.created" || event.event_type === "call.updated" || event.event_type === "call.ended") {
+    if (!deps.callHandler) {
+      log("relay_call_ignored", base);
+      return "call_started";
+    }
+    // CallService.handle returns as soon as the bridge has been scheduled. It never holds the
+    // durable inbox drain open for the lifetime of the media session.
+    await deps.callHandler.handle(event as CallWebhookEvent);
+    log("relay_call_routed", base);
+    return "call_started";
+  }
 
   if (event.event_type === "contact.added") {
     const { contact, chat_id: chatId } = event.data;
@@ -228,12 +259,17 @@ export async function processEvent(deps: InboxDeps, event: RelayWebhookEvent): P
       }
     }
     if (family.length > 0) {
-      log("relay_family_message_ignored", {
-        ...base,
-        handle: family[0]!.handle,
-        chat_id: data.chat.id,
-        patient_ids: family.map((f) => f.patientId),
-      });
+      const at = { ...base, handle: family[0]!.handle, chat_id: data.chat.id, patient_ids: family.map((f) => f.patientId) };
+      // Text only (a photo or empty message gets nothing). Their words are never logged.
+      const text = data.parts.some((part) => part.type === "media") ? "" : textOf(data);
+      if (!text) {
+        log("relay_family_message_ignored", at);
+        return "family_message";
+      }
+      const messenger = deps.messenger ?? new RelayMessenger(deps.relay);
+      const outcomes = await passOnFamilyMessage({ db: deps.db, messenger, now }, family, { chatId: data.chat.id, messageId: data.id, text });
+      log("relay_family_message", { ...at, outcomes });
+      await markRead(deps, log, base, data.chat.id);
       return "family_message";
     }
   }
@@ -242,19 +278,29 @@ export async function processEvent(deps: InboxDeps, event: RelayWebhookEvent): P
     return "unknown_chat";
   }
 
-  if (data.parts.some((part) => part.type === "media")) {
-    // TODO(lane C, hospital paper check): a photo arrives as `message.received`
-    // with a part { type: "media", id, url, filename, mime_type, size_bytes,
-    // width?, height? } (MediaPartResponse in the SDK's types.d.ts); `url` is
-    // signed and valid about 60 minutes, so download it promptly and store it
-    // in paper_scans, then hand it to the paper check instead of this reply.
-    // Until then the photo isn't read: she gets photoNotYet (kind, points to her
-    // doctor or pharmacist), and the caption is never read as an answer.
-    log("relay_media_skipped", { ...base, chat_id: data.chat.id, patient_id: patient.id });
+  const media = data.parts.find((part) => part.type === "media");
+  if (media && media.type === "media") {
+    // The caption is never read as an answer. Neither the signed URL nor the bytes are logged.
     const messenger = deps.messenger ?? new RelayMessenger(deps.relay);
-    await messenger.send(data.chat.id, { text: photoNotYet(patient.preferredName) }, `${patient.id}:photo:${data.id}`);
+    const at = { ...base, chat_id: data.chat.id, patient_id: patient.id, mime_type: media.mime_type, size_bytes: media.size_bytes };
+    if (!deps.engine.handlePhoto) {
+      log("relay_media_skipped", at);
+      await messenger.send(data.chat.id, { text: photoNotYet(patient.preferredName) }, `${patient.id}:photo:${data.id}`);
+      await markRead(deps, log, base, data.chat.id);
+      return "media_skipped";
+    }
+    const download = await downloadPhoto(deps.fetch ?? fetch, media.url, media.size_bytes);
+    if (!download.ok) {
+      log("relay_photo_not_downloaded", { ...at, reason: download.reason });
+      const text = download.reason === "too_large" ? photoRejected() : photoCouldNotOpen(patient.preferredName);
+      await messenger.send(data.chat.id, { text }, `${patient.id}:photo:${data.id}`);
+      await markRead(deps, log, base, data.chat.id);
+      return "photo_not_downloaded";
+    }
+    const outcome = await deps.engine.handlePhoto(patient.id, download.bytes, media.mime_type, media.id);
+    log("relay_photo_handled", { ...at, outcome });
     await markRead(deps, log, base, data.chat.id);
-    return "media_skipped";
+    return "photo_handled";
   }
 
   // A plain button tap is one text part equal to the button's label, with
@@ -272,6 +318,30 @@ export async function processEvent(deps: InboxDeps, event: RelayWebhookEvent): P
   await deps.engine.handleInbound(inbound);
   await markRead(deps, log, base, data.chat.id);
   return "handled";
+}
+
+/** How long a photo download may take. */
+export const PHOTO_DOWNLOAD_TIMEOUT_MS = 20_000;
+
+type Download = { ok: true; bytes: Uint8Array } | { ok: false; reason: "too_large" | "http_error" | "network_error" };
+
+/**
+ * Download a photo from its signed URL with a size guard (MAX_IMAGE_BYTES): Relay's size, the
+ * Content-Length and the bytes themselves are each checked. Never throws, never logs the URL.
+ */
+export async function downloadPhoto(fetchFn: typeof fetch, url: string, sizeBytes: number | null | undefined): Promise<Download> {
+  if (typeof sizeBytes === "number" && sizeBytes > MAX_IMAGE_BYTES) return { ok: false, reason: "too_large" };
+  try {
+    const response = await fetchFn(url, { signal: AbortSignal.timeout(PHOTO_DOWNLOAD_TIMEOUT_MS) });
+    if (!response.ok) return { ok: false, reason: "http_error" };
+    const length = Number(response.headers.get("content-length") ?? NaN);
+    if (Number.isFinite(length) && length > MAX_IMAGE_BYTES) return { ok: false, reason: "too_large" };
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > MAX_IMAGE_BYTES) return { ok: false, reason: "too_large" };
+    return { ok: true, bytes };
+  } catch {
+    return { ok: false, reason: "network_error" };
+  }
 }
 
 /**
@@ -453,11 +523,14 @@ export async function assertNoWebhookSubscriptions(relay: Pick<RelayClient, "web
 export type RunRelayInboxOptions = {
   relay: RelayClient;
   db: Db;
-  engine: Pick<CheckinEngine, "handleInbound">;
+  engine: InboxEngine;
+  /** Downloads her photos. Defaults to the global fetch. */
+  fetch?: typeof fetch;
   patientHandle: string;
   signal?: AbortSignal;
   log?: RelayLog;
   now?: () => string;
+  callHandler?: CallEventHandler;
 };
 
 /**
@@ -475,6 +548,8 @@ export async function runRelayInbox(options: RunRelayInboxOptions): Promise<void
     relay: options.relay,
     log,
     ...(options.now ? { now: options.now } : {}),
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    ...(options.callHandler ? { callHandler: options.callHandler } : {}),
   });
   inbox.wake();
   try {

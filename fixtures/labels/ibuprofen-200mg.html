@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Synthetic label: ibuprofen 200 mg (demo)</title>
+<!--
+  Synthetic demo label for the MHacks 2026 medication helper. An over-the-counter
+  style label for a medicine that is NOT on Harriet's list. No patient or prescriber,
+  like a real store-brand bottle.
+  Every person, number and business on it is fictional. Print at 100% scale with
+  "Background graphics" on; the label is 5.5 inches wide, like a large bottle label.
+  PNG for offline tests and llm:check: qlmanage -t -s 1200 -o . <file>.html
+-->
+<style>
+  @page { size: letter portrait; margin: 0.5in; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #ffffff; color: #000000; }
+  body { font-family: Arial, Helvetica, sans-serif; padding: 0.25in; }
+  .label {
+    width: 5.5in; border: 3px solid #000000; border-radius: 0.12in; padding: 0.14in 0.2in 0.16in;
+    background: #ffffff;
+  }
+  .banner {
+    border: 3px solid #000000; background: #ffe600; text-align: center; font-weight: bold;
+    font-size: 12.5pt; padding: 0.05in 0.08in; margin-bottom: 0.1in; white-space: nowrap;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  .pharmacy { display: flex; justify-content: space-between; align-items: baseline; gap: 0.2in; }
+  .pharmacy .name { font-size: 15pt; font-weight: bold; }
+  .pharmacy .rx { font-size: 13pt; font-weight: bold; white-space: nowrap; }
+  .address { font-size: 11pt; margin-top: 0.02in; }
+  hr { border: 0; border-top: 2px solid #000000; margin: 0.08in 0; }
+  .patient { font-size: 15pt; font-weight: bold; letter-spacing: 0.02em; }
+  .directions { font-size: 22pt; font-weight: bold; line-height: 1.2; margin: 0.06in 0 0.04in; }
+  .drug { font-size: 22pt; font-weight: bold; margin-top: 0.02in; }
+  .drug .strength { white-space: nowrap; }
+  .form { font-size: 13pt; margin-top: 0.02in; }
+  .facts { display: grid; grid-template-columns: 1.25fr 1fr; gap: 0.03in 0.15in; font-size: 13pt; margin-top: 0.06in; }
+  .facts b { font-weight: bold; }
+  .brand { font-size: 13pt; font-weight: bold; text-transform: uppercase; letter-spacing: 0.04em; }
+  .use { font-size: 13pt; margin-top: 0.02in; }
+  .box { border: 2px solid #000000; padding: 0.06in 0.1in; margin-top: 0.08in; font-size: 13pt; line-height: 1.25; }
+  .box .head { font-weight: bold; font-size: 14pt; }
+  .count { font-size: 15pt; font-weight: bold; margin-top: 0.06in; }
+  .small { font-size: 10pt; margin-top: 0.06in; }
+</style>
+</head>
+<body>
+<div class="label">
+  <div class="banner">SYNTHETIC DEMO LABEL, NOT A REAL PRESCRIPTION</div>
+  <div class="brand">Northstar Basics (Synthetic)</div>
+  <div class="address">Distributed by Northstar Community Pharmacy (Synthetic), 400 Example Avenue, Fictional City</div>
+  <hr>
+  <div class="drug">Ibuprofen <span class="strength">200 mg</span></div>
+  <div class="form">Tablets</div>
+  <div class="use">Pain reliever / Fever reducer (NSAID)</div>
+  <div class="box">
+    <div class="head">Directions</div>
+    Adults and children 12 years and over: take 1 tablet every 4 to 6 hours while symptoms persist.
+    Do not take more than 6 tablets in 24 hours unless directed by a doctor.
+  </div>
+  <div class="count">100 Tablets</div>
+  <div class="small">Lot SYN-24A7 &middot; Exp 2028-03</div>
+</div>
+</body>
+</html>

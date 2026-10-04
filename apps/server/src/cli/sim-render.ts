@@ -73,7 +73,14 @@ export const HELP_LINES = [
   "  /flags                stored flags and their status",
   "  /sharing [level]      she types \"Sharing\" (the menu); with a level she also taps it: status, status_vitals or all",
   "  /paper                start a paper check: read back her discharge paper; on Yes the engine compares it (R6)",
-  "  /later                jump to the next follow-up check-in (after a red flag or an urgent message) and send it",
+  "  /later                jump to the next follow-up check-in (after a red flag or an urgent message) or medicines",
+  "                        re-reminder (after \"Not yet\") and send it",
+  "  /meds                 send the morning medicines reminder now (Taken / Not yet / I have a question)",
+  "  /evening              move to the evening and send the evening medicines reminder (with bedtime)",
+  "  /refills              run the refill check: fills running out within REFILL_REMIND_DAYS (at most 2 a day)",
+  "  /photo FILE [--as label:NAME,STRENGTH,INSTRUCTIONS | papers | unreadable | other]",
+  "                        send a photo as hers; --as stands in for the LLM's reading (the file may then be missing),",
+  "                        e.g. /photo fixtures/labels/apixaban-5mg.png --as label:Apixaban,5 mg,Take 1 tablet by mouth twice daily",
   "  /as KIND [answer]     read her next typed message as KIND (answer, more_detail, medicine_question, feeling_low,",
   "                        urgent_symptom, crisis, family_message, chat) without an LLM; for answer, which button",
   "      [| topic, amount, change]  ...and the symptoms she mentions, e.g. /as chat | knee pain, a_little, same",
@@ -83,4 +90,11 @@ export const HELP_LINES = [
   "                        /as extract hf-ankle-swelling=A little | hf-ankle-swelling, a_little, same",
   "  /db                   row counts per table",
   "  /quit                 leave",
+];
+
+export const CARE_HELP_LINES = [
+  "Care summaries over Photon (faked here, to the example contacts in care-contacts.example.json):",
+  "  /summary              text the day's summary to the doctor and the emergency contact (also sent when a check-in ends)",
+  "  /doctor <text>        the doctor texts back",
+  "  /family <text>        the emergency contact texts back",
 ];

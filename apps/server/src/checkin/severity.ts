@@ -1,4 +1,5 @@
 import type { Amount, Change, SymptomMention } from "../llm/types.ts";
+import { dayNumber } from "../days.ts";
 
 // The severity ladder (docs/DESIGN.md "Severity ladder"): every reaction to what she tells us
 // comes from one level, 0 to 5, set here by fixed tables. The LLM only extracts what she said
@@ -111,9 +112,6 @@ export function topicOf(mention: Pick<SymptomMention, "topic" | "questionId">): 
 export function isRedFlagTopic(topic: string): boolean {
   return RED_FLAG_TOPICS.includes(topic);
 }
-
-const DAY_MS = 86_400_000;
-const dayNumber = (day: string) => Math.floor(Date.parse(day) / DAY_MS);
 
 /** Distinct days, among her last REPETITION.days (today included), on which `topic` came up at level 1 or more. */
 export function daysSeen(topic: string, history: SeverityHistory): number {

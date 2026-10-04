@@ -1,0 +1,23 @@
+# Medication helper (check-in date 2026-07-28). Her apixaban 5 mg was filled Jul 2 with a 30-day
+# supply, so it runs out around Aug 1: 4 days away, inside the 5-day refill window. Her other fills
+# run out later than that (metoprolol Aug 5, 8 days) or, as of Jul 28, haven't happened yet.
+# Offline: the /photo --as lines stand in for the LLM's reading of each label photo
+# (fixtures/labels/*.png). With --llm, drop "--as ..." to let the model read the real files.
+# npm run simulate -- --reset --day 2026-07-28 --script ../../scripts/demo/harriet-meds.txt
+#
+# Not today for the check-in itself, so the medicines flow stands on its own
+2
+# The morning medicines reminder: each medicine with her prescription's words, verbatim
+/meds
+# Taken: noted, then the day's memory check (one medicine, in turn)
+1
+# Not sure: only her label's words come back, nothing more
+3
+# A photo of her apixaban 5 mg bottle: it matches her list
+/photo fixtures/labels/apixaban-5mg.png --as label:Apixaban,5 mg,Take 1 tablet by mouth twice daily
+# A photo of an apixaban 2.5 mg bottle: the strength doesn't match, so her pharmacist checks it
+/photo fixtures/labels/apixaban-2-5mg.png --as label:Apixaban,2.5 mg,Take 1 tablet by mouth twice daily
+# The refill check: apixaban runs out around Aug 1
+/refills
+# Tell Sarah
+3

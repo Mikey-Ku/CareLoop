@@ -1,5 +1,5 @@
-import type { ChatActivityResponse, ChatClearActivityParams, ChatSetActivityParams, MessagePart } from "@relaymessenger/sdk";
-import { assertValidActivityLabel, assertValidButtons } from "./messenger.ts";
+import { IDEMPOTENCY_KEY_MAX_LENGTH, partsWithButtons, type ChatActivityResponse, type ChatClearActivityParams, type ChatSetActivityParams, type MessagePart } from "@relaymessenger/sdk";
+import { assertValidActivityLabel, assertValidButtons, relayButtonsPart } from "./messenger.ts";
 import type { Messenger, OutboundMessage, SentMessage } from "./messenger.ts";
 import { consoleLog, describeRelayError, type RelayClient, type RelayLog } from "./relay-client.ts";
 
@@ -15,8 +15,6 @@ import { consoleLog, describeRelayError, type RelayClient, type RelayLog } from 
 // seconds while the work goes on; DELETE with the `activity_id` clears only ours.
 // Best effort: a failure is logged (never her message) and swallowed.
 
-/** Relay's limit on idempotency keys (IDEMPOTENCY_KEY_MAX_LENGTH in the SDK). */
-export const MAX_IDEMPOTENCY_KEY = 255;
 /** Renew an activity label this often (Relay's lease is 90 seconds). */
 export const ACTIVITY_RENEW_MS = 60_000;
 /** Stop renewing after this many renewals, in case nobody clears it; the lease then runs out by itself. */
@@ -50,12 +48,9 @@ const defaultEvery: Every = (fn, ms) => {
   return () => clearInterval(timer);
 };
 
-/** The message parts Relay expects for one outbound message. */
+/** The message parts Relay expects for one outbound message: its text, then its buttons if it has any (SDK partsWithButtons). */
 export function toRelayParts(message: OutboundMessage): MessagePart[] {
-  const parts: MessagePart[] = [{ type: "text", value: message.text }];
-  if (message.buttons && message.buttons.length > 0)
-    parts.push({ type: "buttons", items: message.buttons.map((label) => ({ label })) });
-  return parts;
+  return partsWithButtons(message.text, message.buttons?.length ? relayButtonsPart(message.buttons) : undefined);
 }
 
 export class RelayMessenger implements Messenger {
@@ -127,8 +122,8 @@ export class RelayMessenger implements Messenger {
   async send(chatId: string, message: OutboundMessage, idempotencyKey: string): Promise<SentMessage> {
     assertValidButtons(message.buttons);
     if (!message.text.trim()) throw new Error("Relay messages need text; got an empty message");
-    if (idempotencyKey.length < 1 || idempotencyKey.length > MAX_IDEMPOTENCY_KEY)
-      throw new Error(`Idempotency key must be 1 to ${MAX_IDEMPOTENCY_KEY} characters, got ${idempotencyKey.length}`);
+    if (idempotencyKey.length < 1 || idempotencyKey.length > IDEMPOTENCY_KEY_MAX_LENGTH)
+      throw new Error(`Idempotency key must be 1 to ${IDEMPOTENCY_KEY_MAX_LENGTH} characters, got ${idempotencyKey.length}`);
 
     let response;
     try {

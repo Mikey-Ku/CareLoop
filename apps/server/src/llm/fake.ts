@@ -1,12 +1,17 @@
 import type {
   AnswerMapping,
+  CallScreeningLlmInput,
+  CallScreeningLlmOutput,
+  CareMessageInput,
   CheckinExtraction,
   ClassifyInput,
   ExtractCheckinInput,
+  ImageReading,
   LlmCallOptions,
   LlmClient,
   MapAnswerInput,
   MessageClassification,
+  ReadImageInput,
   SmallTalkInput,
   SmallTalkReply,
 } from "./types.ts";
@@ -21,13 +26,19 @@ export type FakeLlmScript = {
   smallTalk?: (input: SmallTalkInput) => SmallTalkReply | Error;
   classifyMessage?: (input: ClassifyInput) => MessageClassification | Error;
   extractCheckin?: (input: ExtractCheckinInput) => CheckinExtraction | Error;
+  readImage?: (input: ReadImageInput) => ImageReading | Error;
+  writeCareMessage?: (input: CareMessageInput) => string | Error;
+  screenCall?: (input: CallScreeningLlmInput) => CallScreeningLlmOutput | Error;
 };
 
 export type FakeLlmCall =
   | { method: "mapAnswer"; input: MapAnswerInput }
   | { method: "smallTalk"; input: SmallTalkInput }
   | { method: "classifyMessage"; input: ClassifyInput }
-  | { method: "extractCheckin"; input: ExtractCheckinInput };
+  | { method: "extractCheckin"; input: ExtractCheckinInput }
+  | { method: "readImage"; input: ReadImageInput }
+  | { method: "writeCareMessage"; input: CareMessageInput }
+  | { method: "screenCall"; input: CallScreeningLlmInput };
 
 export class FakeLlmClient implements LlmClient {
   readonly provider = "fake";
@@ -89,6 +100,37 @@ export class FakeLlmClient implements LlmClient {
     };
   }
 
+  /** Unscripted: unreadable, so the caller asks her for a clearer photo. */
+  async readImage(input: ReadImageInput, options?: LlmCallOptions): Promise<ImageReading> {
+    this.calls.push({ method: "readImage", input });
+    throwIfAborted(options);
+    const result: ImageReading | Error = this.script.readImage
+      ? this.script.readImage(input)
+      : { kind: "unreadable", reason: "fake" };
+    if (result instanceof Error) throw result;
+    return cloneReading(result);
+  }
+
+  /** Unscripted: unavailable, so the caller sends its fixed template. */
+  async writeCareMessage(input: CareMessageInput, options?: LlmCallOptions): Promise<string> {
+    this.calls.push({ method: "writeCareMessage", input });
+    throwIfAborted(options);
+    if (!this.script.writeCareMessage) throw new LlmUnavailableError("fake: no writeCareMessage script");
+    const result = this.script.writeCareMessage(input);
+    if (result instanceof Error) throw result;
+    return result;
+  }
+
+  /** Unscripted: unavailable, so the call service records its "review it manually" result. */
+  async screenCall(input: CallScreeningLlmInput, options?: LlmCallOptions): Promise<CallScreeningLlmOutput> {
+    this.calls.push({ method: "screenCall", input });
+    throwIfAborted(options);
+    if (!this.script.screenCall) throw new LlmUnavailableError("fake: no screenCall script");
+    const result = this.script.screenCall(input);
+    if (result instanceof Error) throw result;
+    return { ...result, symptoms: result.symptoms.map((m) => ({ ...m })), finchEvidence: result.finchEvidence.map((e) => ({ ...e })), uncertainty: [...result.uncertainty] };
+  }
+
   /** Inputs of the mapAnswer calls only, in order. */
   get mapAnswerCalls(): MapAnswerInput[] {
     return this.calls.flatMap((c) => (c.method === "mapAnswer" ? [c.input] : []));
@@ -107,6 +149,30 @@ export class FakeLlmClient implements LlmClient {
   /** Inputs of the extractCheckin calls only, in order. */
   get extractCalls(): ExtractCheckinInput[] {
     return this.calls.flatMap((c) => (c.method === "extractCheckin" ? [c.input] : []));
+  }
+
+  /** Inputs of the writeCareMessage calls only, in order. */
+  get careMessageCalls(): CareMessageInput[] {
+    return this.calls.flatMap((c) => (c.method === "writeCareMessage" ? [c.input] : []));
+  }
+
+  /** Inputs of the readImage calls only, in order. */
+  get readImageCalls(): ReadImageInput[] {
+    return this.calls.flatMap((c) => (c.method === "readImage" ? [c.input] : []));
+  }
+}
+
+function cloneReading(reading: ImageReading): ImageReading {
+  switch (reading.kind) {
+    case "medicine_label":
+      return { kind: "medicine_label", label: { ...reading.label } };
+    case "discharge_papers":
+      return {
+        kind: "discharge_papers",
+        paper: { ...reading.paper, medications: reading.paper.medications.map((m) => ({ ...m })) },
+      };
+    default:
+      return { ...reading };
   }
 }
 

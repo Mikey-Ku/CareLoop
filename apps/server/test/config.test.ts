@@ -96,7 +96,8 @@ describe("times and dates", () => {
   });
 
   it("rejects a malformed CLOCK_DATE", () => {
-    expect(() => loadConfig({ CLOCK_DATE: "10/03/2026" })).toThrow("CLOCK_DATE must be YYYY-MM-DD");
+    expect(() => loadConfig({ CLOCK_DATE: "10/03/2026" })).toThrow("CLOCK_DATE must be a real date, YYYY-MM-DD");
+    expect(() => loadConfig({ CLOCK_DATE: "2026-02-30" })).toThrow("CLOCK_DATE must be a real date, YYYY-MM-DD");
   });
 
   it("resolveCheckinDate prefers the demo clock, then data as-of, then today", () => {
@@ -145,8 +146,8 @@ describe("LLM settings", () => {
   });
 
   it("reads the provider in any case, the model list and the budget", () => {
-    const c = loadConfig({ LLM_PROVIDER: " Anthropic ", GEMINI_MODELS: " a , b,,a ", LLM_TIMEOUT_MS: "8000" });
-    expect(c.llm.provider).toBe("anthropic");
+    const c = loadConfig({ LLM_PROVIDER: " Gemini ", GEMINI_MODELS: " a , b,,a ", LLM_TIMEOUT_MS: "8000" });
+    expect(c.llm.provider).toBe("gemini");
     expect(c.llm.geminiModels).toEqual(["a", "b"]);
     expect(c.llm.timeoutMs).toBe(8000);
     expect(loadConfig({ GEMINI_MODELS: " , " }).llm.geminiModels).toEqual([...DEFAULT_GEMINI_MODELS]);

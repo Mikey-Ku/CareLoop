@@ -125,19 +125,41 @@ function paperEvidence(paper: ExtractedPaper, line: PaperMedication, index: numb
 function describeDiscrepancy(d: Discrepancy, plural: boolean): string {
   switch (d.kind) {
     case "stopped_but_active":
-      return `${plural ? "they say" : "it says"} to stop ${d.paperName}${d.paperStrength ? ` ${d.paperStrength}` : ""}, but your medication list still shows ${d.recordName} as active`;
+      return `${plural ? "they say" : "it says"} to stop ${d.paperName}${d.paperStrength ? ` ${d.paperStrength}` : ""}, but your medication list still shows it as active`;
     case "new_not_in_record":
       return `${plural ? "they list" : "it lists"} ${d.paperName}${d.paperStrength ? ` ${d.paperStrength}` : ""}, which isn't on your medication list`;
     case "dose_differs":
-      return `${plural ? "they list" : "it lists"} ${d.paperName} ${d.paperStrength}, but your medication list shows ${d.recordStrength}`;
+      return `${plural ? "they list" : "it lists"} ${d.paperName} ${d.paperStrength}, but your medication list shows ${d.recordStrength ? strengthWords(d.recordStrength) : "a different strength"}`;
   }
 }
 
-/** "Your discharge papers from Northstar dated 2026-08-20" and the verb that agrees with it. */
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/** "2026-08-20" -> "August 20, 2026"; anything else is said as printed. */
+export function spokenDate(date: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  const month = match ? MONTHS[Number(match[2]) - 1] : undefined;
+  return match && month ? `${month} ${Number(match[3])}, ${match[1]}` : date;
+}
+
+/** Drop a trailing "(Synthetic)" style label so the organization reads naturally aloud. */
+export function spokenOrganization(organization: string): string {
+  return organization.replace(/\s*\([^)]*\)\s*$/, "").trim() || organization;
+}
+
+/** "81 MG" -> "81 mg", as her reminders write it. */
+function strengthWords(strength: string): string {
+  return strength.replace(/\b(MG|MCG|ML|G)\b/g, (u) => u.toLowerCase()).replace(/\bMEQ\b/gi, "mEq");
+}
+
+/** "Your discharge papers from Northstar Health System dated August 20, 2026" and the verb that agrees with it. */
 function papersPhrase(paper: ExtractedPaper): { subject: string; plural: boolean } {
   const what = paper.kind === "discharge" ? "discharge papers" : "visit summary";
-  const from = paper.organization ? ` from ${paper.organization}` : "";
-  const dated = paper.date ? ` dated ${paper.date}` : "";
+  const from = paper.organization ? ` from ${spokenOrganization(paper.organization)}` : "";
+  const dated = paper.date ? ` dated ${spokenDate(paper.date)}` : "";
   return { subject: `Your ${what}${from}${dated}`, plural: paper.kind === "discharge" };
 }
 

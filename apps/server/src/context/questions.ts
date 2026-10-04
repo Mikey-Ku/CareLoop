@@ -1,6 +1,7 @@
 import { activeMedications, type Condition, type PatientRecord } from "../finchnode/normalize.ts";
 import type { Category } from "../finchnode/types.ts";
 import { medsInClass, type DrugClass } from "../rules/drug-classes.ts";
+import { dayNumber } from "../days.ts";
 
 // Daily question bank, keyed by condition or drug class (docs/DESIGN.md
 // "Daily questions and red flags"). At most 3 a day. Red-flag questions come up
@@ -10,15 +11,15 @@ import { medsInClass, type DrugClass } from "../rules/drug-classes.ts";
 // Symptom questions have graded answers (docs/DESIGN.md "Severity ladder"): each
 // button's level is in src/checkin/severity.ts BUTTON_LEVELS, and only the level-3
 // answers ("Yes, it was hard", "Yes, bleeding") are red-flag answers. At most
-// MAX_BUTTONS buttons each, leaving room for one more: symptom questions (ankles,
-// breathing, bleeding, dizziness) also offer "Let me explain" (LET_ME_EXPLAIN), added
+// MAX_QUESTION_BUTTONS buttons each, leaving room for one more: symptom questions
+// (ankles, breathing, bleeding, dizziness) also offer "Let me explain" (LET_ME_EXPLAIN), added
 // when the question is sent (promptButtons). `buttons` stays the answers only, which
 // is what the LLM maps her words onto and what the severity table levels.
 
 export type Question = {
   id: string;
   text: string;
-  /** Relay allows 1 to 5 buttons, each up to 80 characters; the bank keeps to MAX_BUTTONS. */
+  /** Relay allows 1 to 5 buttons, each up to 80 characters; the bank keeps to MAX_QUESTION_BUTTONS. */
   buttons: string[];
   /** Level-3 answers (her doctor today, family alert). Empty when the question has none. */
   redFlagAnswers: string[];
@@ -110,7 +111,7 @@ export const QUESTION_BANK: BankEntry[] = [
 export const MAX_QUESTIONS_PER_DAY = 3;
 
 /** Buttons per bank question at most, so one more can be added to any of them within Relay's 5. */
-export const MAX_BUTTONS = 4;
+export const MAX_QUESTION_BUTTONS = 4;
 
 /**
  * The extra button on every symptom question. Tapping it, she is invited to say it in her own
@@ -207,11 +208,6 @@ export function eligibleQuestions(record: PatientRecord): Question[] {
 const BANK_BY_ID = new Map(QUESTION_BANK.map((e) => [e.id, e]));
 const norm = (s: string) => s.trim().toLowerCase();
 const isRedFlagQuestion = (e: BankEntry) => e.redFlagAnswers.length > 0;
-
-/** Days since 1970-01-01 for a YYYY-MM-DD date, or NaN. */
-function dayNumber(day: string): number {
-  return Math.floor(Date.parse(day) / 86_400_000);
-}
 
 /** A worrying answer: anything but one of the question's calm answers. */
 export function isWorryingAnswer(questionId: string, answer: string): boolean {

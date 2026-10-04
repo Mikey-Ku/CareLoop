@@ -1,9 +1,9 @@
 import { z } from "zod";
+import { isCalendarDay } from "./days.ts";
 
 // App configuration from the environment. Secrets live only in .env and never
 // appear in an error message, a log line or a printed config.
 
-const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 export const DEFAULT_RELAY_API_URL = "https://api.relayapp.im";
@@ -25,12 +25,17 @@ const ConfigSchema = z.object({
   DATABASE_PATH: z.string().default("./data/app.db"),
   CHECKIN_TIME: z.string().regex(TIME, "must be HH:MM (24 hour)").default("09:00"),
   MISSED_CHECKIN_TIME: z.string().regex(TIME, "must be HH:MM (24 hour)").default("12:00"),
+  /** Medication helper (src/meds): the morning and evening reminders, the one re-reminder after "Not yet", the refill window. */
+  MEDS_MORNING_TIME: z.string().regex(TIME, "must be HH:MM (24 hour)").default("08:00"),
+  MEDS_EVENING_TIME: z.string().regex(TIME, "must be HH:MM (24 hour)").default("20:00"),
+  MEDS_NUDGE_MINUTES: z.coerce.number().positive("must be a positive number of minutes").max(24 * 60).default(60),
+  REFILL_REMIND_DAYS: z.coerce.number().int().min(1).max(30).default(5),
   /** Demo clock (docs/DESIGN.md "Dates"). Empty means use the snapshot's data as-of date. */
   CLOCK_DATE: z
     .string()
     .optional()
     .transform((v) => (v ? v : undefined))
-    .refine((v) => v === undefined || DAY.test(v), "CLOCK_DATE must be YYYY-MM-DD"),
+    .refine((v) => v === undefined || isCalendarDay(v), "CLOCK_DATE must be a real date, YYYY-MM-DD"),
   RELAY_API_URL: z.string().default(DEFAULT_RELAY_API_URL),
   PATIENT_RELAY_HANDLE: z.string().optional(),
   FAMILY_RELAY_HANDLES: z.string().optional(),
@@ -40,10 +45,18 @@ const ConfigSchema = z.object({
     .string()
     .default("gemini")
     .transform((v) => v.trim().toLowerCase())
-    .pipe(z.enum(["gemini", "anthropic"], "LLM_PROVIDER must be gemini or anthropic")),
+    .pipe(z.enum(["gemini"], "LLM_PROVIDER must be gemini (the only adapter)")),
   GEMINI_MODELS: z.string().optional(),
   LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(DEFAULT_LLM_TIMEOUT_MS),
   LLM_ATTEMPT_TIMEOUT_MS: z.coerce.number().int().min(500).max(120_000).default(DEFAULT_LLM_ATTEMPT_TIMEOUT_MS),
+  ELEVENLABS_API_KEY: z.string().optional(),
+  ELEVENLABS_AGENT_ID: z.string().optional(),
+  ELEVENLABS_TOOL_SECRET: z.string().optional(),
+  CALL_QUIET_MEASUREMENT_MS: z.coerce.number().int().min(30_000).max(45_000).default(30_000),
+  /** Longest call; the server ends the ElevenLabs session after it (Relay's 32 s is only the time to answer). */
+  CALL_MAX_MINUTES: z.coerce.number().positive().max(30).default(4),
+  /** Lowest SmartSpectra confidence (0 to 100) a camera reading needs to be used. 1 keeps out warm-up zeros; the team tunes it. */
+  VITALS_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(1),
 });
 
 export type RelayConfig = {
@@ -63,10 +76,10 @@ export type PatientConfig = {
   timezone: string;
 };
 
-export type LlmProvider = "gemini" | "anthropic";
+export type LlmProvider = "gemini";
 
 export type LlmConfig = {
-  /** LLM_PROVIDER. Only "gemini" has an adapter so far; "anthropic" leaves free text off (buttons only). */
+  /** LLM_PROVIDER. Only "gemini" has an adapter; LlmClient stays provider-neutral for another one. */
   provider: LlmProvider;
   /** GEMINI_API_KEY. Non-enumerable, so it never shows up when the config is printed or serialized. */
   geminiApiKey: string | undefined;
@@ -78,16 +91,36 @@ export type LlmConfig = {
   attemptTimeoutMs: number;
 };
 
+export type CallsConfig = {
+  /** ElevenLabs API key. Non-enumerable and never logged. */
+  elevenLabsApiKey: string | undefined;
+  /** ElevenLabs conversational agent id. */
+  elevenLabsAgentId: string | undefined;
+  /** Optional bearer token for the ElevenLabs server tool endpoint. Non-enumerable. */
+  elevenLabsToolSecret: string | undefined;
+  /** SmartSpectra key. Non-enumerable and never logged. */
+  presageApiKey: string | undefined;
+  /** SmartSpectra's minimum quiet window for breathing. */
+  quietMeasurementMs: number;
+  /** CALL_MAX_MINUTES: the server ends the call after this long. */
+  maxMinutes: number;
+  /** VITALS_MIN_CONFIDENCE: lowest SmartSpectra confidence (0 to 100) a reading needs. */
+  vitalsMinConfidence: number;
+};
+
 export type Config = {
   finchnode: { baseUrl: string; apiKey: string | undefined };
   relay: RelayConfig;
   patient: PatientConfig;
   llm: LlmConfig;
+  calls: CallsConfig;
   port: number;
   databasePath: string;
   checkinTime: string;
   missedCheckinTime: string;
   clockDate: string | undefined;
+  /** Medication helper: MEDS_MORNING_TIME, MEDS_EVENING_TIME (HH:MM in her time zone), MEDS_NUDGE_MINUTES, REFILL_REMIND_DAYS. */
+  meds: { morningTime: string; eveningTime: string; nudgeMinutes: number; refillRemindDays: number };
 };
 
 /** Thrown for a bad environment. The message names variables and problems, never values. */
@@ -97,7 +130,7 @@ export class ConfigError extends Error {
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
   // Secrets are read here and nowhere near the schema, so a parse error can't echo them.
-  const { RELAY_AGENT_TOKEN, GEMINI_API_KEY, ...rest } = env;
+  const { RELAY_AGENT_TOKEN, GEMINI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_TOOL_SECRET, PRESAGE_API_KEY, ...rest } = env;
   const cleaned = Object.fromEntries(Object.entries(rest).map(([k, v]) => [k, v === "" ? undefined : v]));
   const parsed = ConfigSchema.safeParse(cleaned);
   if (!parsed.success) {
@@ -118,6 +151,19 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const geminiKey = GEMINI_API_KEY?.trim();
   Object.defineProperty(llm, "geminiApiKey", { value: geminiKey ? geminiKey : undefined, enumerable: false });
 
+  const calls: CallsConfig = {
+    elevenLabsApiKey: undefined,
+    elevenLabsAgentId: c.ELEVENLABS_AGENT_ID?.trim() || undefined,
+    elevenLabsToolSecret: undefined,
+    presageApiKey: undefined,
+    quietMeasurementMs: c.CALL_QUIET_MEASUREMENT_MS,
+    maxMinutes: c.CALL_MAX_MINUTES,
+    vitalsMinConfidence: c.VITALS_MIN_CONFIDENCE,
+  };
+  Object.defineProperty(calls, "elevenLabsApiKey", { value: ELEVENLABS_API_KEY?.trim() || undefined, enumerable: false });
+  Object.defineProperty(calls, "elevenLabsToolSecret", { value: ELEVENLABS_TOOL_SECRET?.trim() || undefined, enumerable: false });
+  Object.defineProperty(calls, "presageApiKey", { value: PRESAGE_API_KEY?.trim() || undefined, enumerable: false });
+
   return {
     finchnode: { baseUrl: c.FINCHNODE_BASE_URL, apiKey: c.FINCHNODE_API_KEY },
     relay,
@@ -128,18 +174,28 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       timezone: validTimezone(c.PATIENT_TIMEZONE.trim()),
     },
     llm,
+    calls,
     port: c.PORT,
     databasePath: c.DATABASE_PATH,
     checkinTime: c.CHECKIN_TIME,
     missedCheckinTime: c.MISSED_CHECKIN_TIME,
     clockDate: c.CLOCK_DATE,
+    meds: {
+      morningTime: c.MEDS_MORNING_TIME,
+      eveningTime: c.MEDS_EVENING_TIME,
+      nudgeMinutes: c.MEDS_NUDGE_MINUTES,
+      refillRemindDays: c.REFILL_REMIND_DAYS,
+    },
   };
 }
 
 /**
- * A Relay handle as the API uses it: trimmed, without a leading "@" (the SDK
- * docs and payloads use bare handles such as `harriet`), lower case. Matches
- * normalizeHandle in src/relay/relay-client.ts, which compares handles this way.
+ * A Relay handle as the API uses it: trimmed, without leading "@"s (the SDK
+ * docs and payloads use bare handles such as `harriet`), lower case. The one
+ * normalizer: config, the database, the inbox and the call service all use it,
+ * and sameHandle in src/relay/relay-client.ts compares handles with it. A real
+ * handle never starts with "@" or a space, so "@@harriet" and "@ harriet"
+ * (typing slips) are still `harriet`.
  */
 export function normalizeHandle(handle: string): string {
   return handle.trim().replace(/^@+/, "").trim().toLowerCase();
@@ -172,8 +228,11 @@ export function validTimezone(timezone: string): string {
   }
 }
 
-/** RELAY_API_URL must be an origin; the SDK appends /v1 itself, so a path is a mistake. */
-function relayOrigin(value: string): string {
+/**
+ * RELAY_API_URL must be an origin; the SDK appends /v1 itself, so a path is a mistake. HTTPS, HTTP
+ * only on localhost, no credentials (the Relay docs' rules). createRelayClient checks with this too.
+ */
+export function relayOrigin(value: string): string {
   let url: URL;
   try {
     url = new URL(value.trim());

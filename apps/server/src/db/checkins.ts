@@ -19,7 +19,7 @@ export type StoredAnswer = {
   answer: string;
   at: string;
   level?: number;
-  via?: "free_text" | "confirmed";
+  via?: "free_text" | "confirmed" | "voice";
   freeText?: string;
 };
 
@@ -169,6 +169,12 @@ export function getCheckinPrompt(db: Db, messageId: string): CheckinPrompt | und
        FROM checkin_prompts WHERE message_id = ?`,
     )
     .get(messageId) as CheckinPrompt | undefined;
+}
+
+/** When the latest message carrying one of this check-in's steps went out, or undefined when none did. */
+export function latestCheckinPromptAt(db: Db, checkinId: number): string | undefined {
+  const row = db.prepare(`SELECT MAX(sent_at) AS at FROM checkin_prompts WHERE checkin_id = ?`).get(checkinId) as { at: string | null };
+  return row.at ?? undefined;
 }
 
 /** Record an inbound Relay message id. Returns false if it was already handled (a webhook retry). */

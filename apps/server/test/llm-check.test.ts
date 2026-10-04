@@ -4,7 +4,9 @@ import {
   CLASSIFY_SYMPTOM_SAMPLES,
   describeClassification,
   describeExtraction,
+  describeImageReading,
   EXTRACT_SAMPLES,
+  LABEL_SAMPLES,
   main,
   SAMPLES,
   TODAY_QUESTIONS,
@@ -13,9 +15,9 @@ import type { FetchLike } from "../src/llm/gemini.ts";
 
 const KEY = "AIza_check_SECRET_789";
 
-function run(env: Record<string, string>, fetch?: FetchLike) {
+function run(env: Record<string, string>, fetch?: FetchLike, labelsDir?: string) {
   const lines: string[] = [];
-  const code = main(env, (l) => lines.push(l), { fetch, sleep: async () => {} });
+  const code = main(env, (l) => lines.push(l), { fetch, sleep: async () => {} }, labelsDir);
   return code.then((c) => ({ code: c, output: lines.join("\n") }));
 }
 
@@ -30,19 +32,20 @@ describe("npm run llm:check", () => {
     expect(output).toContain("GEMINI_API_KEY");
   });
 
-  it("asks for gemini when another provider is set", async () => {
-    const { code, output } = await run({ LLM_PROVIDER: "anthropic", GEMINI_API_KEY: KEY });
-    expect(code).toBe(1);
-    expect(output).toContain("LLM_PROVIDER=gemini");
-    expect(output).not.toContain(KEY);
-  });
-
   it("runs the samples, small talk, classification and extraction, printing results, models and timings, never the key", async () => {
     const fetch: FetchLike = async (url, init) => {
       const body = JSON.parse(String(init.body));
       if (url.includes("model-a")) return new Response("{}", { status: 503 });
       const properties = body.generationConfig.responseSchema.properties;
-      const user = JSON.parse(body.contents[0].parts[0].text);
+      const parts: { text?: string; inline_data?: unknown }[] = body.contents[0].parts;
+      if ("label" in properties) {
+        expect(parts.some((p) => p.inline_data)).toBe(true);
+        return reply({
+          kind: "medicine_label",
+          label: { medicineName: "Apixaban", strength: "5 mg", instructions: "Take 1 tablet by mouth twice daily", confidence: "high" },
+        });
+      }
+      const user = JSON.parse(parts.find((p) => p.text)!.text!);
       if ("kind" in properties) {
         const pending = "answer" in properties;
         const symptoms = String(user.message).includes("knee")
@@ -89,6 +92,9 @@ describe("npm run llm:check", () => {
     for (const sample of EXTRACT_SAMPLES) expect(output).toContain(`extractCheckin: "${sample.message}"`);
     expect(output).toContain('answers={hf-ankle-swelling="A little" (high)} symptoms=[hf-ankle-swelling a_little/unknown "ankles a bit puffy"]');
     expect(output).toContain("extractCheckin model-a #1 503");
+    for (const sample of LABEL_SAMPLES) expect(output).toContain(`readImage: ${sample.file}`);
+    expect(output).toContain('kind=medicine_label name="Apixaban" strength="5 mg" instructions="Take 1 tablet by mouth twice daily" confidence=high');
+    expect(output).toContain("readImage model-a #1 503");
     expect(output).toContain("every call answered");
     expect(output).not.toContain(KEY);
   });
@@ -118,6 +124,23 @@ describe("npm run llm:check", () => {
       }),
     ).toBe('answers={dizzy-on-standing="Sometimes" (medium)} symptoms=[knee pain a_little/same "knee aches"] memories=["baking Sunday"]');
     expect(describeExtraction({ answers: [], symptoms: [], memories: [] })).toBe("answers={} symptoms=[]");
+  });
+
+  it("skips label photos that are missing instead of failing", async () => {
+    const fetch: FetchLike = async () => new Response("{}", { status: 404 });
+    const { output } = await run({ GEMINI_API_KEY: KEY, GEMINI_MODELS: "gone" }, fetch, "/nonexistent/labels");
+    for (const sample of LABEL_SAMPLES) expect(output).toContain(`readImage: ${sample.file} skipped`);
+  });
+
+  it("describes each kind of image reading on one line", () => {
+    expect(describeImageReading({ kind: "unreadable", reason: "too blurry" })).toBe('kind=unreadable reason="too blurry"');
+    expect(describeImageReading({ kind: "other", description: "a cat" })).toBe('kind=other description="a cat"');
+    expect(
+      describeImageReading({
+        kind: "discharge_papers",
+        paper: { organization: "Northstar", date: "2026-08-20", medications: [{ name: "aspirin", strength: "81 mg", change: "stopped" }] },
+      }),
+    ).toBe('kind=discharge_papers organization="Northstar" date=2026-08-20 medications=[stopped:aspirin 81 mg]');
   });
 
   it("describes a classification on one line", () => {

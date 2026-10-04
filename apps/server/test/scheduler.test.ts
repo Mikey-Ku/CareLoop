@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addDays, createDailyScheduler, localDate, zonedInstant, type SchedulerJob } from "../src/scheduler.ts";
+import { addDays, dayNumber } from "../src/days.ts";
+import { createDailyScheduler, localDate, zonedInstant, type SchedulerJob } from "../src/scheduler.ts";
 
 const TZ = "America/Detroit";
 const HOUR = 3_600_000;
@@ -48,6 +49,10 @@ describe("time zone helpers", () => {
   it("adds calendar days across months and years", () => {
     expect(addDays("2026-10-31", 1)).toBe("2026-11-01");
     expect(addDays("2026-12-31", 1)).toBe("2027-01-01");
+    expect(addDays("2026-03-01", -1)).toBe("2026-02-28");
+    expect(addDays("2026-09-01", -14)).toBe("2026-08-18");
+    expect(dayNumber("2026-09-01") - dayNumber("2026-08-18")).toBe(14);
+    expect(dayNumber("not a day")).toBeNaN();
   });
 });
 
