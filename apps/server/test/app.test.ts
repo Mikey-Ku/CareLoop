@@ -10,6 +10,7 @@ beforeAll(async () => {
   const app = createApp({
     config: { finchnode: { baseUrl: "https://api.finchnode.com/demo/v1", apiKey: "ck_test_secret" } },
     calls: { screen: async () => ({}), beginQuietMeasurement: async () => ({}), toolSecret: "tool_test_secret" },
+    doctorReport: (patientId) => (patientId === "harriet" ? "<p>report</p>" : undefined),
     logError: () => {},
   });
   server = await new Promise<Server>((resolve) => {
@@ -43,6 +44,17 @@ describe("error handler", () => {
     const text = await res.text();
     expect(JSON.parse(text)).toEqual({ error: "bad_request" });
     expect(text).not.toMatch(/at .*\.(ts|js)/);
+  });
+});
+
+describe("GET /report/:patientId", () => {
+  it("is served on this machine and the local network, never through a tunnel or proxy (the call tools' tunnel forwards this port)", async () => {
+    expect((await fetch(`${base}/report/harriet`)).status).toBe(200);
+    for (const header of ["x-forwarded-for", "forwarded", "cf-connecting-ip"]) {
+      const res = await fetch(`${base}/report/harriet`, { headers: { [header]: "203.0.113.7" } });
+      expect(res.status, header).toBe(404);
+      expect(await res.json()).toEqual({ error: "not_found" });
+    }
   });
 });
 

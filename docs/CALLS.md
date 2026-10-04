@@ -136,6 +136,8 @@ cloudflared tunnel --url http://localhost:3000   # or: ngrok http 3000
 
 Put the printed `https://...` host in the three tool URLs, and check `https://<host>/health` answers before a call. The tunnel URL changes each time it starts unless you use a named tunnel.
 
+The tunnel forwards the whole port, but the doctor report is not reachable through it: `/report` answers 404 to any request carrying `X-Forwarded-For`, `Forwarded` or `CF-Connecting-IP`. Open it on the laptop or from a phone on the same Wi-Fi.
+
 ### Contact Card animation
 
 When the agent sends no video, Relay shows its Contact Card, and the card can carry a Rive animation (https://docs.relayapp.im/calls/rive.md). That is the place for a logo or a speaking animation; the ElevenLabs bridge already drives the `viseme` and `speaking` inputs when a Rive file is set. Not built yet.
