@@ -32,6 +32,16 @@ export function callClosing(name: string, familyNames: readonly string[] = []): 
   return `Thank you for talking with me, ${name}. Maybe give ${who} a call today. Take care.`;
 }
 
+/**
+ * Her speech can no longer be heard (the transcription connection was lost and would not come back): said once,
+ * then the call ends. Like the goodbye it points her to her family, by name when we know them.
+ */
+export function cantHearYou(name: string, familyNames: readonly string[] = []): string {
+  const names = familyNames.map((n) => n.trim()).filter(Boolean);
+  const who = names.length > 0 ? andList(names) : "someone you're close to";
+  return `I'm sorry, ${name}. I can't hear you well right now. Please give ${who} a call, and we can talk again soon. Take care.`;
+}
+
 /** The voice's fixed answer to a medicine question; her question is added to her list for the next visit after the call. */
 export const MEDICINE_QUESTION_REPLY = "That's one for your doctor or pharmacist. I'll add it to your list.";
 
@@ -145,6 +155,8 @@ export function callCopySamples(name = "Harriet"): { level: number; text: string
     { level: 0, text: MEDICINE_QUESTION_REPLY },
     { level: 0, text: callClosing(name, ["Sarah"]) },
     { level: 0, text: callClosing(name) },
+    { level: 0, text: cantHearYou(name, ["Sarah"]) },
+    { level: 0, text: cantHearYou(name) },
     { level: 0, text: wrongCallerDecline() },
     { level: 0, text: heartRateReadback({ heartRate: 72, breathingRate: 14 }, { compareHeartRate: true, heartRate: { low: 65, high: 91, readings: 10 } }) },
     { level: 0, text: heartRateReadback({ heartRate: 120 }, { compareHeartRate: true, heartRate: { low: 65, high: 91, readings: 10 } }) },

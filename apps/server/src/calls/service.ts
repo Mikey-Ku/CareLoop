@@ -15,7 +15,7 @@ import type { HealthRecord } from "../finchnode/types.ts";
 import { linkPatientChat } from "../relay/inbox.ts";
 import type { VitalsResult } from "../vitals/types.ts";
 import type { CallScreeningLlmOutput, LlmClient } from "../llm/types.ts";
-import { QUIET_MINUTE_PROMPT, heartRateReadback, noReadingReadback, noVideoReadback, stillMeasuring, wrongCallerDecline } from "./copy.ts";
+import { QUIET_MINUTE_PROMPT, cantHearYou, heartRateReadback, noReadingReadback, noVideoReadback, stillMeasuring, wrongCallerDecline } from "./copy.ts";
 import { emergencyDecision } from "./emergency.ts";
 import { callResult, emptyCallVitals, loadUsualRange } from "./screening.ts";
 import { RelayPresageBridge } from "./video.ts";
@@ -81,7 +81,9 @@ type ActiveCall = {
   transcript: TranscriptTurn[];
   bridge?: RelayPresageBridge;
   transport?: RelayCallTransport;
+  /** The transcriber in use: replaced once by #sttLost when its session ends under the call. */
   stt?: ElevenLabsRealtimeStt;
+  sttReconnected?: boolean;
   tts?: ElevenLabsTts;
   conversation?: ConversationOrchestrator;
   /** Highest safety level seen so far (4 urgent, 5 crisis). */
@@ -249,7 +251,8 @@ export class CallService implements CallEventHandler {
         vadSilenceSecs: calls.elevenLabsSttVadSilenceSecs,
         log: (event, fields) => this.#log(event, { call_id: call.id, ...fields }),
       };
-      const stt = (this.#options.sttFactory ?? ((options) => new ElevenLabsRealtimeStt(options)))(sttOptions);
+      const openStt = () => (this.#options.sttFactory ?? ((options) => new ElevenLabsRealtimeStt(options)))(sttOptions);
+      const stt = openStt();
       const ttsOptions: ConstructorParameters<typeof ElevenLabsTts>[1] = {
         apiKey: calls.elevenLabsApiKey,
         voiceId: calls.elevenLabsVoiceId,
@@ -264,7 +267,7 @@ export class CallService implements CallEventHandler {
       active.tts = tts;
       transport.on("audio", (frame) => {
         try {
-          stt.send(relayAudioToStt(frame));
+          active.stt?.send(relayAudioToStt(frame));
         } catch (error) {
           this.#log("call_audio_rejected", { call_id: call.id, error: summary(error) });
         }
@@ -277,15 +280,22 @@ export class CallService implements CallEventHandler {
       transport.on("trackSubscribed", () => { videoOn = true; });
       transport.on("trackUnsubscribed", () => { videoOn = false; });
       transport.on("remoteVideo", (enabled) => { videoOn = enabled; });
-      // She may talk over the assistant, but a cough, a noise or her first "hello?" must not cut it off mid-word.
-      // It takes two real words (isBargeIn). Those also mean a reply Gemini is still planning is out of date
-      // (noteSpeech). The greeting (it says this is an AI) and a fixed safety reply are never interrupted.
-      stt.onPartial((text) => {
-        if (!isBargeIn(text)) return;
-        active.conversation?.noteSpeech();
-        if (tts.isSpeaking && active.conversation?.greeted && active.safetyLevel < 4) tts.cancel();
-      });
-      stt.onCommitted((text) => this.#onPatientTranscript(active, text));
+      // The handlers go on every transcriber the call uses, the one it starts with and a reconnected one.
+      const wireStt = (target: ElevenLabsRealtimeStt): ElevenLabsRealtimeStt =>
+        target
+          // She may talk over the assistant, but a cough, a noise or her first "hello?" must not cut it off mid-word.
+          // It takes two real words (isBargeIn). Those also mean a reply Gemini is still planning is out of date
+          // (noteSpeech). The greeting (it says this is an AI) and a fixed safety reply are never interrupted.
+          .onPartial((text) => {
+            if (!isBargeIn(text)) return;
+            active.conversation?.noteSpeech();
+            if (tts.isSpeaking && active.conversation?.greeted && active.safetyLevel < 4) tts.cancel();
+          })
+          .onCommitted((text) => this.#onPatientTranscript(active, text))
+          .onClose((reason) => {
+            void this.#sttLost(active, reason, () => wireStt(openStt())).catch((error) => this.#log("call_stt_recovery_failed", { call_id: active.call.id, error: summary(error) }));
+          });
+      wireStt(stt);
       const elapsedSinceRinging = call.ringing_at ? Date.parse(this.#wallNow()) - Date.parse(call.ringing_at) : 0;
       const connectBudget = call.ringing_at ? RELAY_ANSWER_DEADLINE_MS - elapsedSinceRinging - 500 : RELAY_ANSWER_DEADLINE_MS - 500;
       if (connectBudget <= 0) throw new Error(`Relay answer deadline exceeded (${RELAY_ANSWER_DEADLINE_MS} ms)`);
@@ -396,6 +406,43 @@ export class CallService implements CallEventHandler {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * Her speech-to-text session ended under a live call (the socket closed, or Scribe reported a fatal event).
+   * Audio sent into it is dropped, so the call would go deaf without a word. Reconnect once; if that fails,
+   * say so in fixed words and end the call.
+   */
+  async #sttLost(active: ActiveCall, reason: string, reopen: () => ElevenLabsRealtimeStt): Promise<void> {
+    if (active.ending || active.mediaClosed || active.safetyLevel >= 4) return; // over, or the emergency reply is the last word
+    const lost = active.stt;
+    let failure: unknown;
+    if (!active.sttReconnected) {
+      active.sttReconnected = true;
+      let next: ElevenLabsRealtimeStt | undefined;
+      try {
+        next = reopen();
+        active.stt = next; // closed with the call's media, even while it is still connecting
+        lost?.close();
+        await next.connect();
+        this.#log("call_stt_reconnected", { call_id: active.call.id, reason });
+        return;
+      } catch (error) {
+        failure = error;
+        next?.close();
+      }
+    }
+    if (active.ending || active.mediaClosed) return;
+    this.#log("call_stt_lost", { call_id: active.call.id, reason, ...(failure === undefined ? {} : { error: summary(failure) }) });
+    active.conversation?.close();
+    const sentence = cantHearYou(active.firstName, this.#familyNames(active.patientId));
+    this.#recordTurn(active, { speaker: "agent", text: sentence });
+    try {
+      await active.tts?.speak(sentence);
+    } catch (error) {
+      this.#log("call_stt_lost_speech_failed", { call_id: active.call.id, error: summary(error) });
+    }
+    active.transport?.end();
   }
 
   #timeUp(active: ActiveCall): void {

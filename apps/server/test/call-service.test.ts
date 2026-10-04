@@ -2,7 +2,7 @@ import type { Call, CallWebhookEvent } from "@relaymessenger/sdk";
 import type { RelayCallTransport } from "@relaymessenger/sdk/calls";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ElevenLabsRealtimeStt, ElevenLabsTts } from "../src/calls/audio.ts";
-import { CAMERA_OFFER_AT_END, callClosing } from "../src/calls/copy.ts";
+import { CAMERA_OFFER_AT_END, callClosing, cantHearYou } from "../src/calls/copy.ts";
 import { emptyCallVitals } from "../src/calls/screening.ts";
 import { CallService, type CallEngine } from "../src/calls/service.ts";
 import { createCheckinEngine } from "../src/checkin/engine.ts";
@@ -72,13 +72,17 @@ class FakeBridge {
 class FakeStt {
   committed: ((text: string) => void | Promise<void>) | undefined;
   partial: ((text: string) => void | Promise<void>) | undefined;
+  closed: ((reason: string) => void) | undefined;
   readonly connect = vi.fn(async () => {});
   readonly send = vi.fn();
   readonly close = vi.fn();
   onCommitted(handler: (text: string) => void | Promise<void>): this { this.committed = handler; return this; }
   onPartial(handler: (text: string) => void | Promise<void>): this { this.partial = handler; return this; }
+  onClose(handler: (reason: string) => void): this { this.closed = handler; return this; }
   emit(text: string): void { void this.committed?.(text); }
   emitPartial(text: string): void { void this.partial?.(text); }
+  /** Her session ended on its own (not through close()): what the real adapter reports to onClose. */
+  emitClose(reason = "closed"): void { this.closed?.(reason); }
 }
 
 class FakeTts {
@@ -98,11 +102,18 @@ let llm: FakeLlmClient;
 /** What the service handed the voice and the transcriber when the last call was answered. */
 let ttsOptions: ConstructorParameters<typeof ElevenLabsTts>[1] | undefined;
 let sttOptions: ConstructorParameters<typeof ElevenLabsRealtimeStt>[0] | undefined;
+/** The transcribers the service gets, in order: `stt` first, then whatever a test queues for a reconnect. */
+let sttsToHandOut: (FakeStt | Error)[];
+let sttsHandedOut: FakeStt[];
+let logs: { event: string; [field: string]: unknown }[];
 let relay: { calls: { end: ReturnType<typeof vi.fn> }; chats: { messages: { send: ReturnType<typeof vi.fn> } } };
 
 function setup(options: { wallNow?: () => string; callTurn?: (input: Parameters<NonNullable<FakeLlmClient["callTurn"]>>[0]) => CallTurnLlmOutput | Error; env?: Record<string, string>; engine?: CallEngine } = {}) {
   transport = new FakeTransport();
   stt = new FakeStt();
+  sttsToHandOut = [stt];
+  sttsHandedOut = [];
+  logs = [];
   tts = new FakeTts();
   bridge = new FakeBridge();
   relay = { calls: { end: vi.fn(async () => ({})) }, chats: { messages: { send: vi.fn(async () => ({})) } } };
@@ -118,7 +129,14 @@ function setup(options: { wallNow?: () => string; callTurn?: (input: Parameters<
     now: () => NOW,
     wallNow: options.wallNow ?? (() => NOW),
     transportFactory: () => transport as unknown as RelayCallTransport,
-    sttFactory: (options) => ((sttOptions = options), stt as never),
+    sttFactory: (options) => {
+      sttOptions = options;
+      const next = sttsToHandOut.shift() ?? new FakeStt();
+      if (next instanceof Error) throw next; // a factory that fails
+      sttsHandedOut.push(next);
+      return next as never;
+    },
+    log: (event, fields) => { logs.push({ event, ...fields }); },
     ttsFactory: (_transport, options) => ((ttsOptions = options), tts as never),
     bridgeFactory: () => bridge as never,
   });
@@ -213,6 +231,98 @@ const modelPlan = (overrides: Partial<CallTurnLlmOutput> = {}): CallTurnLlmOutpu
   evidence: [],
   uncertainty: [],
   ...overrides,
+});
+
+describe("her transcription is lost under a live call", () => {
+  const events = () => logs.map((entry) => entry.event);
+
+  it("reconnects once with the same settings and handlers, and the call carries on", async () => {
+    const service = setup({ callTurn: () => modelPlan({ nextAction: "ask_follow_up", nextQuestion: "When did the swelling start?" }) });
+    const second = new FakeStt();
+    sttsToHandOut.push(second);
+    await start(service);
+    stt.emitClose("closed"); // the first session ended on its own
+    await vi.waitFor(() => expect(events()).toContain("call_stt_reconnected"));
+    expect(sttsHandedOut).toEqual([stt, second]);
+    expect(second.connect).toHaveBeenCalledOnce();
+    expect(stt.close).toHaveBeenCalled(); // the lost one is let go
+    transport.emit("audio", { samples: Int16Array.from([100, 300]), sampleRate: 48_000, channelCount: 1 });
+    expect(second.send).toHaveBeenCalledOnce(); // her audio goes to the new session
+    expect(stt.send).not.toHaveBeenCalled();
+    second.emit("My ankles are a bit swollen."); // and what it hears is handled as before
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toContain("When did the swelling start?"));
+    expect(transport.end).not.toHaveBeenCalled();
+    await service.end("call-1");
+    expect(second.close).toHaveBeenCalled();
+  });
+
+  it("says one fixed sentence and ends the call when it cannot reconnect", async () => {
+    const service = setup();
+    const second = new FakeStt();
+    second.connect.mockRejectedValueOnce(new Error("ElevenLabs STT connection timed out"));
+    sttsToHandOut.push(second);
+    await start(service);
+    stt.emitClose("quota_exceeded");
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(tts.spoken.at(-1)).toBe(cantHearYou("Harriet", []));
+    expect(events()).toContain("call_stt_lost");
+    expect(events()).not.toContain("call_stt_reconnected");
+    expect(logs.find((entry) => entry.event === "call_stt_lost")).toMatchObject({ reason: "quota_exceeded" });
+    expect(second.close).toHaveBeenCalled(); // the session that never came up is cleaned up
+    expect(callTranscript(db, "call-1").at(-1)).toMatchObject({ speaker: "agent", text: cantHearYou("Harriet", []) });
+  });
+
+  it("a transcriber that cannot even be created counts as a failed reconnect, and nothing is left unhandled", async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      const service = setup();
+      sttsToHandOut.push(new Error("the factory failed"));
+      await start(service);
+      stt.emitClose();
+      await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+      expect(tts.spoken.at(-1)).toBe(cantHearYou("Harriet", []));
+      expect(logs.find((entry) => entry.event === "call_stt_lost")).toMatchObject({ error: "Error: the factory failed" });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+  });
+
+  it("reconnects only once per call: a second loss says the sentence and ends it", async () => {
+    const service = setup();
+    const second = new FakeStt();
+    sttsToHandOut.push(second);
+    await start(service);
+    stt.emitClose();
+    await vi.waitFor(() => expect(events()).toContain("call_stt_reconnected"));
+    second.emitClose("session_time_limit_exceeded");
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(tts.spoken.at(-1)).toBe(cantHearYou("Harriet", []));
+    expect(sttsHandedOut).toHaveLength(2); // no third attempt
+  });
+
+  it("does nothing once the call is over, or after an emergency reply, which ends the call itself", async () => {
+    const over = setup();
+    await start(over);
+    await over.end("call-1");
+    stt.emitClose();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sttsHandedOut).toEqual([stt]);
+    expect(events()).not.toContain("call_stt_lost");
+
+    const emergency = setup();
+    await start(emergency, relayCall("harriet", "call-2"));
+    const speakCalls = tts.speak.mock.calls.length;
+    stt.emit("I have chest pain right now");
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(urgentReply("Harriet", [])));
+    stt.emitClose();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sttsHandedOut).toEqual([stt]);
+    expect(tts.speak.mock.calls.length).toBe(speakCalls + 1); // only the emergency reply
+  });
 });
 
 describe("her talking over the assistant", () => {

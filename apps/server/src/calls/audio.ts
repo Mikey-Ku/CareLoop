@@ -81,16 +81,28 @@ export type RealtimeSttOptions = {
 };
 
 export type SttTranscriptHandler = (text: string) => void | Promise<void>;
+/** Told once when a live session ends without our own close(): the event's message_type, or "closed". Never its content. */
+export type SttCloseHandler = (reason: string) => void;
+
+/** Scribe events that end the session (the socket closes right after), by message_type. */
+const FATAL_STT_EVENT = /error|exceeded|rate_limited|unaccepted|throttled|overflow/;
 
 /** ElevenLabs realtime STT adapter. Audio and transcripts stay in memory. */
 export class ElevenLabsRealtimeStt {
   readonly #options: RealtimeSttOptions;
   readonly #log: AudioLogger;
   #socket: WsLike | undefined;
+  /** close() was called: our own doing, never reported to onClose. */
   #closed = false;
+  /** Scribe sent session_started: from here on the session is live and takes audio. */
+  #ready = false;
+  /** A live session ended without our close(): onClose was told, once. */
+  #lost = false;
   #connected: Promise<void> | undefined;
+  #finishConnect: ((error?: Error) => void) | undefined;
   #onPartial: SttTranscriptHandler | undefined;
   #onCommitted: SttTranscriptHandler | undefined;
+  #onClose: SttCloseHandler | undefined;
   #lastCommittedEventId: string | number | undefined;
 
   constructor(options: RealtimeSttOptions) {
@@ -105,6 +117,15 @@ export class ElevenLabsRealtimeStt {
 
   onCommitted(handler: SttTranscriptHandler): this {
     this.#onCommitted = handler;
+    return this;
+  }
+
+  /**
+   * Called once when a live session ends without our own close(): the socket closed, or Scribe sent a fatal
+   * event. Without it the call would go deaf: send() drops audio once the socket is gone.
+   */
+  onClose(handler: SttCloseHandler): this {
+    this.#onClose = handler;
     return this;
   }
 
@@ -132,18 +153,28 @@ export class ElevenLabsRealtimeStt {
         settled = true;
         clearTimeout(timer);
         if (error) reject(error);
-        else resolve();
+        else {
+          this.#ready = true;
+          resolve();
+        }
       };
-      socket.on("open", () => finish());
-      socket.on("error", (error) => finish(error instanceof Error ? error : new Error("ElevenLabs STT WebSocket error")));
-      socket.on("close", () => finish(new Error("ElevenLabs STT WebSocket closed before connecting")));
+      this.#finishConnect = finish;
+      // The socket opening is not enough: the session is live when Scribe says session_started (see #message).
+      socket.on("error", (error) => {
+        if (this.#ready) this.#lose("socket_error");
+        else finish(error instanceof Error ? error : new Error("ElevenLabs STT WebSocket error"));
+      });
+      socket.on("close", (code) => {
+        this.#log("elevenlabs_stt_closed", { code: typeof code === "number" ? code : undefined });
+        if (this.#ready) this.#lose("closed");
+        else finish(new Error("ElevenLabs STT WebSocket closed before it was ready"));
+      });
+      socket.on("message", (data) => void this.#message(data));
     });
-    socket.on("message", (data) => void this.#message(data));
-    socket.on("close", (code) => this.#log("elevenlabs_stt_closed", { code: typeof code === "number" ? code : undefined }));
   }
 
   send(samples: Int16Array): void {
-    if (this.#closed || !this.#socket || this.#socket.readyState !== 1 || samples.byteLength === 0) return;
+    if (this.#closed || this.#lost || !this.#ready || !this.#socket || this.#socket.readyState !== 1 || samples.byteLength === 0) return;
     const audio = Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength).toString("base64");
     this.#socket.send(JSON.stringify({ message_type: "input_audio_chunk", audio_base_64: audio }));
   }
@@ -154,6 +185,20 @@ export class ElevenLabsRealtimeStt {
     this.#socket = undefined;
   }
 
+  /** A live session ended without our close(): the socket closed, or Scribe reported a fatal event. Tells onClose, once. */
+  #lose(reason: string): void {
+    if (this.#closed || this.#lost) return;
+    this.#lost = true;
+    const socket = this.#socket;
+    this.#socket = undefined;
+    try {
+      socket?.close(1000, "session lost");
+    } catch {
+      // already closing
+    }
+    this.#onClose?.(reason);
+  }
+
   async #message(data: unknown): Promise<void> {
     const text = typeof data === "string" ? data : data instanceof ArrayBuffer ? new TextDecoder().decode(data) : Buffer.isBuffer(data) ? data.toString("utf8") : data instanceof Uint8Array ? Buffer.from(data).toString("utf8") : "";
     if (!text) return;
@@ -162,6 +207,10 @@ export class ElevenLabsRealtimeStt {
       event = JSON.parse(text) as { message_type?: unknown; text?: unknown; event_id?: unknown };
     } catch {
       this.#log("elevenlabs_stt_invalid_event");
+      return;
+    }
+    if (event.message_type === "session_started") {
+      this.#finishConnect?.();
       return;
     }
     if (event.message_type === "partial_transcript" && typeof event.text === "string") {
@@ -176,7 +225,12 @@ export class ElevenLabsRealtimeStt {
       await this.#onCommitted?.(committed);
       return;
     }
-    if (event.message_type === "rate_limited" || event.message_type === "error") this.#log("elevenlabs_stt_error", { message_type: event.message_type });
+    const type = typeof event.message_type === "string" ? event.message_type.slice(0, 60) : "";
+    if (FATAL_STT_EVENT.test(type)) {
+      this.#log("elevenlabs_stt_error", { message_type: type }); // the type only: never what the event says
+      if (this.#ready) this.#lose(type);
+      else this.#finishConnect?.(new Error(`ElevenLabs STT reported ${type}`));
+    }
   }
 }
 
