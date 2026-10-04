@@ -85,6 +85,7 @@ import { ImageRejectedError } from "../llm/types.ts";
 import { DEFAULT_MEDS_NUDGE_MINUTES, MEDS_LABELS, createMedsFlow, paperFromReading, type MedPromptRef } from "../meds/flow.ts";
 import { DEFAULT_REFILL_REMIND_DAYS, refillsDue } from "../meds/refills.ts";
 import { medicationSchedule } from "../meds/schedule.ts";
+import { lastPassedOnAt } from "../relay/family-inbound.ts";
 import type { InboundMessage, OutboundMessage } from "../relay/messenger.ts";
 import { runRules } from "../rules/index.ts";
 import type { ExtractedPaper } from "../rules/paper-diff.ts";
@@ -229,9 +230,10 @@ import {
 // with no replyTo that isn't one of our labels goes to the MOST RECENTLY SENT prompt still waiting for her
 // (newestWaiting): the check-in's latest step (checkin_prompts, or "Let me explain"), an open follow-up,
 // "I have a question" ("Go ahead", src/db/waiting-prompts.ts), a medicines reminder, memory check or refill
-// reminder (med_prompts), the paper check, or the sharing menu. A check-in whose latest prompt is older than
+// reminder (med_prompts), the paper check, the sharing menu, or a family member's words passed on
+// (src/relay/family-inbound.ts; a label typed after them counts too). A check-in whose latest prompt is older than
 // another waiting prompt doesn't take it: a follow-up gets it as before, "I have a question" makes it her
-// medicine question (fixed reply, visit_questions), a paper check leaves it alone, and anything else reads
+// medicine question (fixed reply, visit_questions), and anything else (the paper check too) reads
 // it as plain chat with nothing pending (then the check-in's step again). On a tie the check-in keeps it.
 // A waiting_prompts row waits for one typed message and closes once one is planned. Taps (replyTo) still
 // go to their own message, labels to whoever shows them, and the safety screen still runs first.
@@ -328,6 +330,7 @@ import {
 //      - medicine_question: fixed reply, saved for her next visit (visit_questions).
 //      - feeling_low: fixed warm reply, saved as a memory, no alert.
 //      - family_message: her message passed on to every linked family chat (or kept until one links).
+//      Symptoms in any of these three (or after "I have a question") get their level's reply first, as in chat.
 //      - chat: the model's small talk. Symptoms she mentions get a fixed reply by level instead (1:
 //        symptomNotedReply, 2: keepAnEyeReply and a follow-up, 3: the red-flag reply and alert); a
 //        complaint with no symptom read gets complaintReply (level-1 wording). While a check-in
@@ -402,7 +405,7 @@ type Waiting =
   | { kind: "checkin"; at: string }
   | { kind: "follow_up"; at: string; f: FollowUpRow }
   | { kind: "meds_question"; at: string; promptId: number }
-  | { kind: "meds" | "paper" | "sharing_menu"; at: string };
+  | { kind: "meds" | "paper" | "sharing_menu" | "family"; at: string };
 
 /** The latest of some ISO timestamps, ignoring missing ones. */
 function latestOf(...xs: (string | null | undefined)[]): string | undefined {
@@ -1118,7 +1121,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     const leveled = mentions.map((m) => ({ m, ...levelFor({ source: "typed", mention: m }, history) }));
     for (const t of leveled) observe(patient, day, c, t, { source: "typed", amount: t.m.amount, change: t.m.change, words: t.m.words });
     const top = highest(leveled);
-    const key = `${patient.id}:reply:${msg.messageId}`;
+    const key = `${patient.id}:symptoms:${msg.messageId}`; // not :reply:, which a kind's own reply may use
     if (!top || top.level === 0) return [];
     if (top.level >= 3) return levelThree(patient, c, top.topic, msg.chatId, `${patient.id}:red-flag:${msg.messageId}`, { words: msg.text.trim() }).sends;
     if (top.level === 2) {
@@ -1459,8 +1462,14 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
 
     if (cls?.kind === "crisis" || cls?.kind === "urgent_symptom") return { sends: planSafety(patient, msg, cls.kind) };
     if (cls) addMemories(db, patient.id, [...cls.memories, ...cls.complaints], clock.now());
+    // Symptoms she mentions get their fixed reply by level (see "Severity ladder" above) whatever the kind,
+    // before that kind's own reply.
+    const levelled = (): Send[] =>
+      cls && chatBasis(cls) === "symptoms"
+        ? planSymptoms(patient, msg, ctx.at === "question" || ctx.at === "step" ? ctx.c : pendingCheckin(patient.id), cls.symptoms ?? [])
+        : [];
     // Her words after "I have a question" (see "Latest prompt wins"): her medicine question.
-    if (ctx.at === "meds_question") return { sends: planMedsQuestion(patient, msg, text, cls) };
+    if (ctx.at === "meds_question") return { sends: [...levelled(), ...planMedsQuestion(patient, msg, text, cls)] };
 
     // An explicit yes on a red-flag question is her "Yes": a fixed rule, with or without the LLM.
     if (ctx.at === "question" && redFlagYes !== undefined && !stale) {
@@ -1505,21 +1514,20 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       }
       case "medicine_question":
         addVisitQuestion(db, { patientId: patient.id, text, createdAt: clock.now() });
-        return { sends: [reply(medicineQuestionReply(name)), ...again(patient, ctx, msg)] };
+        return { sends: [...levelled(), reply(medicineQuestionReply(name)), ...again(patient, ctx, msg)] };
       case "feeling_low":
         addMemories(db, patient.id, [text], clock.now());
-        return { sends: [reply(feelingLowReply(name)), ...again(patient, ctx, msg)] };
+        return { sends: [...levelled(), reply(feelingLowReply(name)), ...again(patient, ctx, msg)] };
       case "family_message":
-        return { sends: [...planFamilyRelay(patient, msg, text), ...again(patient, ctx, msg)] };
+        return { sends: [...levelled(), ...planFamilyRelay(patient, msg, text), ...again(patient, ctx, msg)] };
       case "small_talk": {
         const talk = understood?.smallTalk;
         if (talk) addMemories(db, patient.id, [...talk.memories, ...talk.complaints], clock.now());
         const basis = chatBasis(cls);
-        // Symptoms she mentioned: a fixed reply by level (see "Severity ladder" above), never the model's words.
+        // Symptoms she mentioned: a fixed reply by level, never the model's words.
         if (basis === "symptoms") {
-          const c = ctx.at === "question" || ctx.at === "step" ? ctx.c : pendingCheckin(patient.id);
           if (explaining && about) saveNote(patient, about, text);
-          return { sends: [...planSymptoms(patient, msg, c, cls.symptoms ?? []), ...again(patient, ctx, msg)] };
+          return { sends: [...levelled(), ...again(patient, ctx, msg)] };
         }
         if (explaining) return { sends: noted() };
         const complaints = basis === "complaint" ? cls.complaints : (talk?.complaints ?? []);
@@ -1648,13 +1656,14 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (onFollowUp && onFollowUp.patientId === patient.id && !onFollowUp.answeredAt)
       return planTyped(patient, msg, { at: "follow_up", f: onFollowUp }, typed);
 
-    // Latest prompt wins (see above): typed text goes to the newest prompt still waiting for her.
-    const newest = isFreeText(msg) ? newestWaiting(patient, c) : undefined;
+    // Latest prompt wins (see above): typed text goes to the newest prompt still waiting for her. After a
+    // family member's words, her next typed message is plain chat even when it is a label ("Yes", "Not today").
+    const latest = msg.replyTo === undefined && msg.text.trim() ? newestWaiting(patient, c) : undefined;
+    const newest = isFreeText(msg) || latest?.kind === "family" ? latest : undefined;
     if (newest?.kind === "meds_question") return planTyped(patient, msg, { at: "meds_question", promptId: newest.promptId }, typed);
     if (c && newest && newest.kind !== "checkin") {
       // Something was sent after anything the check-in asked: her words are not the check-in's.
       if (newest.kind === "follow_up") return planTyped(patient, msg, { at: "follow_up", f: newest.f }, typed);
-      if (newest.kind === "paper") return { sends: [] }; // left alone, as with no check-in
       // Plain chat with nothing pending, then the check-in's step again so she can carry on (not after a safety reply).
       const planned = planTyped(patient, msg, { at: "none" }, typed);
       if ("needs" in planned) return planned;
@@ -1664,8 +1673,8 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     }
 
     if (!c) {
-      // Nothing pending: a late tap (one of our labels) or a paper check waiting for her is left alone.
-      if (isButtonLabel(msg.text) || pendingReadback(db, patient.id) || pendingPaperFollowUp(db, patient.id)) return { sends: [] };
+      // Nothing pending: a late tap (one of our labels) is left alone.
+      if (isButtonLabel(msg.text)) return { sends: [] };
       // An open follow-up takes typed text unless something newer waits (then it is plain chat).
       const f = newest ? (newest.kind === "follow_up" ? newest.f : undefined) : openFollowUp(db, patient.id);
       return planTyped(patient, msg, f ? { at: "follow_up", f } : { at: "none" }, typed);
@@ -1721,6 +1730,8 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (medsAt) all.push({ kind: "meds", at: medsAt });
     const paperAt = latestOf(pendingReadback(db, patient.id)?.createdAt, pendingPaperFollowUp(db, patient.id)?.confirmedAt);
     if (paperAt) all.push({ kind: "paper", at: paperAt });
+    const familyAt = lastPassedOnAt(db, patient.id);
+    if (familyAt) all.push({ kind: "family", at: familyAt });
     return all.reduce<Waiting | undefined>((best, w) => (best === undefined || w.at > best.at ? w : best), undefined);
   }
 
@@ -2248,10 +2259,11 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       raise(hit.kind);
       sends.push(...db.transaction(() => planSpokenSafety(patient, t, hit.kind))());
     }
-    // 2. The understanding pass over everything else she said. Instruction-like text counts as nothing read.
+    // 2. The understanding pass over everything else she said. Instruction-like text counts as nothing read,
+    // but as for typed text the classifier still runs: its crisis or urgent reading is never weakened.
     const words = calm.join("\n");
     let reading: SpokenReading | undefined;
-    if (words && deps.llm && !looksLikeInstructions(words)) {
+    if (words && deps.llm) {
       const open = openOn(patientId, day);
       const read = await readOpenReply({
         kind: "extract",
@@ -2263,9 +2275,11 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         // The model read a crisis or an urgent symptom the screen missed: it wins, nothing else is recorded.
         const kind = read.safety;
         raise(kind);
+        // Once per kind per call, so a later crisis still acts; an urgent reading after a crisis adds nothing.
         const id = `${options.callId ? `call:${options.callId}` : (turns[0]?.id ?? `call:${day}`)}:model`;
-        sends.push(...db.transaction(() => planSpokenSafety(patient, { id, text: words }, kind))());
-      } else if (read.extraction) reading = readSpoken(patient, day, read.extraction, words);
+        const plan = () => (kind === "urgent_symptom" && inboundSeen(db, `${id}:crisis`) ? [] : planSpokenSafety(patient, { id: `${id}:${kind}`, text: words }, kind));
+        sends.push(...db.transaction(plan)());
+      } else if (read.extraction && !looksLikeInstructions(words)) reading = readSpoken(patient, day, read.extraction, words);
     }
     if (reading) level = Math.max(level, reading.level);
     const items = reading?.items ?? [];

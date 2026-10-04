@@ -41,10 +41,15 @@ export function createApp(deps: AppDeps): Express {
 
   if (deps.calls) app.use("/integrations/elevenlabs", callToolRouter(deps.calls));
 
-  // The doctor report, the shareable link (docs/BRIEF.md feature 4). Local only, synthetic data.
+  // The doctor report, the shareable link (docs/BRIEF.md feature 4). Local only, synthetic data: the
+  // call tools' public tunnel forwards this port, so a request through a tunnel or proxy gets a 404.
   const doctorReport = deps.doctorReport;
   if (doctorReport)
     app.get("/report/:patientId", (req, res, next) => {
+      if (["x-forwarded-for", "forwarded", "cf-connecting-ip"].some((h) => req.get(h) !== undefined)) {
+        next();
+        return;
+      }
       const day = typeof req.query.day === "string" ? req.query.day : undefined;
       if (day !== undefined && !isCalendarDay(day)) {
         res.status(400).json({ error: "bad_request" });

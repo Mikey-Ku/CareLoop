@@ -91,7 +91,7 @@ export class RelayPresageBridge {
 
   async stop(): Promise<VitalsResult> {
     this.#stopped = true;
-    await this.#streamTask?.catch((error) => this.#errors.push({ code: "video_stream", message: error instanceof Error ? error.message : String(error) }));
+    await this.#streamTask;
     try {
       await this.#session.stopAsync();
       await this.#session.destroy();
@@ -105,7 +105,10 @@ export class RelayPresageBridge {
     if (this.#streamTask) return;
     this.#log("call_video_subscribed", { width: "unknown", format: "RGBA" });
     const stream = new VideoStream(track, { capacity: 2, format: VideoBufferType.RGBA });
-    this.#streamTask = this.#pump(stream);
+    // sendFrame throws on a bad frame; caught now, since an unhandled rejection would end the agent.
+    this.#streamTask = this.#pump(stream).catch((error) => {
+      this.#errors.push({ code: "video_stream", message: error instanceof Error ? error.message : String(error) });
+    });
   }
 
   async #pump(stream: VideoStream): Promise<void> {

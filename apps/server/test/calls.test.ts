@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MetricType } from "@smartspectra/node-sdk";
+import { VideoBufferType } from "@relaymessenger/sdk/calls";
 import { callCopySamples, callFirstMessage, heartRateReadback } from "../src/calls/copy.ts";
 import { emergencyDecision } from "../src/calls/emergency.ts";
 import { QuietMeasurement } from "../src/calls/quiet-measurement.ts";
@@ -112,6 +113,35 @@ describe("Presage: pulse and breathing only", () => {
     const wanted = [MetricType.BREATHING_RATE, MetricType.PULSE_RATE].sort();
     for (const metrics of requested) expect([...metrics].sort()).toEqual(wanted);
     expect(requested).toHaveLength(2);
+  });
+
+  it("a frame SmartSpectra throws on (it throws, never returns false) ends the video pump, not the agent", async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      // A Relay video track as VideoStream reads it: frames are pushed to its consumer.
+      let push!: (event: unknown) => void;
+      const track = { _subscribe: (consumer: { push: (event: unknown) => void }) => ((push = consumer.push), () => undefined) };
+      let sent = 0;
+      class ThrowingSession extends FakeSession {
+        override sendFrame() {
+          sent += 1;
+          if (sent === 2) throw new Error("kTimestampGap");
+          return true;
+        }
+      }
+      const bridge = new RelayPresageBridge({ on: () => undefined, remoteVideoTrack: track } as never, { apiKey: "test", sessionFactory: () => new ThrowingSession() as never });
+      bridge.start();
+      const frame = (timestampUs: number) => ({ frame: { type: VideoBufferType.RGBA, data: new Uint8Array(16), width: 2, height: 2 }, timestampUs });
+      for (const t of [1, 2, 3]) push(frame(t));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(rejections).toEqual([]);
+      await vi.waitFor(() => expect(bridge.result().errors.map((e) => e.code)).toContain("video_stream"));
+      expect((await bridge.stop()).heartRate).toBeNull();
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
   });
 });
 

@@ -11,6 +11,7 @@ import { consoleLog, describeRelayError, sameHandle, type RelayClient, type Rela
 import { RelayMessenger } from "./relay-messenger.ts";
 import type { CallEventHandler } from "../calls/service.ts";
 import { passOnFamilyMessage } from "./family-inbound.ts";
+import { screenMessage } from "../safety/screen.ts";
 
 // Durable inbox for Relay's acknowledged WebSocket, after Relay-SDK
 // cookbook/websocket-agent. `onEvent` commits the whole event by `event_id`
@@ -25,7 +26,7 @@ import { passOnFamilyMessage } from "./family-inbound.ts";
 // direct message when that arrives first. Only the senior's chat reaches the
 // check-in engine. A family member's text is passed on to her chat as plain text
 // (src/relay/family-inbound.ts: safety screen in the third person first, never an
-// answer or a sharing change); their photos get no reply. Voice memos are later.
+// answer or a sharing change), a photo's caption too; the photo itself gets no reply. Voice memos are later.
 //
 // Photos: a media part in her chat is downloaded from its signed URL (promptly: it expires in
 // about an hour) with a size guard (MAX_IMAGE_BYTES, 8 MB), and the bytes go to the engine's
@@ -260,8 +261,8 @@ export async function processEvent(deps: InboxDeps, event: RelayWebhookEvent): P
     }
     if (family.length > 0) {
       const at = { ...base, handle: family[0]!.handle, chat_id: data.chat.id, patient_ids: family.map((f) => f.patientId) };
-      // Text only (a photo or empty message gets nothing). Their words are never logged.
-      const text = data.parts.some((part) => part.type === "media") ? "" : textOf(data);
+      // Their words only, a photo's caption included (a photo alone or an empty message gets nothing). Never logged.
+      const text = textOf(data);
       if (!text) {
         log("relay_family_message_ignored", at);
         return "family_message";
@@ -280,7 +281,10 @@ export async function processEvent(deps: InboxDeps, event: RelayWebhookEvent): P
 
   const media = data.parts.find((part) => part.type === "media");
   if (media && media.type === "media") {
-    // The caption is never read as an answer. Neither the signed URL nor the bytes are logged.
+    // The caption is never read as an answer, but a safety screen hit in it takes the safety path first.
+    // Neither the signed URL nor the bytes are logged.
+    const caption = textOf(data);
+    if (caption && screenMessage(caption)) await deps.engine.handleInbound({ chatId: data.chat.id, messageId: data.id, text: caption, at: data.sent_at ?? event.created_at });
     const messenger = deps.messenger ?? new RelayMessenger(deps.relay);
     const at = { ...base, chat_id: data.chat.id, patient_id: patient.id, mime_type: media.mime_type, size_bytes: media.size_bytes };
     if (!deps.engine.handlePhoto) {

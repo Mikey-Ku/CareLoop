@@ -40,27 +40,39 @@ export type Discrepancy = {
 
 const STRENGTH = /(\d+(?:\.\d+)?)\s*(mg|mcg|µg|ug|meq|g|units?|unt|iu|ml)\b/i;
 
-/** Dose-form words that are not part of the ingredient name. */
+/** Dose-form words (and the "and" of a combination) that are not part of the ingredient name. */
 const FORM_WORDS = new Set([
   "er", "xr", "xl", "sr", "dr", "ec", "cr", "hr", "extended", "delayed", "release", "oral", "tablet", "tablets",
-  "tab", "capsule", "capsules", "cap", "solution", "suspension", "chewable", "by", "mouth",
+  "tab", "capsule", "capsules", "cap", "solution", "suspension", "chewable", "by", "mouth", "and",
 ]);
+
+/** Salt abbreviations as labels print them ("Metformin HCl"). */
+const SALT_ABBREVIATIONS: Record<string, string> = { hcl: "hydrochloride", hbr: "hydrobromide" };
+
+/** Salt words, which one name may leave out ("metformin" is "metformin hydrochloride"). */
+const SALTS = new Set(["hydrochloride", "hydrobromide", "sodium", "potassium", "calcium", "succinate", "tartrate", "besylate", "maleate", "mesylate", "sulfate"]);
 
 /** "24 HR metoprolol succinate 50 MG Extended Release Oral Tablet" -> ["metoprolol", "succinate"]. */
 export function ingredientTokens(name: string): string[] {
   const cleaned = cleanDrugTerm(name).replace(new RegExp(STRENGTH.source, "gi"), " ");
   return cleaned
     .split(/[^a-z0-9]+/)
-    .filter((t) => t.length > 0 && !/^\d+$/.test(t) && !FORM_WORDS.has(t));
+    .filter((t) => t.length > 0 && !/^\d+$/.test(t) && !FORM_WORDS.has(t))
+    .map((t) => SALT_ABBREVIATIONS[t] ?? t);
 }
 
-/** Same ingredient when every word of one name's ingredient appears as a whole word in the other's. */
+/**
+ * Same medicine: the same ingredient words, apart from salt words one name leaves out. A combination
+ * is not one of its ingredients, and two different salts (metoprolol succinate, tartrate) don't match.
+ */
 export function sameIngredient(a: string, b: string): boolean {
   const ta = ingredientTokens(a);
   const tb = ingredientTokens(b);
   if (ta.length === 0 || tb.length === 0) return false;
-  const [shorter, longer] = ta.length <= tb.length ? [ta, new Set(tb)] : [tb, new Set(ta)];
-  return shorter.every((t) => longer.has(t));
+  const same = (x: string[], y: string[]) => x.every((t) => y.includes(t)) && y.every((t) => x.includes(t));
+  const [baseA, saltA] = [ta.filter((t) => !SALTS.has(t)), ta.filter((t) => SALTS.has(t))];
+  const [baseB, saltB] = [tb.filter((t) => !SALTS.has(t)), tb.filter((t) => SALTS.has(t))];
+  return same(baseA, baseB) && (saltA.length === 0 || saltB.length === 0 || same(saltA, saltB));
 }
 
 // ---------- Strength ----------

@@ -51,6 +51,7 @@ export function medsOutputs(): string[] {
     out.push(copy.medsLine(line(s)));
     if (s.instructions) {
       out.push(copy.labelSaysLine(s.instructions), copy.labelMatchReply(s.plain, s.instructions, "label"), copy.labelMatchReply(s.plain, s.instructions, "list"));
+      out.push(copy.labelDirectionsDiffer(s.plain, "take 2 tablets by mouth twice daily", s.instructions));
     }
     out.push(copy.labelMatchReply(s.plain, undefined));
     for (const slot of ["morning", "midday", "evening", "bedtime"] as const) out.push(copy.memoryCheckQuestion(s.ingredient, s.count?.unit ?? "tablet", slot));
@@ -75,7 +76,7 @@ export function medsOutputs(): string[] {
 /** The medication helper's new copy functions, for test/copy.test.ts "covers every exported function". */
 export const MEDS_COPY_FUNCTIONS = [
   "medsLine", "medsReminder", "medsTakenReply", "medsNotYetReply", "medsNudge", "medsQuestionPrompt", "memoryCheckQuestion",
-  "memoryCheckButtons", "memoryCheckRight", "labelSaysLine", "labelMatchReply", "labelStrengthDiffers", "labelNotOnList",
+  "memoryCheckButtons", "memoryCheckRight", "labelSaysLine", "labelMatchReply", "labelStrengthDiffers", "labelDirectionsDiffer", "labelNotOnList",
   "labelUnreadable", "labelNoRecord", "photoOther", "photoReadFailed", "photoRejected", "photoCouldNotOpen", "refillTellButton",
   "refillReminder", "refillAskedReply", "refillTomorrowReply", "refillToldFamilyReply", "familyRefillNotice", "familyMedsNotConfirmed",
   "paperChangeNote", "withPaperNote",

@@ -832,6 +832,11 @@ export function labelStrengthDiffers(ingredient: string, labelStrength: string, 
   return `This label says ${ingredient} ${labelStrength}, but your medication list has ${listStrength}. These don't match. Please check with your pharmacist before taking it.`;
 }
 
+/** Same medicine and strength, but the label's directions differ from her prescription's: both read back word for word. */
+export function labelDirectionsDiffer(medicine: string, labelWords: string, listWords: string): string {
+  return `This label is for ${medicine}. It says: ${labelWords}. Your medication list says: ${listWords}. These don't match. Please check with your pharmacist before taking it.`;
+}
+
 /** A medicine that isn't on her list. */
 export function labelNotOnList(): string {
   return "I don't see this medicine on your list. Please check with your pharmacist or doctor before taking it.";
