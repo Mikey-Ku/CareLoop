@@ -29,9 +29,11 @@ export type EngineDeps = {
 
 /**
  * Extra fields on a stored answer (checkins.answers_json) when what she typed was mapped to a
- * button: how it came in and her words. A tap, or typing the label itself, stores neither.
+ * button: how it came in and her words. "free_text": her words were read as that answer.
+ * "confirmed": her words suggested it on a red-flag question and she tapped "Yes, that's right".
+ * A tap, or typing the label itself, stores neither.
  */
-export type FreeTextAnswer = { via: "free_text"; freeText: string };
+export type FreeTextAnswer = { via: "free_text" | "confirmed"; freeText: string };
 
 export type DayResult =
   | { kind: "sent"; questionIds: string[] }
@@ -51,11 +53,13 @@ export interface CheckinEngine {
    * paper check's "Yes, that's right" / "No, something's off" and the R6 follow-up buttons.
    * A button tap whose replyTo is not the message waiting for an answer (a stale tap) re-sends the
    * current prompt instead of recording an answer; typed text without replyTo is matched as before.
-   * Typed messages (engine.ts "Typed messages"): the safety screen first (a crisis or urgent symptom wins
-   * over everything), then the LLM sorts the message and fixed rules react: an answer, detail kept for
-   * her doctor, a medicine question, feeling low, a message for her family, or small talk. What she types
-   * while the greeting waits is her open reply (engine.ts "Open question first"): the LLM extracts answers
-   * to today's questions and symptoms, fixed rules level them, and only what she didn't cover is asked.
+   * Typed messages: the safety screen first (a crisis or urgent symptom wins over everything). During the
+   * check-in (her open reply, any message while a question waits, "Let me explain") one understanding pass
+   * (engine.ts "One understanding pass") reads answers to any of today's unanswered questions and every
+   * symptom, fixed rules level and record them (a red-flag question below level 3 only after her tap on a
+   * suggested confirm), and one line says back what was understood before the next question. Otherwise
+   * (engine.ts "Typed messages") the LLM sorts the message and fixed rules react: an answer, detail kept
+   * for her doctor, a medicine question, feeling low, a message for her family, or small talk.
    * A message already handled never reaches the LLM. Also answers a follow-up's "Better" / "About the same" / "Worse".
    */
   handleInbound(message: InboundMessage): Promise<void>;

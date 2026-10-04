@@ -151,6 +151,25 @@ function allOutputs(): string[] {
   return out;
 }
 
+/** Every understood line from a spread of answers and symptoms at levels 0 to 2 (synthetic). */
+function understoodLines(): string[] {
+  const answers = QUESTION_BANK.flatMap((q) => q.buttons.map((answer) => ({ topic: q.id, answer })));
+  const out: string[] = [];
+  for (const level of [0, 1, 2])
+    for (const a of answers) {
+      for (const topic of SYMPTOM_TOPICS) {
+        const lines = [
+          copy.understoodLine([{ ...a, level }]),
+          copy.understoodLine([{ topic, level }]),
+          copy.understoodLine([{ ...a, level: 0 }, { topic, level }]),
+          copy.understoodLine([{ ...a, level }, { topic, level }, { topic: "knee pain", level }]),
+        ];
+        for (const line of lines) if (line !== undefined) out.push(line);
+      }
+    }
+  return [...new Set(out)];
+}
+
 /**
  * Everything she or her family can read at levels 0 to 2 of the severity ladder (src/checkin/severity.ts):
  * the level-1 and level-2 lines, alone and folded into each next message, the chat replies, the one
@@ -175,6 +194,14 @@ function levelZeroToTwoOutputs(): string[] {
     out.push(familyFollowUpUpdate({ seniorName: NAME, topic, answer: "better" }), familyFollowUpUpdate({ seniorName: NAME, topic, answer: "same" }));
   }
   for (const q of QUESTION_BANK) out.push(...q.buttons);
+  // What was understood from her words, said back before the next message (levels 0 to 2), and the
+  // suggested confirm on a red-flag question.
+  for (const line of understoodLines()) for (const text of [line, ...next.map((n) => withLead(line, n))]) out.push(text);
+  for (const q of QUESTION_BANK)
+    for (const answer of q.buttons) {
+      const phrase = copy.answerPhrase(q.id, answer);
+      if (phrase) out.push(copy.suggestedConfirm(phrase));
+    }
   for (const sharing of LEVELS)
     for (const highest of [0, 1, 2].flatMap((level) => SYMPTOM_TOPICS.map((topic) => ({ level, topic }))))
       out.push(familyDailyStatus({ seniorName: NAME, sharing, outcome: "checked_in", answers: ANSWERS, flags: [], highest }));
@@ -194,7 +221,7 @@ describe("copy: style rules across every output", () => {
       "medicineQuestionReply", "noteSaved", "notedForDoctor", "notTodayReply", "openReplyThanks", "openReplyUnavailable", "photoNotYet",
       "recordLinkEndedFamily", "recordLinkEndedSenior", "redFlagAdvice", "sharingChangedFamily", "sharingChangedSenior", "sharingLevelFromButton",
       "sharingMenu", "smallTalkFallback", "sorryNotGreat", "symptomNotedReply", "topicWords", "typedReplyUnavailable", "urgentReply", "withLead",
-      "withTypingHint",
+      "withTypingHint", "answerPhrase", "suggestedConfirm", "understoodLine",
     ].sort();
     expect(fns).toEqual(sampled);
   });
@@ -414,6 +441,20 @@ describe("copy: severity ladder", () => {
     const outputs = levelZeroToTwoOutputs();
     expect(outputs.length).toBeGreaterThan(100);
     for (const text of outputs) expect(text, text).not.toMatch(/911|emergenc|ambulance/i);
+  });
+
+  it("the understood line never mentions 911, is at most two sentences, and is left out at level 3 or with nothing understood", () => {
+    const lines = understoodLines();
+    expect(lines.length).toBeGreaterThan(50);
+    for (const line of lines) {
+      expect(line, line).not.toMatch(/911|emergenc|ambulance/i);
+      expect(line.split(/(?<=[.?])\s/).length, line).toBeLessThanOrEqual(2);
+    }
+    expect(copy.understoodLine([])).toBeUndefined();
+    expect(copy.understoodLine([{ topic: "hf-breathing-lying-flat", answer: "Yes, it was hard", level: 3 }, { topic: "mood", answer: "Good", level: 0 }])).toBeUndefined();
+    expect(copy.understoodLine([{ topic: "hf-ankle-swelling", answer: "No", level: 0 }, { topic: "back pain", level: 1 }])).toBe(
+      "Got it: ankles feeling fine. I've noted the back pain for your doctor.",
+    );
   });
 
   it("911 starts at level 3 (only if it gets much worse) and is the main instruction at 4; 988 at 5", () => {

@@ -276,6 +276,31 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE checkins ADD COLUMN explain_at TEXT;
   `,
+  // 9: one understanding pass for everything she types during a check-in (src/checkin/engine.ts).
+  // checkin_notes.topic: what a note is about, a question id or her own topic words ("back pain");
+  // question_id is null when that isn't one of the check-in's questions. SQLite can't drop NOT NULL
+  // in place, so the table is rebuilt, with topic filled from question_id for older notes.
+  // checkins.suggestions_json: the answer her words suggested on a red-flag question, waiting for
+  // her tap ("It sounds like ... Is that right?"), keyed by question id with her words.
+  `
+  CREATE TABLE checkin_notes_v9 (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    checkin_id INTEGER NOT NULL REFERENCES checkins(id) ON DELETE CASCADE,
+    question_id TEXT,
+    topic TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  INSERT INTO checkin_notes_v9 (id, patient_id, checkin_id, question_id, topic, text, created_at)
+    SELECT id, patient_id, checkin_id, question_id, question_id, text, created_at FROM checkin_notes;
+  DROP TABLE checkin_notes;
+  ALTER TABLE checkin_notes_v9 RENAME TO checkin_notes;
+  CREATE INDEX checkin_notes_checkin ON checkin_notes (checkin_id);
+  CREATE INDEX checkin_notes_patient ON checkin_notes (patient_id, created_at);
+
+  ALTER TABLE checkins ADD COLUMN suggestions_json TEXT;
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
