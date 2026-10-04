@@ -194,7 +194,7 @@ export type CheckinPatient = {
   sharing: SharingLevel;
 };
 
-const PATIENT_COLUMNS = `id, finchnode_patient_id AS finchnodePatientId, preferred_name AS preferredName,
+const PATIENT_COLUMNS = `id, COALESCE(finchnode_subject, finchnode_patient_id) AS finchnodePatientId, preferred_name AS preferredName,
   relay_chat_id AS relayChatId, sharing`;
 
 export function getCheckinPatient(db: Db, patientId: string): CheckinPatient | undefined {

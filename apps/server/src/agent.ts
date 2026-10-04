@@ -16,7 +16,7 @@ import { errorSummary } from "./errors.ts";
 import { getInstanceId } from "./db/app-meta.ts";
 import { getCheckin, getCheckinPatient } from "./db/checkins.ts";
 import { familyMembers, syncFamilyMembers } from "./db/family.ts";
-import { openDatabase, upsertPatient, type Db } from "./db/index.ts";
+import { activePatients, openDatabase, upsertPatient, type Db } from "./db/index.ts";
 import { ConsentInactiveError } from "./finchnode/client.ts";
 import { loadRxNavCache } from "./finchnode/fixtures.ts";
 import { normalizeHealthRecord } from "./finchnode/normalize.ts";
@@ -29,7 +29,7 @@ import { createRelayClient, type RelayClient, type RelayLog } from "./relay/rela
 import { RelayMessenger } from "./relay/relay-messenger.ts";
 import { CallService } from "./calls/service.ts";
 import { patientIdFor } from "./patient-id.ts";
-import { createDailyScheduler, localDate, zonedInstant, type CancelTimer, type DailyScheduler } from "./scheduler.ts";
+import { createDailyScheduler, localDate, zonedInstant, type CancelTimer, type DailyScheduler, type SchedulerJob } from "./scheduler.ts";
 
 // `npm run agent`: the real Relay agent for one senior. Opens the database,
 // links her FinchNode record, holds the Relay WebSocket inbox, runs the daily
@@ -131,6 +131,51 @@ export type RunningAgent = {
   stop(): Promise<void>;
 };
 
+type LocalPatient = {
+  id: string;
+  finchnodePatientId: string;
+  preferredName: string;
+  relayHandle: string | null;
+  relayChatId: string | null;
+  checkinTime: string;
+  timezone: string;
+};
+
+/** A small facade over one scheduler per patient's time zone. */
+function combinedScheduler(schedulers: DailyScheduler[]): DailyScheduler {
+  return {
+    start() {
+      for (const scheduler of schedulers) scheduler.start();
+    },
+    stop() {
+      for (const scheduler of schedulers) scheduler.stop();
+    },
+    async runNow(name) {
+      await Promise.all(schedulers.map((scheduler) => scheduler.runNow(name)));
+    },
+    upcoming() {
+      return schedulers.flatMap((scheduler) => scheduler.upcoming());
+    },
+  };
+}
+
+function localPatients(db: Db): LocalPatient[] {
+  const active = activePatients(db);
+  if (active.length === 0) return [];
+  const checkinTimes = new Map(
+    (
+      db
+        .prepare(`SELECT id, checkin_time AS checkinTime FROM patients WHERE onboarding_status = 'active'`)
+        .all() as { id: string; checkinTime: string | null }[]
+    ).map((row) => [row.id, row.checkinTime]),
+  );
+  return active.map((patient) => ({
+    ...patient,
+    checkinTime: checkinTimes.get(patient.id) ?? "09:00",
+    timezone: patient.timezone ?? "America/Detroit",
+  }));
+}
+
 export class AgentStartError extends Error {
   override name = "AgentStartError";
 }
@@ -146,7 +191,9 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
       return () => clearTimeout(t);
     });
   const ops: RelayOps = { assertNoWebhookSubscriptions, runRelayInbox, ...deps.relayOps };
-  const { finchnodeSubject: subject, relayHandle, timezone } = config.patient;
+  const { finchnodeSubject: subject, relayHandle } = config.patient;
+  const timezone = config.patient.timezone;
+  const multiUser = relayHandle === undefined;
   // With CLOCK_DATE (demos), what the agent records lands on that day: its data clock starts at
   // CHECKIN_TIME on CLOCK_DATE and runs forward in real time, so even a late-night session stays on
   // the pinned day. Without it, the data clock is the real clock. Job times, the late start and
@@ -154,47 +201,63 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   const startedAtMs = now().getTime();
   const dataAnchorMs = config.clockDate ? zonedInstant(config.clockDate, config.checkinTime, timezone) : undefined;
   const dataNow = dataAnchorMs === undefined ? now : () => new Date(dataAnchorMs + (now().getTime() - startedAtMs));
-  if (!relayHandle) throw new AgentStartError(MISSING_HANDLE_MESSAGE);
-  // Her own handle as a family member would send her the family's alerts about herself.
-  const familyHandles = config.patient.familyHandles.filter((h) => h !== relayHandle);
-  if (familyHandles.length < config.patient.familyHandles.length)
-    log(`[agent] FAMILY_RELAY_HANDLES lists the senior @${relayHandle}; she is not added as a family member`);
+  let patients: LocalPatient[];
+  let patientId: string;
+  let carePatientId: string | undefined;
 
-  log(
-    `[agent] starting: subject ${subject}, senior @${relayHandle}, ${familyHandles.length} family handle(s), ` +
-      `check-in ${config.checkinTime} and missed check-in ${config.missedCheckinTime}, medicines ${config.meds.morningTime} and ${config.meds.eveningTime} ${timezone}` +
-      (config.clockDate ? `, demo check-in date pinned to ${config.clockDate} (records stamped from ${config.checkinTime} that day)` : "") +
-      `, Relay ${config.relay.apiUrl}`,
-  );
+  if (!multiUser) {
+    // 1. Who she is: her record's given name names the patient row, as in the simulator.
+    const identified = await identifyPatient(db, subject, deps.loadSnapshot, log, new URL(config.finchnode.baseUrl).host);
+    patientId = identified.patientId;
+    carePatientId = patientId;
 
-  // 1. Who she is: her record's given name names the patient row, as in the simulator.
-  const { patientId, preferredName } = await identifyPatient(db, subject, deps.loadSnapshot, log, new URL(config.finchnode.baseUrl).host);
+    // 2. Patient row. Keep what the inbox stored (her chat id) and her sharing level.
+    const existing = db
+      .prepare(`SELECT relay_handle AS relayHandle, relay_chat_id AS relayChatId FROM patients WHERE id = ?`)
+      .get(patientId) as { relayHandle: string | null; relayChatId: string | null } | undefined;
+    const handleChanged = Boolean(existing?.relayHandle && existing.relayHandle !== relayHandle);
+    if (handleChanged) log(`[agent] PATIENT_RELAY_HANDLE changed from @${existing?.relayHandle} to @${relayHandle}; her old chat link is dropped`);
+    upsertPatient(db, {
+      id: patientId,
+      finchnodePatientId: subject,
+      preferredName: identified.preferredName,
+      relayHandle,
+      relayChatId: handleChanged ? null : (existing?.relayChatId ?? null),
+      checkinTime: config.checkinTime,
+      timezone,
+    });
+    patients = localPatients(db).filter((patient) => patient.id === patientId);
+    log(`[agent] patient ${patientId} (${identified.preferredName}) ready in ${config.databasePath}`);
 
-  // 2. Patient row. Keep what the inbox stored (her chat id) and her sharing level.
-  const existing = db
-    .prepare(`SELECT relay_handle AS relayHandle, relay_chat_id AS relayChatId FROM patients WHERE id = ?`)
-    .get(patientId) as { relayHandle: string | null; relayChatId: string | null } | undefined;
-  const handleChanged = Boolean(existing?.relayHandle && existing.relayHandle !== relayHandle);
-  if (handleChanged) log(`[agent] PATIENT_RELAY_HANDLE changed from @${existing?.relayHandle} to @${relayHandle}; her old chat link is dropped`);
-  upsertPatient(db, {
-    id: patientId,
-    finchnodePatientId: subject,
-    preferredName,
-    relayHandle,
-    relayChatId: handleChanged ? null : (existing?.relayChatId ?? null),
-    checkinTime: config.checkinTime,
-    timezone,
-  });
-  log(`[agent] patient ${patientId} (${preferredName}) ready in ${config.databasePath}`);
+    // 2b. Family members from FAMILY_RELAY_HANDLES. Links made earlier are kept. Each one links
+    // their own chat by messaging the agent; until then family messages skip them (non-blocking).
+    const familyHandles = config.patient.familyHandles.filter((h) => h !== relayHandle);
+    if (familyHandles.length < config.patient.familyHandles.length)
+      log(`[agent] FAMILY_RELAY_HANDLES lists the senior @${relayHandle}; she is not added as a family member`);
+    const family = syncFamilyMembers(db, patientId, familyHandles);
+    for (const handle of family.notConfigured)
+      log(`[agent] @${handle} is no longer in FAMILY_RELAY_HANDLES but stays a family member (still linked if it was); delete their family_members row to stop it`);
+    for (const member of familyMembers(db, patientId)) {
+      if (member.chatId) log(`[agent] family @${member.handle} is linked (chat ${member.chatId})`);
+      else log(`[agent] Waiting for @${member.handle} to message the agent (family member; family messages skip them until then)`);
+    }
+  } else {
+    patients = localPatients(db);
+    patientId = patients[0]?.id ?? "";
+    log(
+      `[agent] starting in multi-user mode: ${patients.length} active local patient account(s), ` +
+        `check-in times from each account, missed check-in ${config.missedCheckinTime}, medicines ${config.meds.morningTime} and ${config.meds.eveningTime}`,
+    );
+  }
 
-  // 2b. Family members from FAMILY_RELAY_HANDLES. Links made earlier are kept. Each one links
-  // their own chat by messaging the agent; until then family messages skip them (non-blocking).
-  const family = syncFamilyMembers(db, patientId, familyHandles);
-  for (const handle of family.notConfigured)
-    log(`[agent] @${handle} is no longer in FAMILY_RELAY_HANDLES but stays a family member (still linked if it was); delete their family_members row to stop it`);
-  for (const member of familyMembers(db, patientId)) {
-    if (member.chatId) log(`[agent] family @${member.handle} is linked (chat ${member.chatId})`);
-    else log(`[agent] Waiting for @${member.handle} to message the agent (family member; family messages skip them until then)`);
+  if (!multiUser) {
+    log(
+      `[agent] starting: subject ${subject}, senior @${relayHandle}, ` +
+        `${config.patient.familyHandles.filter((h) => h !== relayHandle).length} family handle(s), ` +
+        `check-in ${config.checkinTime} and missed check-in ${config.missedCheckinTime}, medicines ${config.meds.morningTime} and ${config.meds.eveningTime} ${timezone}` +
+        (config.clockDate ? `, demo check-in date pinned to ${config.clockDate} (records stamped from ${config.checkinTime} that day)` : "") +
+        `, Relay ${config.relay.apiUrl}`,
+    );
   }
 
   // 3. Engine over Relay, with free text when an LLM is configured.
@@ -203,13 +266,21 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   const messenger = deps.messenger ?? new RelayMessenger(relay, { log: relayLog, instanceId: getInstanceId(db) });
   log(`[agent] ${llmStatus(config, deps.llm)}`);
   // 3a. Care summaries to her doctor and emergency contact over Photon, when configured.
-  let care: CareRuntime | undefined;
-  try {
-    // The care texts are worded by the same LLM as the check-in (Gemini), templates as the fallback.
-    care = await deps.care?.({ patientId, db, clock, log, llm: deps.llm });
-  } catch (error) {
-    log(`[agent] care summaries over Photon are off: ${errorSummary(error)}`);
+  // In multi-user mode, keep one runtime per account so a finished check-in is delivered to
+  // the right patient's care contacts. The callback is optional in tests and in deployments
+  // without Photon.
+  const careByPatient = new Map<string, CareRuntime>();
+  for (const patient of patients) {
+    if (!deps.care) break;
+    try {
+      const runtime = await deps.care({ patientId: patient.id, db, clock, log, llm: deps.llm });
+      if (runtime) careByPatient.set(patient.id, runtime);
+    } catch (error) {
+      log(`[agent] care summaries for ${patient.id} are off: ${errorSummary(error)}`);
+    }
+    if (carePatientId !== undefined) break;
   }
+  const onDayFinished = careByPatient.size > 0 ? async (event: Parameters<NonNullable<CareRuntime["onDayFinished"]>>[0]) => careByPatient.get(event.patientId)?.onDayFinished(event) : undefined;
   const engine = createCheckinEngine(
     { db, messenger, clock, loadSnapshot: deps.loadSnapshot, llm: deps.llm },
     {
@@ -217,7 +288,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
       medsNudgeMinutes: config.meds.nudgeMinutes,
       refillRemindDays: config.meds.refillRemindDays,
       ...(deps.followUpDelayMinutes !== undefined ? { followUpDelayMinutes: deps.followUpDelayMinutes } : {}),
-      ...(care ? { onDayFinished: care.onDayFinished } : {}),
+      ...(onDayFinished ? { onDayFinished } : {}),
     },
   );
 
@@ -229,7 +300,10 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
         loadSnapshot: deps.loadSnapshot,
         engine,
         llm: deps.llm,
-        today: () => config.clockDate ?? localDate(now(), timezone),
+        today: (forPatientId?: string) => {
+          const patient = patients.find((candidate) => candidate.id === forPatientId) ?? patients[0];
+          return config.clockDate ?? localDate(now(), patient?.timezone ?? timezone);
+        },
         log: (event, fields) => log(`[calls] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`),
         now: () => dataNow().toISOString(),
         wallNow: () => now().toISOString(),
@@ -239,34 +313,42 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   // 4. WebSocket delivery needs zero webhook subscriptions.
   await ops.assertNoWebhookSubscriptions(relay);
   log("[agent] Relay: no webhook subscriptions, WebSocket delivery is available");
-  const isLinked = () => Boolean(getCheckinPatient(db, patientId)?.relayChatId);
+  const isLinked = (id: string) => Boolean(getCheckinPatient(db, id)?.relayChatId);
 
   // 5. Inbox: holds the socket until stop().
   const abort = new AbortController();
-  const inboxDone = ops.runRelayInbox({ relay, db, engine, messenger, patientHandle: relayHandle, signal: abort.signal, log: relayLog, ...(calls ? { callHandler: calls } : {}) });
+  const inboxDone = ops.runRelayInbox({
+    relay,
+    db,
+    engine,
+    messenger,
+    patientHandle: relayHandle ?? "",
+    defaultCheckinTime: config.checkinTime,
+    defaultTimezone: timezone,
+    signal: abort.signal,
+    log: relayLog,
+    ...(calls ? { callHandler: calls } : {}),
+  });
   inboxDone.then(
     () => log("[agent] Relay inbox closed"),
     (error: unknown) => log(`[agent] Relay inbox stopped: ${errorSummary(error)}`),
   );
-  log(`[agent] Relay inbox listening for @${relayHandle}`);
+  log(`[agent] Relay inbox listening${relayHandle ? ` for @${relayHandle}` : " for all active local patient accounts"}`);
 
-  // 6. Daily jobs in her time zone.
-  const scheduler = createDailyScheduler({
-    timezone,
-    clockDate: config.clockDate,
-    clock: now,
-    setTimer,
-    log,
-    jobs: [
+  // 6. Daily jobs. Legacy mode has one scheduler; multi-user mode has one per account so
+  // each account's check-in time zone and configured check-in time are honored.
+  function jobsFor(patient: LocalPatient): SchedulerJob[] {
+    const shouldRun = () => multiUser || isLinked(patient.id);
+    return [
       {
         name: CHECKIN_JOB,
-        time: config.checkinTime,
+        time: patient.checkinTime,
         run: async (day) => {
-          if (!isLinked()) {
+          if (!shouldRun()) {
             log(`[agent] Waiting for @${relayHandle} to send the agent a message in Relay; skipping the ${day} check-in`);
             return;
           }
-          const result = await engine.startDay(patientId, day);
+          const result = await engine.startDay(patient.id, day);
           log(`[agent] check-in ${day}: ${describeDay(result)}`);
         },
       },
@@ -274,42 +356,90 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
         name: MISSED_JOB,
         time: config.missedCheckinTime,
         run: async (day) => {
-          if (!isLinked()) return;
-          const result = await engine.runMissedCheckin(patientId, day);
+          if (!shouldRun()) return;
+          const result = await engine.runMissedCheckin(patient.id, day);
           log(`[agent] missed check-in ${day}: ${result === "marked_missed" ? "marked missed, family told" : "nothing to do"}`);
-          const meds = await engine.runMedsMissed(patientId, day);
+          const meds = await engine.runMedsMissed(patient.id, day);
           if (meds === "marked_missed") log(`[agent] morning medicines ${day}: not confirmed, marked missed`);
-          await care?.afterMissedCheckin(day);
+          await careByPatient.get(patient.id)?.afterMissedCheckin(day);
         },
       },
       {
         name: MEDS_MORNING_JOB,
         time: config.meds.morningTime,
         run: async (day) => {
-          if (!isLinked()) return;
-          log(`[agent] morning medicines reminder ${day}: ${await engine.sendMedsReminder(patientId, day, "morning")}`);
+          if (!shouldRun()) return;
+          log(`[agent] morning medicines reminder ${day}: ${await engine.sendMedsReminder(patient.id, day, "morning")}`);
         },
       },
       {
         name: MEDS_EVENING_JOB,
         time: config.meds.eveningTime,
         run: async (day) => {
-          if (!isLinked()) return;
-          log(`[agent] evening medicines reminder ${day}: ${await engine.sendMedsReminder(patientId, day, "evening")}`);
+          if (!shouldRun()) return;
+          log(`[agent] evening medicines reminder ${day}: ${await engine.sendMedsReminder(patient.id, day, "evening")}`);
         },
       },
       {
         name: REFILL_JOB,
         time: config.meds.morningTime,
         run: async (day) => {
-          if (!isLinked()) return;
-          const sent = await engine.runRefillCheck(patientId, day);
+          if (!shouldRun()) return;
+          const sent = await engine.runRefillCheck(patient.id, day);
           log(`[agent] refill check ${day}: ${sent} reminder(s) sent`);
         },
       },
-    ],
-  });
+    ];
+  }
+  const schedulers: DailyScheduler[] = [];
+  const schedulerByPatient = new Map<string, DailyScheduler>();
+  const lateStarts = new Set<string>();
+  let schedulerStarted = false;
+  const makeScheduler = (patient: LocalPatient): DailyScheduler =>
+    createDailyScheduler({
+      timezone: patient.timezone,
+      clockDate: config.clockDate,
+      clock: now,
+      setTimer,
+      log,
+      jobs: jobsFor(patient),
+    });
+  function reconcileSchedulers(): void {
+    const current = multiUser ? localPatients(db) : patients;
+    if (multiUser) patients = current;
+    const activeIds = new Set(current.map((patient) => patient.id));
+    for (const [id, accountScheduler] of schedulerByPatient) {
+      if (activeIds.has(id)) continue;
+      accountScheduler.stop();
+      schedulerByPatient.delete(id);
+      const index = schedulers.indexOf(accountScheduler);
+      if (index >= 0) schedulers.splice(index, 1);
+      log(`[agent] stopped scheduler for inactive patient ${id}`);
+    }
+    for (const patient of current) {
+      if (schedulerByPatient.has(patient.id)) continue;
+      const accountScheduler = makeScheduler(patient);
+      schedulerByPatient.set(patient.id, accountScheduler);
+      schedulers.push(accountScheduler);
+      if (schedulerStarted) accountScheduler.start();
+      log(`[agent] scheduled active patient ${patient.id} (${patient.preferredName})`);
+      if (schedulerStarted && multiUser) {
+        const localDay = localDate(now(), patient.timezone);
+        const checkinAt = zonedInstant(localDay, patient.checkinTime, patient.timezone);
+        const missedAt = zonedInstant(localDay, config.missedCheckinTime, patient.timezone);
+        const day = config.clockDate ?? localDay;
+        if (now().getTime() >= checkinAt && now().getTime() < missedAt && !getCheckin(db, patient.id, day) && !lateStarts.has(patient.id)) {
+          lateStarts.add(patient.id);
+          void accountScheduler.runNow(CHECKIN_JOB).finally(() => lateStarts.delete(patient.id));
+          log(`[agent] Late start: newly linked patient ${patient.id} is past the ${patient.checkinTime} check-in time and before ${config.missedCheckinTime}; running it now`);
+        }
+      }
+    }
+  }
+  reconcileSchedulers();
+  const scheduler = combinedScheduler(schedulers);
   scheduler.start();
+  schedulerStarted = true;
 
   // 6b. Follow-ups and waiting family messages, every minute. One run at a time; a failure is
   // logged (never her words) and the next run tries again.
@@ -318,11 +448,14 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
     if (ticking) return;
     ticking = true;
     try {
+      reconcileSchedulers();
       const sent = await engine.runDueFollowUps(dataNow().toISOString());
       if (sent > 0) log(`[agent] sent ${sent} follow-up check-in(s)`);
       const nudged = await engine.runMedsNudges(dataNow().toISOString());
       if (nudged > 0) log(`[agent] sent ${nudged} medicines re-reminder(s)`);
-      const passed = await engine.passOnFamilyMessages(patientId);
+      const passed = multiUser
+        ? (await Promise.all(localPatients(db).map((patient) => engine.passOnFamilyMessages(patient.id)))).reduce((sum, count) => sum + count, 0)
+        : await engine.passOnFamilyMessages(patientId);
       if (passed > 0) log(`[agent] passed on ${passed} message(s) she left for her family`);
     } catch (error) {
       log(`[agent] follow-up job failed: ${errorSummary(error)}`);
@@ -349,6 +482,14 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   let cancelWatch: CancelTimer | undefined;
   let stopping = false;
   async function onLinked(): Promise<void> {
+    if (multiUser) {
+      if (deps.medsNow) {
+        await scheduler.runNow(MEDS_MORNING_JOB);
+        await scheduler.runNow(REFILL_JOB);
+      }
+      if (deps.checkinNow) await scheduler.runNow(CHECKIN_JOB);
+      return;
+    }
     log(`[agent] @${relayHandle} is linked to the agent`);
     if (deps.medsNow) {
       await scheduler.runNow(MEDS_MORNING_JOB);
@@ -373,7 +514,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
     }
   }
   const linked = new Promise<void>((resolve) => {
-    if (isLinked()) {
+    if (multiUser || isLinked(patientId)) {
       void onLinked().finally(resolve);
       return;
     }
@@ -381,7 +522,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
     const poll = () => {
       cancelWatch = undefined;
       if (stopping) return;
-      if (isLinked()) {
+      if (isLinked(patientId)) {
         void onLinked().finally(resolve);
         return;
       }
@@ -407,7 +548,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
         scheduler.stop();
         abort.abort();
         await inboxDone.catch(() => {});
-        await care?.stop();
+        await Promise.all([...careByPatient.values()].map((runtime) => runtime.stop()));
         await closeServer(server);
         log("[agent] stopped");
       })();
@@ -507,11 +648,6 @@ export async function main(argv: string[] = process.argv.slice(2), env: Record<s
     console.error(`error: ${MISSING_TOKEN_MESSAGE}`);
     return 1;
   }
-  if (!config.patient.relayHandle) {
-    console.error(`error: ${MISSING_HANDLE_MESSAGE}`);
-    return 1;
-  }
-
   // FOLLOW_UP_DELAY_MINUTES: optional, for demos (say 2); the engine's default otherwise.
   const followUpDelayMinutes = parseFollowUpDelay(env.FOLLOW_UP_DELAY_MINUTES);
   if (followUpDelayMinutes === null) {

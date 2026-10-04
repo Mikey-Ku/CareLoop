@@ -1,9 +1,10 @@
 import type { CallWebhookEvent, MessageWebhookData, RelayWebhookEvent, WebSocketFullSyncContext } from "@relaymessenger/sdk";
-import { familyWelcome, photoCouldNotOpen, photoNotYet, photoRejected } from "../checkin/copy.ts";
+import { BUTTON, caregiverClaimed, caregiverClaimReply, caregiverInviteInvalid, familyWelcome, photoCouldNotOpen, photoNotYet, photoRejected, syntheticWelcome } from "../checkin/copy.ts";
 import type { CheckinEngine } from "../checkin/engine-types.ts";
 import { normalizeHandle } from "../config.ts";
 import { getCheckinPatient, patientForChat } from "../db/checkins.ts";
 import { familyMembersForChat, linkFamilyMember } from "../db/family.ts";
+import { claimCaregiverInvite, hasPendingCaregiverInvite } from "../db/caregivers.ts";
 import type { Db } from "../db/index.ts";
 import { MAX_IMAGE_BYTES } from "../llm/types.ts";
 import type { InboundMessage, Messenger } from "./messenger.ts";
@@ -12,6 +13,7 @@ import { RelayMessenger } from "./relay-messenger.ts";
 import type { CallEventHandler } from "../calls/service.ts";
 import { passOnFamilyMessage } from "./family-inbound.ts";
 import { screenMessage } from "../safety/screen.ts";
+import { ensureDemoUser } from "./users.ts";
 
 // Durable inbox for Relay's acknowledged WebSocket, after Relay-SDK
 // cookbook/websocket-agent. `onEvent` commits the whole event by `event_id`
@@ -47,8 +49,11 @@ export type InboxDeps = {
   engine: InboxEngine;
   /** Downloads her photos from their signed URL. Defaults to the global fetch. */
   fetch?: typeof fetch;
-  /** The senior's Relay handle (PATIENT_RELAY_HANDLE). */
-  patientHandle: string;
+  /** The legacy senior's Relay handle (PATIENT_RELAY_HANDLE), when single-user mode is enabled. */
+  patientHandle?: string;
+  /** Defaults used when creating a new synthetic demo user. */
+  defaultCheckinTime?: string;
+  defaultTimezone?: string;
   /** Used to mark the senior's chat Read after her message is handled, to list chats on FULL sync, and to send the family welcome. */
   relay: Pick<RelayClient, "chats">;
   /** Sends the family welcome and the reply to her photos. Defaults to a RelayMessenger over `relay`. */
@@ -63,8 +68,10 @@ export type InboxDeps = {
 export type EventOutcome =
   | "handled"
   | "patient_linked"
+  | "patient_created"
   | "family_linked"
   | "family_message"
+  | "caregiver_claimed"
   | "other_contact"
   | "outbound"
   | "group_ignored"
@@ -210,7 +217,7 @@ export async function processEvent(deps: InboxDeps, event: RelayWebhookEvent): P
 
   if (event.event_type === "contact.added") {
     const { contact, chat_id: chatId } = event.data;
-    if (sameHandle(contact.handle, deps.patientHandle)) {
+    if (deps.patientHandle && sameHandle(contact.handle, deps.patientHandle)) {
       const linked = linkPatientChat(deps.db, deps.patientHandle, chatId);
       if (!linked) {
         log("relay_patient_contact_unmatched", { ...base, chat_id: chatId });
@@ -243,12 +250,45 @@ export async function processEvent(deps: InboxDeps, event: RelayWebhookEvent): P
   if (data.sender_handle.kind !== "user") return "agent_sender_ignored";
 
   let patient = patientForChat(deps.db, data.chat.id);
-  if (!patient && data.chat.is_group === false && sameHandle(data.sender_handle.handle, deps.patientHandle)) {
+  if (!patient && data.chat.is_group === false && deps.patientHandle && sameHandle(data.sender_handle.handle, deps.patientHandle)) {
     // Her first message can arrive before (or without) contact.added being
     // processed; her direct chat is the one she writes from.
     if (linkPatientChat(deps.db, deps.patientHandle, data.chat.id)) patient = patientForChat(deps.db, data.chat.id);
   }
   if (!patient) {
+    // A caregiver claims a patient-created invitation by sending the one-time code. This check
+    // happens before family linking and before new-user onboarding, so an invited handle is never
+    // accidentally assigned its own synthetic patient profile.
+    if (data.chat.is_group === false) {
+      const claim = claimCaregiverInvite(deps.db, {
+        handle: data.sender_handle.handle,
+        chatId: data.chat.id,
+        code: textOf(data),
+        now: now(),
+      });
+      if (claim) {
+        const messenger = deps.messenger ?? new RelayMessenger(deps.relay);
+        await messenger.send(data.chat.id, { text: caregiverClaimReply() }, `caregiver:${claim.id}:claimed:caregiver`);
+        const patientForInvite = getCheckinPatient(deps.db, claim.patientId);
+        if (patientForInvite?.relayChatId) {
+          await messenger.send(
+            patientForInvite.relayChatId,
+            { text: caregiverClaimed(patientForInvite.preferredName, normalizeHandle(data.sender_handle.handle)), buttons: [BUTTON.approveCaregiver, BUTTON.denyCaregiver] },
+            `caregiver:${claim.id}:claimed:patient`,
+          );
+        }
+        log("relay_caregiver_claimed", { ...base, patient_id: claim.patientId, handle: normalizeHandle(data.sender_handle.handle), chat_id: data.chat.id });
+        await markRead(deps, log, base, data.chat.id);
+        return "caregiver_claimed";
+      }
+      if (hasPendingCaregiverInvite(deps.db, data.sender_handle.handle, now())) {
+        const messenger = deps.messenger ?? new RelayMessenger(deps.relay);
+        await messenger.send(data.chat.id, { text: caregiverInviteInvalid() }, `caregiver:invalid:${data.chat.id}:${data.id}`);
+        log("relay_caregiver_invalid", { ...base, handle: normalizeHandle(data.sender_handle.handle), chat_id: data.chat.id });
+        await markRead(deps, log, base, data.chat.id);
+        return "handled";
+      }
+    }
     // A family chat, or a family member's first message before contact.added
     // (mirrors her fallback above). Logged without the text; family replies are build step 7.
     let family = familyMembersForChat(deps.db, data.chat.id);
@@ -273,6 +313,27 @@ export async function processEvent(deps: InboxDeps, event: RelayWebhookEvent): P
       log("relay_family_message", { ...at, outcomes });
       await markRead(deps, log, base, data.chat.id);
       return "family_message";
+    }
+  }
+  if (!patient && data.chat.is_group === false) {
+    const created = ensureDemoUser(deps.db, {
+      chatId: data.chat.id,
+      handle: data.sender_handle.handle,
+      displayName: data.sender_handle.display_name,
+      checkinTime: deps.defaultCheckinTime ?? "09:00",
+      timezone: deps.defaultTimezone ?? "America/Detroit",
+    });
+    patient = patientForChat(deps.db, data.chat.id);
+    if (patient && created.created) {
+      const messenger = deps.messenger ?? new RelayMessenger(deps.relay);
+      await messenger.send(
+        data.chat.id,
+        { text: syntheticWelcome(created.profileName), buttons: [BUTTON.addCaregiver] },
+        `${patient.id}:synthetic-welcome`,
+      );
+      log("relay_patient_created", { ...base, patient_id: patient.id, profile_subject: created.profileSubject, chat_id: data.chat.id });
+      await markRead(deps, log, base, data.chat.id);
+      return "patient_created";
     }
   }
   if (!patient) {
@@ -450,16 +511,23 @@ export function createRelayInbox(deps: InboxDeps): RelayInbox {
         if (chat.is_group) continue;
         for (const h of chat.handles) {
           if (h.kind !== "user") continue;
-          if (sameHandle(h.handle, deps.patientHandle)) patientChatId = chat.id;
+          if (deps.patientHandle && sameHandle(h.handle, deps.patientHandle)) patientChatId = chat.id;
           else others.push({ handle: h.handle, displayName: h.display_name, chatId: chat.id });
         }
       }
       let familyLinked = 0;
       const welcomes: { handle: string; chatId: string; patientIds: string[] }[] = [];
       deps.db.transaction(() => {
-        if (patientChatId) linkPatientChat(deps.db, deps.patientHandle, patientChatId);
-        // Only configured family members match; anyone else is skipped.
+        if (patientChatId && deps.patientHandle) linkPatientChat(deps.db, deps.patientHandle, patientChatId);
+        // Restore known multi-user patient chats by handle before considering family links.
         for (const o of others) {
+          const known = deps.db.prepare(`SELECT id FROM patients WHERE relay_handle = ?`).get(normalizeHandle(o.handle)) as { id: string } | undefined;
+          if (known) {
+            deps.db.prepare(`UPDATE patients SET relay_chat_id = ? WHERE id = ?`).run(o.chatId, known.id);
+            continue;
+          }
+          // Legacy configured family members match; anyone else is skipped until they send a
+          // first message, where the normal onboarding or caregiver-claim path handles them.
           const linked = linkFamily(deps.db, o.handle, o.chatId, o.displayName, now());
           if (!linked) continue;
           familyLinked += 1;
@@ -534,6 +602,8 @@ export type RunRelayInboxOptions = {
   /** Sends the family welcome and the replies to her photos. Defaults to a RelayMessenger over `relay`. */
   messenger?: Messenger;
   patientHandle: string;
+  defaultCheckinTime?: string;
+  defaultTimezone?: string;
   signal?: AbortSignal;
   log?: RelayLog;
   now?: () => string;
@@ -551,7 +621,9 @@ export async function runRelayInbox(options: RunRelayInboxOptions): Promise<void
   const inbox = createRelayInbox({
     db: options.db,
     engine: options.engine,
-    patientHandle: options.patientHandle,
+    patientHandle: options.patientHandle || undefined,
+    defaultCheckinTime: options.defaultCheckinTime,
+    defaultTimezone: options.defaultTimezone,
     relay: options.relay,
     log,
     ...(options.now ? { now: options.now } : {}),
