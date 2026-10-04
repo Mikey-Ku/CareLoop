@@ -144,6 +144,12 @@ export interface CheckinEngine {
     options?: { callId?: string; assessOnly?: boolean; reading?: { heartRate: number | null; breathingRate: number | null } },
   ): Promise<SpokenCheckinResult>;
   /**
+   * A video call ended and was recorded (and its camera check call-back, if any, is done): the
+   * onDayFinished hook runs for it, so her doctor and emergency contact get a summary of the day after
+   * every call, with what she said and any camera reading. Never throws.
+   */
+  callFinished(patientId: string, day: string, callId: string): Promise<void>;
+  /**
    * Follow-up job (the agent runs it every minute; the simulator on /later): sends every follow-up
    * check-in due by `now` (ISO), "Checking in again, Harriet. How is your breathing now?" with
    * "Better" / "About the same" / "Worse". Each goes out once. Returns how many were sent.

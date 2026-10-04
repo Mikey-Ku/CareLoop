@@ -428,6 +428,30 @@ describe("sending the summaries", () => {
     expect(photon.sent).toHaveLength(2);
   });
 
+  it("every call sends them again (after a finished chat check-in too), each call once", async () => {
+    await engine.startDay(P, DAY1);
+    await tap("Quick questions");
+    await tap("Fine");
+    await tap("No");
+    await tap("No");
+    await tap("Later");
+    expect(toDoctor()).toHaveLength(1);
+    await engine.callFinished(P, DAY1, "call-a");
+    expect(toDoctor()).toHaveLength(2);
+    expect(toFamily()).toHaveLength(2);
+    await engine.callFinished(P, DAY1, "call-a"); // the same call twice: no new texts
+    expect(photon.sent).toHaveLength(4);
+    await engine.callFinished(P, DAY1, "call-b");
+    expect(toDoctor()).toHaveLength(3);
+    expect(toFamily()).toHaveLength(3);
+  });
+
+  it("a call on a day with no chat check-in still sends them", async () => {
+    await engine.callFinished(P, DAY1, "call-a");
+    expect(toDoctor()).toHaveLength(1);
+    expect(toFamily()).toHaveLength(1);
+  });
+
   it("the noon job: a missed check-in sends them, and a second run doesn't", async () => {
     await engine.startDay(P, DAY1);
     await engine.runMissedCheckin(P, DAY1);

@@ -378,7 +378,8 @@ export type EngineOptions = {
 /** onDayFinished is waited on for at most this long (it keeps running after). */
 export const DAY_FINISHED_TIMEOUT_MS = 10_000;
 
-export type DayFinished = { patientId: string; day: string; outcome: DayOutcome };
+/** A finished day for the care summaries. `callId`: a video call ended, and each call gets its own summary. */
+export type DayFinished = { patientId: string; day: string; outcome: DayOutcome; callId?: string };
 
 /** The check-in question a "Taken" on the morning medicines reminder answers ("Yes"). */
 export const MORNING_MEDICINES_QUESTION = "morning-medicines";
@@ -2521,6 +2522,10 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     callCheckinContext,
     screenSpokenTurn,
     recordSpokenCheckin,
+
+    async callFinished(patientId: string, day: string, callId: string): Promise<void> {
+      await notifyFinished([{ patientId, day, outcome: "checked_in", callId }]);
+    },
 
     async runMissedCheckin(patientId: string, day: string): Promise<"marked_missed" | "nothing_to_do"> {
       const patient = requirePatient(patientId);

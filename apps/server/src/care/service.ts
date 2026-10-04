@@ -40,6 +40,9 @@ export const DAY_TRIGGER = "day";
  */
 export const MISSED_TRIGGER = "missed";
 
+/** Trigger for the summary after a video call: one per call, so every call reaches the doctor and the emergency contact. */
+export const callTrigger = (callId: string): string => `call:${callId}`;
+
 export type SendOutcome = "sent" | "already_sent" | "failed";
 export type SummaryResult = { summaryId: number; doctor: SendOutcome; family: SendOutcome };
 

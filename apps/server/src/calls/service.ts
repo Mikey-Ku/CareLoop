@@ -51,7 +51,7 @@ export function withinRelayAnswerDeadline(ringingAt: string, answeredAt: string,
 }
 
 /** What the call needs from the check-in engine. */
-export type CallEngine = Pick<CheckinEngine, "callCheckinContext" | "screenSpokenTurn" | "recordSpokenCheckin">;
+export type CallEngine = Pick<CheckinEngine, "callCheckinContext" | "screenSpokenTurn" | "recordSpokenCheckin"> & Partial<Pick<CheckinEngine, "callFinished">>;
 
 export type CallServiceOptions = {
   db: Db;
@@ -632,7 +632,11 @@ export class CallService implements CallEventHandler {
         screeningJson: JSON.stringify(active.geminiScreening ? { ...result, geminiScreening: active.geminiScreening } : result),
         measurementEndedAt: active.bridge?.quiet.status === "complete" ? this.#now() : undefined,
       });
-      if (active.callBack && !failed && level < 4) this.#callBack(active);
+      // Her doctor and emergency contact get the day's summary after every call she spoke on; with a camera check
+      // call-back, once it is done, so its reading is in it.
+      const summary = !failed && active.transcript.some((turn) => turn.speaker === "patient") ? () => this.#callSummary(active) : undefined;
+      if (active.callBack && !failed && level < 4) this.#callBack(active, summary);
+      else summary?.();
     } catch (error) {
       this.#log("call_finish_failed", { call_id: callId, error: summary(error) });
     } finally {
@@ -641,19 +645,37 @@ export class CallService implements CallEventHandler {
   }
 
   /** The camera check call-back her goodbye promised, once the call is recorded. Never awaited, and one at a time. */
-  #callBack(active: ActiveCall): void {
+  #callBack(active: ActiveCall, after?: () => void): void {
     const run = this.#options.cameraCallBack;
-    if (!run) return;
+    if (!run) {
+      after?.();
+      return;
+    }
     if (this.#callingBack) {
       this.#log("call_back_skipped", { call_id: active.call.id, reason: "another_call_back_running" });
+      after?.();
       return;
     }
     this.#callingBack = true;
     this.#log("call_back_started", { call_id: active.call.id });
     void run({ id: active.patientId, chatId: active.call.chat_id, handle: active.call.from.handle })
       .catch((error) => this.#log("call_back_failed", { call_id: active.call.id, error: summary(error) }))
-      .finally(() => { this.#callingBack = false; });
+      .finally(() => {
+        this.#callingBack = false;
+        after?.();
+      });
   }
+
+  /** The day's summary to her doctor and emergency contact for this call (engine.callFinished). Never awaited, never throws. */
+  #callSummary(active: ActiveCall): void {
+    const engine = this.#options.engine;
+    if (!engine?.callFinished) return;
+    this.#log("call_summary_sent_to_care", { call_id: active.call.id });
+    void Promise.resolve()
+      .then(() => engine.callFinished?.(active.patientId, active.day, active.call.id))
+      .catch((error) => this.#log("call_summary_failed", { call_id: active.call.id, error: summary(error) }));
+  }
+
 
   /** Each accepted camera reading goes to vitals_readings once per call (method relay_call). */
   #saveReading(active: ActiveCall, vitals: VitalsResult): void {
