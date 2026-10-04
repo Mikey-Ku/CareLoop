@@ -305,6 +305,13 @@ describe("the voice and the transcriber are set up from the configuration", () =
     await start(setup({ env: { ELEVENLABS_TTS_GAIN: "2.2" } }), relayCall("harriet", "call-2"));
     expect(ttsOptions?.gain).toBe(2.2);
   });
+
+  it("the transcriber gets the speech wait: 0.7 s unless ELEVENLABS_STT_VAD_SILENCE_SECS says otherwise", async () => {
+    await start(setup());
+    expect(sttOptions?.vadSilenceSecs).toBe(0.7);
+    await start(setup({ env: { ELEVENLABS_STT_VAD_SILENCE_SECS: "1.1" } }), relayCall("harriet", "call-2"));
+    expect(sttOptions?.vadSilenceSecs).toBe(1.1);
+  });
 });
 
 describe("what a call says at its end and in an emergency is fixed copy", () => {

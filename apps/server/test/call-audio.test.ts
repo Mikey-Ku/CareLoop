@@ -48,6 +48,18 @@ describe("call audio adapters", () => {
     stt.close();
   });
 
+  it("waits 0.7 s of her silence before a turn is committed, or as long as the setting says", async () => {
+    const query = async (options: { vadSilenceSecs?: number } = {}) => {
+      const stt = new ElevenLabsRealtimeStt({ apiKey: "test", webSocket: FakeWebSocket as never, ...options });
+      await stt.connect();
+      stt.close();
+      return new URL(FakeWebSocket.latest!.url).searchParams;
+    };
+    expect((await query()).get("vad_silence_threshold_secs")).toBe("0.7");
+    expect((await query({ vadSilenceSecs: 1.2 })).get("vad_silence_threshold_secs")).toBe("1.2");
+    expect((await query()).get("commit_strategy")).toBe("vad");
+  });
+
   it("streams generated mono PCM into Relay and clears speaking state on HTTP failure", async () => {
     const audio = new Int16Array([100, -100]);
     const bytes = new Uint8Array(audio.buffer.slice(0));

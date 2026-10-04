@@ -446,3 +446,53 @@ describe("ConversationOrchestrator: the start of the call", () => {
     expect(beforeGreeting).toHaveBeenCalledOnce();
   });
 });
+
+describe("ConversationOrchestrator: her record is read once per call", () => {
+  const asks = () => {
+    let n = 0;
+    return new FakeLlmClient({ callTurn: () => plan({ nextAction: "ask_follow_up", nextQuestion: `Question number ${(n += 1)}?` }) });
+  };
+  const contexts = (llm: FakeLlmClient) => llm.calls.flatMap((call) => (call.method === "callTurn" ? [call.input.finchContext] : []));
+
+  it("fetches it on the first turn that needs it and reuses it on every later turn and for the final screening", async () => {
+    const readRecord = vi.fn(async (subject: string) => loadSnapshot(subject));
+    const llm = asks();
+    const { say } = buildFlow(llm, { loadSnapshot: readRecord });
+    expect(readRecord).not.toHaveBeenCalled();
+    await say("My ankles are a bit swollen.");
+    await say("It started on Monday.");
+    await say("About the same on both sides.");
+    expect(readRecord).toHaveBeenCalledOnce();
+    expect(readRecord).toHaveBeenCalledWith("patient-demo-polypharmacy");
+    for (const context of contexts(llm)) expect(JSON.stringify(context)).toContain("conditions"); // every turn still had it
+    expect(contexts(llm)).toHaveLength(3);
+  });
+
+  it("the end of the call reuses it too", async () => {
+    const readRecord = vi.fn(async (subject: string) => loadSnapshot(subject));
+    const turn = vi.fn((input: { transcript: unknown[] }) => (input.transcript.length > 2 ? plan() : plan({ nextAction: "ask_follow_up", nextQuestion: "When did it start?" })));
+    const llm = new FakeLlmClient({ callTurn: turn, screenCall: () => ({ symptoms: [], finchEvidence: [], concernLevel: "low", recommendedHumanAction: "none", uncertainty: [], patientResponseText: "x", caregiverSummary: "y" }) });
+    const { say } = buildFlow(llm, { loadSnapshot: readRecord });
+    await say("My ankles are a bit swollen.");
+    await say("Since Monday.");
+    expect(llm.calls.map((call) => call.method)).toEqual(["callTurn", "callTurn", "screenCall"]);
+    expect(readRecord).toHaveBeenCalledOnce();
+    const screen = llm.calls.find((call) => call.method === "screenCall");
+    expect(JSON.stringify(screen?.input.finchContext)).toContain("conditions");
+  });
+
+  it("a read that failed is not kept: the turn goes on as unavailable and the next turn reads it again", async () => {
+    const readRecord = vi.fn(async (subject: string) => loadSnapshot(subject));
+    readRecord.mockRejectedValueOnce(new Error("FinchNode is down"));
+    const llm = asks();
+    const { say } = buildFlow(llm, { loadSnapshot: readRecord });
+    await say("My ankles are a bit swollen.");
+    await say("It started on Monday.");
+    await say("About the same on both sides.");
+    expect(readRecord).toHaveBeenCalledTimes(2);
+    const [first, second, third] = contexts(llm);
+    expect(first).toEqual({ unavailable: true });
+    expect(JSON.stringify(second)).toContain("conditions");
+    expect(third).toEqual(second);
+  });
+});

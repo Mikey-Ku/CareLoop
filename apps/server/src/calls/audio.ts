@@ -56,6 +56,8 @@ export type RealtimeSttOptions = {
   apiKey: string;
   modelId?: string;
   languageCode?: string;
+  /** ELEVENLABS_STT_VAD_SILENCE_SECS: how long she must pause before her turn is committed. Default 0.7. */
+  vadSilenceSecs?: number;
   log?: AudioLogger;
   webSocket?: WsConstructor;
 };
@@ -99,7 +101,7 @@ export class ElevenLabsRealtimeStt {
       model_id: this.#options.modelId ?? "scribe_v2_realtime",
       audio_format: "pcm_16000",
       commit_strategy: "vad",
-      vad_silence_threshold_secs: "0.85",
+      vad_silence_threshold_secs: String(this.#options.vadSilenceSecs ?? 0.7),
       ...(this.#options.languageCode ? { language_code: this.#options.languageCode } : {}),
     });
     const socket = new WebSocketImpl(`wss://api.elevenlabs.io/v1/speech-to-text/realtime?${query.toString()}`, { headers: { "xi-api-key": this.#options.apiKey } });

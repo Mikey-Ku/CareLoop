@@ -61,6 +61,8 @@ const ConfigSchema = z.object({
   ELEVENLABS_API_KEY: z.string().optional(),
   ELEVENLABS_VOICE_ID: z.string().optional(),
   ELEVENLABS_STT_MODEL: z.string().default("scribe_v2_realtime"),
+  /** How long she must pause before her turn is taken as finished. It is added to every reply's wait; it was 0.85 and a real call felt slow. */
+  ELEVENLABS_STT_VAD_SILENCE_SECS: z.coerce.number().min(0.3, "must be 0.3 to 3 seconds").max(3, "must be 0.3 to 3 seconds").default(0.7),
   ELEVENLABS_TTS_MODEL: z.string().default("eleven_flash_v2_5"),
   ELEVENLABS_TTS_OUTPUT_FORMAT: z.string().default("pcm_48000").pipe(z.literal("pcm_48000")),
   /** Soft limiter on the voice (src/calls/audio.ts softLimit). 1 leaves it untouched; 1.6 lifts a quiet voice about 4.7 dB without clipping. */
@@ -112,6 +114,8 @@ export type CallsConfig = {
   /** ElevenLabs voice used by direct streaming TTS. */
   elevenLabsVoiceId: string | undefined;
   elevenLabsSttModel: string;
+  /** ELEVENLABS_STT_VAD_SILENCE_SECS: her pause, in seconds, that ends a turn. */
+  elevenLabsSttVadSilenceSecs: number;
   elevenLabsTtsModel: string;
   elevenLabsTtsOutputFormat: string;
   /** ELEVENLABS_TTS_GAIN: the voice's soft limiter gain, 1 to 4 (1 untouched). */
@@ -174,6 +178,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     elevenLabsApiKey: undefined,
     elevenLabsVoiceId: c.ELEVENLABS_VOICE_ID?.trim() || undefined,
     elevenLabsSttModel: c.ELEVENLABS_STT_MODEL.trim(),
+    elevenLabsSttVadSilenceSecs: c.ELEVENLABS_STT_VAD_SILENCE_SECS,
     elevenLabsTtsModel: c.ELEVENLABS_TTS_MODEL.trim(),
     elevenLabsTtsOutputFormat: c.ELEVENLABS_TTS_OUTPUT_FORMAT.trim(),
     elevenLabsTtsGain: c.ELEVENLABS_TTS_GAIN,

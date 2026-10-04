@@ -46,6 +46,8 @@ export class ConversationOrchestrator {
   /** She said yes and the quiet reading was started: it is never offered or asked for again. */
   #measurementDone = false;
   #measurementTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Her FinchNode record, read on the first turn that needs it (see #loadContext). */
+  #record: Promise<HealthRecord> | undefined;
   #phase: "interview" | "quiet_measurement" | "screening" = "interview";
 
   constructor(options: ConversationOrchestratorOptions) {
@@ -226,8 +228,12 @@ export class ConversationOrchestrator {
   }
 
   async #loadContext(): Promise<unknown> {
+    // Her record is read once per call: a call lasts minutes, and fetching it again on every turn cost
+    // 0.1 to 0.3 s each. A failed read is not kept, so the next turn tries again.
+    let loading: Promise<HealthRecord> | undefined;
     try {
-      const record = await this.#options.loadSnapshot(this.#options.subject);
+      loading = this.#record ??= this.#options.loadSnapshot(this.#options.subject);
+      const record = await loading;
       return {
         dataAsOf: record.meta.dataAsOf,
         syncStatus: record.meta.syncStatus,
@@ -237,6 +243,7 @@ export class ConversationOrchestrator {
         vitals: record.data.vitals.slice(0, 30).map(({ name, value, unit, date, referenceRange }) => ({ name, value, unit, date, referenceRange })),
       };
     } catch (error) {
+      if (loading && this.#record === loading) this.#record = undefined;
       this.#log("call_finch_context_failed", { error: summary(error) });
       return { unavailable: true };
     }

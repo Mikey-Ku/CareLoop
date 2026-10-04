@@ -207,4 +207,11 @@ describe("direct ElevenLabs call settings", () => {
     expect(loadConfig({ ELEVENLABS_TTS_GAIN: "2.5" }).calls.elevenLabsTtsGain).toBe(2.5);
     for (const bad of ["0.5", "0", "-1", "9", "loud"]) expect(() => loadConfig({ ELEVENLABS_TTS_GAIN: bad }), bad).toThrow("ELEVENLABS_TTS_GAIN");
   });
+
+  it("speech wait defaults to 0.7 s and takes 0.3 to 3; anything else is refused", () => {
+    expect(loadConfig({}).calls.elevenLabsSttVadSilenceSecs).toBe(0.7);
+    expect(loadConfig({ ELEVENLABS_STT_VAD_SILENCE_SECS: "" }).calls.elevenLabsSttVadSilenceSecs).toBe(0.7);
+    expect(loadConfig({ ELEVENLABS_STT_VAD_SILENCE_SECS: "1.2" }).calls.elevenLabsSttVadSilenceSecs).toBe(1.2);
+    for (const bad of ["0.1", "0", "5", "soon"]) expect(() => loadConfig({ ELEVENLABS_STT_VAD_SILENCE_SECS: bad }), bad).toThrow("ELEVENLABS_STT_VAD_SILENCE_SECS");
+  });
 });
