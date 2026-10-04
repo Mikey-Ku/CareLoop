@@ -41,6 +41,8 @@ export const CALL_CONTEXT_TIMEOUT_MS = 5_000;
 /** Before the greeting: the longest wait for her audio to arrive, and the silence written ahead of the first words. */
 export const GREETING_PEER_AUDIO_WAIT_MS = 2_000;
 export const GREETING_LEAD_IN_MS = 300;
+/** One log line about her video this long after the call is answered (call_video_state). */
+export const VIDEO_STATE_LOG_MS = 5_000;
 
 export function withinRelayAnswerDeadline(ringingAt: string, answeredAt: string, deadlineMs = RELAY_ANSWER_DEADLINE_MS): boolean {
   const elapsed = Date.parse(answeredAt) - Date.parse(ringingAt);
@@ -94,6 +96,7 @@ type ActiveCall = {
   mediaClosed?: boolean;
   finishing?: Promise<void>;
   maxTimer?: ReturnType<typeof setTimeout>;
+  videoStateTimer?: ReturnType<typeof setTimeout>;
   readingSaved: boolean;
   /** Undefined until asked; null when her record couldn't be read (no comparison then). */
   usualRange?: ContextPacket["usualRange"] | null;
@@ -277,9 +280,15 @@ export class CallService implements CallEventHandler {
       // Whether her camera is on, from the transport's own events (the Presage bridge listens to the same
       // ones). The camera reading is only offered while it is: an audio-only call is never asked.
       let videoOn = Boolean(transport.remoteVideoTrack);
-      transport.on("trackSubscribed", () => { videoOn = true; });
-      transport.on("trackUnsubscribed", () => { videoOn = false; });
-      transport.on("remoteVideo", (enabled) => { videoOn = enabled; });
+      const setVideo = (on: boolean, source: string) => {
+        if (on === videoOn) return;
+        videoOn = on;
+        this.#log("call_video_changed", { call_id: call.id, on, source });
+      };
+      transport.on("trackSubscribed", () => setVideo(true, "trackSubscribed"));
+      transport.on("trackUnsubscribed", () => setVideo(false, "trackUnsubscribed"));
+      transport.on("remoteVideo", (enabled) => setVideo(enabled, "remoteVideo"));
+      let offerSkippedLogged = false;
       // The handlers go on every transcriber the call uses, the one it starts with and a reconnected one.
       const wireStt = (target: ElevenLabsRealtimeStt): ElevenLabsRealtimeStt =>
         target
@@ -346,6 +355,12 @@ export class CallService implements CallEventHandler {
           active.bridge.beginQuietMeasurement(true);
           patchCallSession(this.#options.db, call.id, { phase: "quiet_measurement", measurementStartedAt: this.#now() });
         },
+        onCameraOfferSkipped: () => {
+          // Asked only when canMeasure() said no, so with Presage configured her video is what is missing.
+          if (!active.bridge || offerSkippedLogged) return;
+          offerSkippedLogged = true;
+          this.#log("call_camera_offer_skipped", { call_id: call.id, reason: "no_video" });
+        },
         onComplete: (screening) => {
           if (screening) active.geminiScreening = screening;
           patchCallSession(this.#options.db, call.id, { phase: "screening" });
@@ -356,6 +371,9 @@ export class CallService implements CallEventHandler {
       // The call's length is ours: the server ends it after CALL_MAX_MINUTES.
       active.maxTimer = setTimeout(() => this.#timeUp(active), calls.maxMinutes * 60_000);
       active.maxTimer.unref?.();
+      // One look at her video a few seconds in, so a call with no camera offer can be told why (log only).
+      active.videoStateTimer = setTimeout(() => this.#logVideoState(active, transport, videoOn), VIDEO_STATE_LOG_MS);
+      active.videoStateTimer.unref?.();
       patchCallSession(this.#options.db, call.id, { status: "in_progress", phase: "interview", answeredAt: this.#now() });
       this.#log("call_answered", { call_id: call.id });
       active.conversation.start();
@@ -458,6 +476,11 @@ export class CallService implements CallEventHandler {
     }
   }
 
+  #logVideoState(active: ActiveCall, transport: RelayCallTransport, on: boolean): void {
+    const stats = videoCounters(transport);
+    this.#log("call_video_state", { call_id: active.call.id, on, has_track: Boolean(transport.remoteVideoTrack), camera_configured: Boolean(active.bridge), ...(stats ? { stats } : {}) });
+  }
+
   #recordTurn(active: ActiveCall, turn: TranscriptTurn): void {
     active.transcript.push({ ...turn, at: this.#now() });
     addCallTranscript(this.#options.db, { callId: active.call.id, speaker: turn.speaker, text: turn.text, at: this.#now() });
@@ -466,6 +489,7 @@ export class CallService implements CallEventHandler {
   #closeMedia(active: ActiveCall): void {
     if (active.mediaClosed) return;
     active.mediaClosed = true;
+    clearTimeout(active.videoStateTimer);
     active.stt?.close();
     active.tts?.close();
     active.transport?.close();
@@ -672,6 +696,24 @@ export class CallService implements CallEventHandler {
     } catch (error) {
       this.#log("call_unavailable_end_failed", { call_id: call.id, error: summary(error) });
     }
+  }
+}
+
+/** The transport's video counters for the log: finite numbers and short strings per direction, never a frame. Undefined when it cannot say. */
+function videoCounters(transport: RelayCallTransport): Record<string, Record<string, number | string>> | undefined {
+  try {
+    if (typeof transport.videoStats !== "function") return undefined;
+    const stats = transport.videoStats() as unknown as Record<string, unknown> | null;
+    if (typeof stats !== "object" || stats === null) return undefined;
+    const kept: Record<string, Record<string, number | string>> = {};
+    for (const direction of ["inbound", "outbound"]) {
+      const counters = stats[direction];
+      if (typeof counters !== "object" || counters === null) continue;
+      kept[direction] = Object.fromEntries(Object.entries(counters).filter(([, value]) => (typeof value === "number" && Number.isFinite(value)) || (typeof value === "string" && value.length <= 32)));
+    }
+    return kept;
+  } catch {
+    return undefined;
   }
 }
 

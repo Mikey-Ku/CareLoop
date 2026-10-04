@@ -467,6 +467,60 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
     expect(spoken).toEqual([callClosing("Harriet")]);
     expect(onComplete).toHaveBeenCalledOnce();
   });
+
+  describe("a camera offer that was not made tells the call service, for the log", () => {
+    it("complete_screening with the reading not possible: told once, and the goodbye is unchanged", async () => {
+      const llm = new FakeLlmClient({ callTurn: () => plan() });
+      const onCameraOfferSkipped = vi.fn();
+      const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: () => false, onCameraOfferSkipped });
+      await say("I have had a bit of a cough.");
+      expect(onCameraOfferSkipped).toHaveBeenCalledOnce();
+      expect(spoken).toEqual([callClosing("Harriet")]);
+      expect(onComplete).toHaveBeenCalledOnce();
+    });
+
+    it("not told while the offer is made, nor when she turns it down and gets the goodbye", async () => {
+      const llm = new FakeLlmClient({ callTurn: () => plan() });
+      const onCameraOfferSkipped = vi.fn();
+      const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: () => true, onCameraOfferSkipped });
+      await say("I have had a bit of a cough.");
+      expect(spoken).toEqual([CAMERA_OFFER_AT_END]);
+      await say("No thanks.");
+      expect(spoken).toEqual([CAMERA_OFFER_AT_END, DECLINE, callClosing("Harriet")]);
+      expect(onComplete).toHaveBeenCalledOnce();
+      expect(onCameraOfferSkipped).not.toHaveBeenCalled();
+    });
+
+    it("not told after the reading was taken", async () => {
+      vi.useFakeTimers();
+      const llm = new FakeLlmClient({ callTurn: () => plan() });
+      const onCameraOfferSkipped = vi.fn();
+      const { flow, onComplete, say } = buildFlow(llm, { canMeasure: () => true, onCameraOfferSkipped });
+      await say("I have had a bit of a cough.");
+      await say("Yes, please.");
+      await vi.advanceTimersByTimeAsync(30_500);
+      await vi.waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
+      expect(onCameraOfferSkipped).not.toHaveBeenCalled();
+      flow.close();
+    });
+
+    it.each(["end_call", "emergency"] as const)("not told for %s: that call is never offered the reading", async (nextAction) => {
+      const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction }) });
+      const onCameraOfferSkipped = vi.fn();
+      const { onComplete, say } = buildFlow(llm, { canMeasure: () => false, onCameraOfferSkipped });
+      await say("I have to go now, my daughter is here.");
+      expect(onComplete).toHaveBeenCalledOnce();
+      expect(onCameraOfferSkipped).not.toHaveBeenCalled();
+    });
+
+    it("not told for a turn that only asks a follow-up", async () => {
+      const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction: "ask_follow_up", nextQuestion: "When did it start?" }) });
+      const onCameraOfferSkipped = vi.fn();
+      const { say } = buildFlow(llm, { canMeasure: () => false, onCameraOfferSkipped });
+      await say("My ankles are a bit swollen.");
+      expect(onCameraOfferSkipped).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("ConversationOrchestrator: the start of the call", () => {
