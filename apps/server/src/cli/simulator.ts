@@ -47,7 +47,8 @@ import { HELP_LINES, clockTime, painter, renderMessage, renderTable, type Painte
 // `/as <kind> [answer] [| topic, amount, change]...` stands in for the LLM on the next typed
 // message, so demo scripts show each kind of reaction (and each severity level) offline and the
 // same way every run. `/as extract [questionId=answer; ...] [| topic, amount, change]...` does the
-// same for her open reply to the greeting (the check-in's opening question).
+// same for the understanding pass on her next typed message in the check-in (her open reply to the
+// greeting, or what she types while a question waits).
 //
 // Follow-ups: after a red flag or a safety hit the engine schedules a follow-up check-in
 // some hours later; /later jumps the clock to it and runs the follow-up job.
@@ -219,9 +220,10 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
   });
   // `/as <kind>` readings wait here; while one does, it stands in for the LLM (small talk still
   // goes to the real LLM if there is one).
-  // `/as extract` readings of her open reply wait in `extractions` the same way. While only an
-  // extraction waits, the model's kind (read alongside it for a crisis) has no stand-in and counts as
-  // unavailable, which changes nothing.
+  // `/as extract` readings for the understanding pass wait in `extractions` the same way. While only an
+  // extraction waits, the model's kind (read alongside it) has no stand-in and counts as unavailable,
+  // which changes nothing; while only an `/as <kind>` waits, the extraction counts as unavailable and
+  // the kind alone is used, as before.
   const scripted: MessageClassification[] = [];
   const extractions: CheckinExtraction[] = [];
   const scriptLlm: LlmClient = {
@@ -303,7 +305,7 @@ export async function createSimulator(options: SimulatorOptions): Promise<Simula
     const [kind, ...rest] = head.split(/\s+/).filter(Boolean);
     const usage = () => {
       note(`usage: /as <${MESSAGE_KINDS.join("|")}> [answer] [| topic, ${Object.keys(TYPED_LEVELS).join("|")}, new|worse|same|better|unknown]`, "red");
-      note("   or: /as extract [questionId=answer; ...] [| topic, amount, change]... (her open reply to the greeting)", "red");
+      note("   or: /as extract [questionId=answer; ...] [| topic, amount, change]... (her next typed message in the check-in)", "red");
       return "error" as const;
     };
     if (!kind || !(kind === "extract" || (MESSAGE_KINDS as readonly string[]).includes(kind))) return usage();

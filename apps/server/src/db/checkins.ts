@@ -8,8 +8,26 @@ export type CheckinStatus = "sent" | "answered" | "skipped" | "missed";
 /** greeting: waiting for her open reply, "Quick questions" or "Not today"; question: waiting for an answer to question_index; flag_offer / flag_detail: a flag is on offer; done: nothing pending. */
 export type CheckinStep = "greeting" | "question" | "flag_offer" | "flag_detail" | "done";
 
-/** One answer in checkins.answers_json. `level`: its severity level (src/checkin/severity.ts); answers stored before the ladder have none. */
-export type StoredAnswer = { questionId: string; questionText: string; answer: string; at: string; level?: number };
+/**
+ * One answer in checkins.answers_json. `level`: its severity level (src/checkin/severity.ts); answers stored
+ * before the ladder have none. `via` and `freeText` when it came from her typed words (FreeTextAnswer in
+ * src/checkin/engine-types.ts); a tap stores neither.
+ */
+export type StoredAnswer = {
+  questionId: string;
+  questionText: string;
+  answer: string;
+  at: string;
+  level?: number;
+  via?: "free_text" | "confirmed";
+  freeText?: string;
+};
+
+/**
+ * An answer her words suggested on a red-flag question, waiting for her tap (migration 9): "It sounds
+ * like ... Is that right?". `answer` is one of the question's labels; `words` is what she typed.
+ */
+export type Suggestion = { answer: string; words: string };
 
 export type CheckinRow = {
   id: number;
@@ -31,21 +49,28 @@ export type CheckinRow = {
   concernAt: string | null;
   /** When she tapped "Let me explain" on the pending question (migration 8); her next typed message is about it. */
   explainAt: string | null;
+  /** Suggested answers on red-flag questions waiting for her tap, by question id (migration 9). */
+  suggestions: Record<string, Suggestion>;
 };
 
-type RawRow = Omit<CheckinRow, "answers" | "questionIds"> & { answersJson: string | null; questionIdsJson: string };
+type RawRow = Omit<CheckinRow, "answers" | "questionIds" | "suggestions"> & {
+  answersJson: string | null;
+  questionIdsJson: string;
+  suggestionsJson: string | null;
+};
 
 const COLUMNS = `id, patient_id AS patientId, date, status, mood, answers_json AS answersJson,
   question_ids_json AS questionIdsJson, step, question_index AS questionIndex, pending_flag_id AS pendingFlagId,
-  sent_at AS sentAt, finished_at AS finishedAt, concern_at AS concernAt, explain_at AS explainAt`;
+  sent_at AS sentAt, finished_at AS finishedAt, concern_at AS concernAt, explain_at AS explainAt, suggestions_json AS suggestionsJson`;
 
 function fromRaw(raw: RawRow | undefined): CheckinRow | undefined {
   if (!raw) return undefined;
-  const { answersJson, questionIdsJson, ...rest } = raw;
+  const { answersJson, questionIdsJson, suggestionsJson, ...rest } = raw;
   return {
     ...rest,
     answers: answersJson ? (JSON.parse(answersJson) as StoredAnswer[]) : [],
     questionIds: JSON.parse(questionIdsJson) as string[],
+    suggestions: suggestionsJson ? (JSON.parse(suggestionsJson) as Record<string, Suggestion>) : {},
   };
 }
 
@@ -94,6 +119,7 @@ export type CheckinPatch = Partial<{
   finishedAt: string | null;
   concernAt: string | null;
   explainAt: string | null;
+  suggestions: Record<string, Suggestion>;
 }>;
 
 const PATCH_COLUMNS: Record<keyof CheckinPatch, string> = {
@@ -106,6 +132,7 @@ const PATCH_COLUMNS: Record<keyof CheckinPatch, string> = {
   finishedAt: "finished_at",
   concernAt: "concern_at",
   explainAt: "explain_at",
+  suggestions: "suggestions_json",
 };
 
 export function updateCheckin(db: Db, id: number, patch: CheckinPatch): void {
@@ -114,7 +141,7 @@ export function updateCheckin(db: Db, id: number, patch: CheckinPatch): void {
   for (const [key, value] of Object.entries(patch) as [keyof CheckinPatch, unknown][]) {
     if (value === undefined) continue;
     sets.push(`${PATCH_COLUMNS[key]} = ?`);
-    values.push(key === "answers" ? JSON.stringify(value) : value);
+    values.push(key === "answers" || key === "suggestions" ? JSON.stringify(value) : value);
   }
   if (sets.length === 0) return;
   db.prepare(`UPDATE checkins SET ${sets.join(", ")} WHERE id = ?`).run(...values, id);

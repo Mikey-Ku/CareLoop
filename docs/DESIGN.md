@@ -177,6 +177,10 @@ Buttons stay the main way to answer. Typed replies are the second way, read by t
 - **Nothing pending:** small talk from the LLM (short, says it is an assistant, no medical advice). If she mentions a health complaint, a fixed reply goes out instead (call your doctor; 911 if it feels like an emergency). No family alert: complaints in small talk are not red flags under the rules.
 - Other things she mentions are saved to `memories` for the voice call; never acted on.
 
+### Understanding a whole message (2026-10-03)
+
+Every typed message during the check-in gets one understanding pass: the safety screen, then extraction (answers to any of today's unanswered questions, each symptom under its own topic, told which question she is answering right now) and the classifier in parallel. Everything is applied at once, then the check-in goes on at the first unanswered question. A templated line says back what was understood ("Got it: ankles feeling fine. I've noted the back pain for your doctor."). On a red-flag question a reading below level 3 becomes a suggested confirm ("It sounds like your breathing was a little hard at times. Is that right?" with "Yes, that's right" and the other options); she always taps. The generic "You wrote: ... Just to check" confirm remains only when the reading is unclear.
+
 ### Message kinds and reactions
 
 Every typed message goes through a fixed phrase screen first (`src/safety/screen.ts`, crisis and urgent symptom), then the LLM sorts it into one kind; fixed rules react. A screen hit always wins; the LLM may raise a message to crisis or urgent, never lower it. The phrase lists are a demo starting point (see FEEDBACK.md). Live check after a test conversation on 2026-10-03 found the old flow looped her when she tried to explain, ignored a typed "Yes", and went straight back to routine after a red flag.

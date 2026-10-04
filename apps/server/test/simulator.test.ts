@@ -257,7 +257,8 @@ describe("demo scripts", () => {
       { chat: PHONE, text: /eGFR/ },
       { chat: FAMILY, text: /Harriet checked in/ },
       { chat: PHONE, text: /Good morning, Harriet/ },
-      { chat: PHONE, text: /^There's one thing in your health record/ }, // straight after her one message
+      // straight after her one message, with what was understood said back first
+      { chat: PHONE, text: /^Got it: ankles feeling fine, medicines taken and feeling good\.\n\nThere's one thing in your health record/ },
       { chat: PHONE, text: /aspirin/ },
       { chat: FAMILY, text: /Harriet checked in/ },
     ]);
@@ -300,7 +301,14 @@ describe("demo scripts", () => {
     const day2 = bubbles.slice(bubbles.findLastIndex((b) => b.chat === PHONE && /^Good morning, Harriet/.test(b.text)));
     expect(day2).toEqual([
       { chat: PHONE, text: checkinGreeting("Harriet", 3), buttons: ["Quick questions", "Not today"] },
-      { chat: PHONE, text: withLead(notedForDoctor(), withTypingHint(BREATHING_TEXT)), buttons: ["Fine", "A little hard", "Yes, it was hard", "Let me explain"] },
+      {
+        chat: PHONE,
+        text: withLead(
+          "Got it: ankles a little swollen and a little dizzy at times. I've noted the ankles and the dizziness for your doctor.",
+          withTypingHint(BREATHING_TEXT),
+        ),
+        buttons: ["Fine", "A little hard", "Yes, it was hard", "Let me explain"],
+      },
       { chat: PHONE, text: flagOffer(), buttons: ["Tell me more", "Later"] },
       { chat: PHONE, text: checkinDone("Harriet"), buttons: ["Sharing"] },
       { chat: FAMILY, text: checkedIn, buttons: [] },

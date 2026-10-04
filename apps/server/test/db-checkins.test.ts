@@ -51,6 +51,7 @@ describe("checkins rows", () => {
       finishedAt: null,
       concernAt: null,
       explainAt: null,
+      suggestions: {},
     });
   });
 

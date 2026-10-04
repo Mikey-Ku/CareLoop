@@ -21,7 +21,6 @@ import {
   openReplyThanks,
   openReplyUnavailable,
   redFlagAdvice,
-  sorryNotGreat,
   urgentReply,
   withLead,
   withTypingHint,
@@ -206,7 +205,7 @@ describe("her open reply", () => {
     extractions.push(extracted([[ankles.id, "No"], [medicines.id, "Yes"], [mood.id, "Good"]]));
     const words = "No swelling, took my pills, feeling good";
     expect(brief(await say(words))).toEqual([
-      msg(ME, checkinDone("Harriet"), [SHARING_MENU_BUTTON]),
+      msg(ME, withLead("Got it: ankles feeling fine, medicines taken and feeling good.", checkinDone("Harriet")), [SHARING_MENU_BUTTON]),
       msg(SARAH, familyDailyStatus({ seniorName: "Harriet", sharing: "status", outcome: "checked_in", answers: [], flags: [] })),
     ]);
     expect(row(DAY2)).toMatchObject({ status: "answered", step: "done", mood: "Good" });
@@ -223,7 +222,9 @@ describe("her open reply", () => {
   it("covers all three with a flag due: the flag is offered next, as after a last answer", async () => {
     await atDay2Greeting();
     extractions.push(extracted([[ankles.id, "No"], [medicines.id, "Yes"], [mood.id, "Okay"]]));
-    expect(brief(await say("all fine here"))).toEqual([msg(ME, flagOffer(), [BUTTON.tellMeMore, BUTTON.later])]);
+    expect(brief(await say("all fine here"))).toEqual([
+      msg(ME, withLead("Got it: ankles feeling fine, medicines taken and feeling okay.", flagOffer()), [BUTTON.tellMeMore, BUTTON.later]),
+    ]);
     expect(row(DAY2)).toMatchObject({ status: "answered", step: "flag_offer" });
   });
 
@@ -232,16 +233,20 @@ describe("her open reply", () => {
     noFlags();
     extractions.push(extracted([[ankles.id, "More than usual"], [medicines.id, "Yes"], [mood.id, "Good"]], [symptom(ankles.id, "a_lot", "ankles really swollen")]));
     const sent = await say("ankles really swollen, otherwise ok");
-    expect(sent[0]?.text).toBe(withLead(keepAnEye("Harriet"), checkinDoneAfterConcern("Harriet")));
+    expect(sent[0]?.text).toBe(
+      withLead("Got it: ankles more swollen than usual, medicines taken and feeling good. Let's keep an eye on the ankles.", checkinDoneAfterConcern("Harriet")),
+    );
     expect(nextFollowUp(db, P)).toMatchObject({ reason: ankles.id, level: 2 });
     expect(toFamily().at(-1)).toBe(familyDailyStatus({ seniorName: "Harriet", sharing: "status", outcome: "checked_in", answers: [], flags: [] }));
     expect(toHer().some((t) => ALARM.test(t))).toBe(false);
   });
 
-  it("covers some: the folded line, then the first question she didn't cover", async () => {
+  it("covers some: what was understood said back in one line, then the first question she didn't cover", async () => {
     await atDay2Greeting();
     extractions.push(extracted([[ankles.id, "A little"], [medicines.id, "Yes"]], [symptom(ankles.id, "a_little", "a bit puffy")]));
-    expect(brief(await say("ankles a bit puffy, took my pills"))).toEqual([asked(mood, notedForDoctor())]);
+    expect(brief(await say("ankles a bit puffy, took my pills"))).toEqual([
+      asked(mood, "Got it: ankles a little swollen and medicines taken. I've noted the ankles for your doctor."),
+    ]);
     expect(answers(DAY2)).toEqual([
       [ankles.id, "A little"],
       [medicines.id, "Yes"],
@@ -259,7 +264,7 @@ describe("her open reply", () => {
   it("skips what she covered when asking the rest: a gap in the middle", async () => {
     await atDay2Greeting();
     extractions.push(extracted([[ankles.id, "No"], [mood.id, "Good"]]));
-    expect(brief(await say("no swelling, feeling good"))).toEqual([asked(medicines, openReplyThanks("Harriet"))]);
+    expect(brief(await say("no swelling, feeling good"))).toEqual([asked(medicines, "Got it: ankles feeling fine and feeling good.")]);
     noFlags();
     expect((await say("Yes"))[0]?.text).toBe(checkinDone("Harriet")); // mood isn't asked again
     expect(answers(DAY2)).toEqual([
@@ -272,7 +277,7 @@ describe("her open reply", () => {
   it('mood "Not great" gets the short warm line, at most two sentences', async () => {
     await atDay2Greeting();
     extractions.push(extracted([[mood.id, "Not great"]]));
-    expect(brief(await say("feeling a bit down today"))).toEqual([asked(ankles, sorryNotGreat("Harriet"))]);
+    expect(brief(await say("feeling a bit down today"))).toEqual([asked(ankles, "Got it: not feeling great. I'm sorry to hear that.")]);
   });
 
   it("an answer the model isn't sure of, or that isn't one of the buttons, is not recorded: the question is asked", async () => {
@@ -291,7 +296,9 @@ describe("her open reply", () => {
     extractions.push(
       extracted([[ankles.id, "A little"], [dizzy.id, "Sometimes"]], [symptom(ankles.id, "a_little", "ankles a bit puffy"), symptom(dizzy.id, "a_little", "little dizzy getting up")]),
     );
-    expect(brief(await say("ankles a bit puffy, slept ok, little dizzy getting up this morning"))).toEqual([asked(breathing, notedForDoctor())]);
+    expect(brief(await say("ankles a bit puffy, slept ok, little dizzy getting up this morning"))).toEqual([
+      asked(breathing, "Got it: ankles a little swollen and a little dizzy at times. I've noted the ankles and the dizziness for your doctor."),
+    ]);
     expect(row(DAY2).answers.map((a) => [a.questionId, a.answer, a.level])).toEqual([
       [ankles.id, "A little", 1],
       [dizzy.id, "Sometimes", 1],
@@ -302,19 +309,34 @@ describe("her open reply", () => {
 });
 
 describe("red-flag questions in her open reply", () => {
-  it("a calm reading is never recorded: the question is still asked with its buttons", async () => {
+  it("a calm reading is never recorded: each red-flag question gets a suggested confirm for her tap", async () => {
     await atGreeting();
     extractions.push(extracted([[breathing.id, "Fine"], [bleeding.id, "No"], [dizzy.id, "No"]]));
-    expect(brief(await say("slept fine, no bruises, not dizzy"))).toEqual([asked(breathing, openReplyThanks("Harriet"))]);
+    expect(brief(await say("slept fine, no bruises, not dizzy"))).toEqual([
+      msg(
+        ME,
+        withLead("Got it: no dizziness.", "It sounds like your breathing was fine. Is that right?"),
+        ["Yes, that's right", "A little hard", "Yes, it was hard", LET_ME_EXPLAIN],
+      ),
+    ]);
     expect(answers()).toEqual([[dizzy.id, "No"]]);
-    expect(brief(await say("Fine"))).toEqual([asked(bleeding)]);
-    expect((await say("No"))[0]?.text).toBe(flagOffer()); // dizziness was covered
+    expect(brief(await say("Fine"))).toEqual([
+      msg(ME, "It sounds like no unusual bruising or bleeding. Is that right?", ["Yes, that's right", "A little bruising", "Yes, bleeding", LET_ME_EXPLAIN]),
+    ]);
+    expect((await tap("Yes, that's right", messenger.lastIn(ME)))[0]?.text).toBe(flagOffer()); // dizziness was covered
+    expect(row().answers.map((a) => [a.questionId, a.answer, a.level, a.via])).toEqual([
+      [dizzy.id, "No", 0, "free_text"],
+      [breathing.id, "Fine", 0, undefined],
+      [bleeding.id, "No", 0, "confirmed"],
+    ]);
   });
 
   it('"A little hard" is not recorded either (only level 3 counts straight away); her words are kept for her doctor', async () => {
     await atGreeting();
     extractions.push(extracted([[breathing.id, "A little hard"]], [symptom(breathing.id, "a_little", "tight at points but fine other times")]));
-    expect(brief(await say("tight at points but fine other times"))).toEqual([asked(breathing, openReplyThanks("Harriet"))]);
+    expect(brief(await say("tight at points but fine other times"))).toEqual([
+      msg(ME, "It sounds like your breathing was a little hard at times. Is that right?", ["Yes, that's right", "Fine", "Yes, it was hard", LET_ME_EXPLAIN]),
+    ]);
     expect(answers()).toEqual([]);
     expect(nextFollowUp(db, P)).toBeUndefined();
     expect(checkinNotes(db, row().id).map((n) => [n.questionId, n.text])).toEqual([[breathing.id, "tight at points but fine other times"]]);
@@ -347,8 +369,9 @@ describe("symptoms outside today's questions", () => {
   it('"my knee aches": a level-1 note folded before the first question, no 911 anywhere', async () => {
     await atGreeting();
     extractions.push(extracted([], [symptom("knee pain", "a_little", "my knee aches")]));
-    expect(brief(await say("my knee aches today"))).toEqual([asked(breathing, notedForDoctor())]);
+    expect(brief(await say("my knee aches today"))).toEqual([asked(breathing, "I've noted the knee pain for your doctor.")]);
     expect(observations()).toEqual([["knee pain", 1]]);
+    expect(checkinNotes(db, row().id).map((n) => [n.questionId, n.topic, n.text])).toEqual([[null, "knee pain", "my knee aches"]]);
     for (const t of ["Fine", "No", "No", BUTTON.later]) await say(t);
     expect(toHer().some((t) => ALARM.test(t))).toBe(false);
     expect(toFamily().some((t) => ALARM.test(t))).toBe(false);
@@ -358,7 +381,7 @@ describe("symptoms outside today's questions", () => {
   it("the noted line is said once per check-in: a later level-1 tap doesn't repeat it", async () => {
     await atGreeting();
     extractions.push(extracted([], [symptom("knee pain", "a_little", "my knee aches")]));
-    expect((await say("my knee aches"))[0]?.text).toBe(withLead(notedForDoctor(), withTypingHint(breathing.text)));
+    expect((await say("my knee aches"))[0]?.text).toBe(withLead("I've noted the knee pain for your doctor.", withTypingHint(breathing.text)));
     for (const t of ["Fine", "No"]) await say(t);
     expect((await say("Sometimes"))[0]?.text).toBe(flagOffer());
   });
@@ -366,14 +389,16 @@ describe("symptoms outside today's questions", () => {
   it("the highest level wins the one folded line: a small symptom and one worth watching", async () => {
     await atGreeting();
     extractions.push(extracted([], [symptom("knee pain", "a_little"), symptom("cough", "a_little", "a new cough", "new")]));
-    expect(brief(await say("knee aches, and a new cough"))).toEqual([asked(breathing, keepAnEye("Harriet"))]);
+    expect(brief(await say("knee aches, and a new cough"))).toEqual([asked(breathing, "Let's keep an eye on the cough.")]);
     expect(nextFollowUp(db, P)).toMatchObject({ reason: "cough", level: 2 });
   });
 
   it("two things worth watching ask for one follow-up about how she is in general", async () => {
     await atDay2Greeting();
     extractions.push(extracted([[ankles.id, "More than usual"]], [symptom(ankles.id, "a_lot"), symptom("cough", "a_little", "a new cough", "new")]));
-    expect(brief(await say("ankles very swollen and a new cough"))).toEqual([asked(medicines, keepAnEye("Harriet"))]);
+    expect(brief(await say("ankles very swollen and a new cough"))).toEqual([
+      asked(medicines, "Got it: ankles more swollen than usual. Let's keep an eye on the ankles and the cough."),
+    ]);
     expect(nextFollowUp(db, P)).toMatchObject({ reason: "general", level: 2 });
   });
 });

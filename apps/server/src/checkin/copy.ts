@@ -260,6 +260,81 @@ export function symptomNotedReply(name: string, topics: string[]): string {
   return `${sorry} I've made a note for your doctor.`;
 }
 
+// One understanding pass (src/checkin/engine.ts): what was understood from her typed words is said
+// back in one fixed line before the next message. No LLM wording.
+
+/** Her answer said back, by question and label ("Got it: ankles feeling fine."). */
+export const ANSWER_PHRASES: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  "hf-ankle-swelling": { No: "ankles feeling fine", "A little": "ankles a little swollen", "More than usual": "ankles more swollen than usual" },
+  "hf-breathing-lying-flat": {
+    Fine: "your breathing was fine",
+    "A little hard": "your breathing was a little hard at times",
+    "Yes, it was hard": "your breathing was hard",
+  },
+  "anticoagulant-bleeding": { No: "no unusual bruising or bleeding", "A little bruising": "a little bruising", "Yes, bleeding": "some bleeding" },
+  "dizzy-on-standing": { No: "no dizziness", Sometimes: "a little dizzy at times", Often: "dizzy often" },
+  "morning-medicines": { Yes: "medicines taken", "Not yet": "medicines not taken yet", "Some of them": "took some of your medicines" },
+  mood: { Good: "feeling good", Okay: "feeling okay", "Not great": "not feeling great" },
+};
+
+/** Short names for a question's topic in that line ("Let's keep an eye on the dizziness."). */
+export const ECHO_TOPICS: Readonly<Record<string, string>> = {
+  "hf-ankle-swelling": "ankles",
+  "hf-breathing-lying-flat": "breathing",
+  "anticoagulant-bleeding": "bruising or bleeding",
+  "dizzy-on-standing": "dizziness",
+  "morning-medicines": "medicines",
+  mood: "mood",
+};
+
+/** The phrase for one answer to one question (labels match case-insensitively), if there is one. */
+export function answerPhrase(questionId: string, answer: string): string | undefined {
+  const table = ANSWER_PHRASES[questionId] ?? {};
+  const key = Object.keys(table).find((k) => k.toLowerCase() === answer.trim().toLowerCase());
+  return key === undefined ? undefined : table[key];
+}
+
+/** One thing understood from her words: an answer recorded (`answer`, `topic` its question id), or a symptom on `topic`. */
+export type UnderstoodItem = { topic: string; level: number; answer?: string };
+
+/**
+ * What one typed message told us, said back in at most two short sentences: the answers recorded from
+ * her words ("Got it: ankles feeling fine."), then the ladder's line for the highest level, naming what
+ * it is about (1: "I've noted the back pain for your doctor.", mood "Not great": "I'm sorry to hear
+ * that.", 2: "Let's keep an eye on the dizziness."). Undefined when nothing was understood, and at
+ * level 3 and up, whose own messages are sent instead. Never mentions 911.
+ */
+export function understoodLine(items: readonly UnderstoodItem[]): string | undefined {
+  if (items.length === 0) return undefined;
+  const top = Math.max(0, ...items.map((i) => i.level));
+  if (top >= 3) return undefined;
+  const answered = items.flatMap((i) => {
+    const phrase = i.answer === undefined ? undefined : answerPhrase(i.topic, i.answer);
+    return phrase === undefined ? [] : [phrase];
+  });
+  const sentences: string[] = [];
+  if (answered.length > 0) sentences.push(`Got it: ${listJoin(answered)}.`);
+  if (top >= 1) {
+    const atTop = items.filter((i) => i.level === top);
+    const names = [...new Set(atTop.map((i) => ECHO_TOPICS[i.topic] ?? topicWords(i.topic)).filter((n): n is string => n !== undefined))].slice(0, 2);
+    const justSaid = atTop.every((i) => i.answer !== undefined) && answered.length === 1;
+    const what = justSaid || names.length === 0 ? "that" : listJoin(names.map((n) => `the ${n}`));
+    if (top === 2) sentences.push(`Let's keep an eye on ${what}.`);
+    else if (atTop.every((i) => i.topic === "mood" && i.answer !== undefined)) sentences.push("I'm sorry to hear that.");
+    else sentences.push(`I've noted ${what} for your doctor.`);
+  }
+  return sentences.length > 0 ? sentences.join(" ") : undefined;
+}
+
+/**
+ * Her words on a red-flag question suggested an answer below level 3: she is asked to confirm it with
+ * one tap ("Yes, that's right", the other answers, "Let me explain"), never recorded from the reading.
+ * `phrase` comes from answerPhrase.
+ */
+export function suggestedConfirm(phrase: string): string {
+  return `It sounds like ${phrase}. Is that right?`;
+}
+
 /** "Clarify" buttons: the one question that may follow a typed symptom whose amount is unclear. */
 export const CLARIFY_BUTTONS = { a_little: "A little", a_lot: "A lot" } as const;
 
