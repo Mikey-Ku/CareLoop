@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CAMERA_OFFER_AT_END, callClosing, callFirstMessage } from "../src/calls/copy.ts";
+import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, QUIET_RETRY_OFFER, callClosing, callFirstMessage, quietCountdown } from "../src/calls/copy.ts";
 import { emptyCallVitals } from "../src/calls/screening.ts";
 import { ConversationOrchestrator, type ConversationOrchestratorOptions } from "../src/calls/orchestrator.ts";
 import { crisisReply, urgentReply } from "../src/checkin/copy.ts";
@@ -113,7 +113,7 @@ describe("ConversationOrchestrator", () => {
       initialContext: { firstName: "Harriet", questions: [], yesterday: [], memories: [], familyNames: [] },
       llm,
       loadSnapshot: async (subject) => loadSnapshot(subject),
-      getVitals: emptyCallVitals,
+      getVitals: () => ({ ...emptyCallVitals(), heartRate: 72 }),
       canMeasure: () => true,
       quietMeasurementMs: 30_000,
       speak: async (text) => { spoken.push(text); },
@@ -382,7 +382,7 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
   it("yes: runs the quiet measurement, reads it back, then the fixed goodbye; it is not offered a second time", async () => {
     vi.useFakeTimers();
     const llm = new FakeLlmClient({ callTurn: () => plan() });
-    const { flow, spoken, onComplete, beginQuietMeasurement, say } = buildFlow(llm, { canMeasure: () => true });
+    const { flow, spoken, onComplete, beginQuietMeasurement, say } = buildFlow(llm, { canMeasure: () => true, getVitals: () => ({ ...emptyCallVitals(), heartRate: 72 }) });
     await say("I have had a bit of a cough.");
     await say("Yes, please.");
     expect(beginQuietMeasurement).toHaveBeenCalledOnce();
@@ -390,7 +390,7 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
     expect(onComplete).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(30_500);
     await vi.waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
-    expect(spoken).toEqual([CAMERA_OFFER_AT_END, spoken[1], "I couldn't get a clear camera reading this time. That's okay.", callClosing("Harriet")]);
+    expect(spoken).toEqual([CAMERA_OFFER_AT_END, spoken[1], quietCountdown(20), quietCountdown(10), "The camera estimate is about 72 beats a minute for your heart rate. This is an estimate, not a medical test.", callClosing("Harriet")]);
     expect(offers(spoken)).toBe(1);
     expect(turnInputs(llm).map((input) => input.canMeasure)).toEqual([true, false]); // Gemini is told it is taken
     flow.close();
@@ -442,7 +442,7 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
   it("is not offered when the reading was already taken at Gemini's own request", async () => {
     vi.useFakeTimers();
     const llm = new FakeLlmClient({ callTurn: (input) => (input.interviewPhase === "screening" ? plan() : plan({ nextAction: "request_measurement_permission", nextQuestion: "Would you like a quiet camera estimate?" })) });
-    const { flow, spoken, onComplete, say } = buildFlow(llm, { canMeasure: () => true });
+    const { flow, spoken, onComplete, say } = buildFlow(llm, { canMeasure: () => true, getVitals: () => ({ ...emptyCallVitals(), heartRate: 72 }) });
     await say("I have had a bit of a cough.");
     await say("Yes.");
     await vi.advanceTimersByTimeAsync(30_500);
@@ -840,5 +840,276 @@ describe("ConversationOrchestrator: what the model writes is checked before it i
     const b = buildFlow(clean, { canMeasure: () => true });
     await b.say("My heart feels fluttery.");
     expect(b.spoken).toEqual(["Thank you for telling me. Would you like to try a quiet camera measurement now?"]);
+  });
+});
+
+describe("ConversationOrchestrator: her camera is off, so she is told how to turn it on", () => {
+  const DECLINE = "Of course. We can skip the camera measurement.";
+  /** The camera reading is set up (Presage); `cameraOn` is her video. */
+  function offCamera(nextAction: "complete_screening" | "end_call" = "complete_screening") {
+    const state = { on: false, configured: true, vitals: emptyCallVitals() };
+    const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction }) });
+    const flow = buildFlow(llm, { canMeasure: () => state.configured && state.on, cameraNeedsVideo: () => state.configured && !state.on, getVitals: () => state.vitals });
+    return { ...flow, state, llm };
+  }
+
+  it("says how to turn the camera on, in fixed words, once, and waits for her answer", async () => {
+    const { spoken, onComplete, beginQuietMeasurement, say } = offCamera();
+    await say("I have had a bit of a cough.");
+    expect(spoken).toEqual([CAMERA_GUIDANCE]);
+    expect(spoken[0]).not.toMatch(/911|988/);
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(beginQuietMeasurement).not.toHaveBeenCalled(); // never without her ready
+  });
+
+  it("ready with her camera now on starts the quiet reading", async () => {
+    vi.useFakeTimers();
+    const { flow, spoken, state, onComplete, beginQuietMeasurement, say } = offCamera();
+    await say("I have had a bit of a cough.");
+    state.on = true;
+    state.vitals = { ...emptyCallVitals(), heartRate: 72 };
+    await say("Ready.");
+    expect(beginQuietMeasurement).toHaveBeenCalledOnce();
+    expect(spoken.at(-1)).toMatch(/face and upper chest.*30 seconds/i);
+    await vi.advanceTimersByTimeAsync(30_500);
+    await vi.waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
+    expect(spoken.at(-1)).toBe(callClosing("Harriet"));
+    flow.close();
+  });
+
+  it("no thanks: the decline line, no reading, then the goodbye, and the guidance is not said again", async () => {
+    const { spoken, onComplete, beginQuietMeasurement, say } = offCamera();
+    await say("I have had a bit of a cough.");
+    await say("No thanks.");
+    expect(spoken).toEqual([CAMERA_GUIDANCE, DECLINE, callClosing("Harriet")]);
+    expect(beginQuietMeasurement).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledOnce();
+  });
+
+  it("ready but the camera is still off: told once more, then a second ready ends it without a reading", async () => {
+    vi.useFakeTimers();
+    const { spoken, onComplete, beginQuietMeasurement, say } = offCamera();
+    await say("I have had a bit of a cough.");
+    await say("Ready.");
+    expect(spoken).toEqual([CAMERA_GUIDANCE, CAMERA_STILL_OFF]);
+    expect(onComplete).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(6_000); // she hears the reminder before she answers it
+    await say("Ready!");
+    expect(spoken).toEqual([CAMERA_GUIDANCE, CAMERA_STILL_OFF, DECLINE, callClosing("Harriet")]);
+    expect(beginQuietMeasurement).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledOnce();
+  });
+
+  it("the same short answer committed twice is one answer: the second does not decline the guidance", async () => {
+    vi.useFakeTimers();
+    const { flow, spoken, onComplete, say } = offCamera();
+    await say("No."); // her answer to the last question: the model finishes and the guidance is said
+    await say("No."); // the speech-to-text committed it a second time
+    expect(spoken).toEqual([CAMERA_GUIDANCE]);
+    expect(onComplete).not.toHaveBeenCalled(); // still waiting for her answer to the guidance
+    await vi.advanceTimersByTimeAsync(4_000);
+    await say("No."); // her real answer, seconds later
+    expect(spoken).toEqual([CAMERA_GUIDANCE, DECLINE, callClosing("Harriet")]);
+    expect(onComplete).toHaveBeenCalledOnce();
+    flow.close();
+  });
+
+  it("an answer that is neither is told once more, and the camera coming on in between lets the next ready start it", async () => {
+    vi.useFakeTimers();
+    const { flow, spoken, state, beginQuietMeasurement, say } = offCamera();
+    await say("I have had a bit of a cough.");
+    await say("What camera?");
+    expect(spoken).toEqual([CAMERA_GUIDANCE, CAMERA_STILL_OFF]);
+    state.on = true;
+    await say("Okay, it's on.");
+    expect(beginQuietMeasurement).toHaveBeenCalledOnce();
+    flow.close();
+  });
+
+  it("is not said when she says she has to go (end_call), or when the camera reading is not set up", async () => {
+    const goes = offCamera("end_call");
+    await goes.say("I have to go now.");
+    expect(goes.spoken).toEqual([callClosing("Harriet")]);
+
+    const unconfigured = offCamera();
+    unconfigured.state.configured = false;
+    await unconfigured.say("I have had a bit of a cough.");
+    expect(unconfigured.spoken).toEqual([callClosing("Harriet")]);
+  });
+
+  it("with her camera already on it is the offer, not the guidance", async () => {
+    const { spoken, state, say } = offCamera();
+    state.on = true;
+    await say("I have had a bit of a cough.");
+    expect(spoken).toEqual([CAMERA_OFFER_AT_END]);
+  });
+
+  it("never when the reading was already taken or declined", async () => {
+    const declined = offCamera();
+    await declined.say("I have had a bit of a cough.");
+    await declined.say("No thanks.");
+    expect(declined.spoken.filter((text) => text === CAMERA_GUIDANCE)).toHaveLength(1);
+  });
+});
+
+describe("ConversationOrchestrator: the quiet window counts down", () => {
+  const READBACK = "The camera estimate is about 72 beats a minute for your heart rate. This is an estimate, not a medical test.";
+  function window(extra: Partial<ConversationOrchestratorOptions> = {}) {
+    vi.useFakeTimers();
+    const llm = new FakeLlmClient({ callTurn: () => plan() });
+    const flow = buildFlow(llm, { canMeasure: () => true, ...extra });
+    return { ...flow, llm };
+  }
+  const started = async (f: ReturnType<typeof window>) => {
+    await f.say("I have had a bit of a cough.");
+    await f.say("Yes, please.");
+    expect(f.beginQuietMeasurement).toHaveBeenCalledOnce();
+  };
+
+  it("says how many seconds are left at 20 and at 10, and nothing in between", async () => {
+    const f = window({ getVitals: () => ({ ...emptyCallVitals(), heartRate: 72 }) });
+    await started(f);
+    const before = f.spoken.length;
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(f.spoken.length).toBe(before);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(f.spoken.at(-1)).toBe("Twenty seconds left.");
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(f.spoken.at(-1)).toBe("Twenty seconds left.");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(f.spoken.at(-1)).toBe("Ten seconds left.");
+    await vi.advanceTimersByTimeAsync(20_500);
+    await vi.waitFor(() => expect(f.onComplete).toHaveBeenCalledOnce());
+    expect(f.spoken.slice(before)).toEqual([quietCountdown(20), quietCountdown(10), READBACK, callClosing("Harriet")]);
+    f.flow.close();
+  });
+
+  it("a window cut short ends at the next second with the offer to try again, with no countdown over nothing", async () => {
+    let active = true;
+    const f = window({ measurementActive: () => active });
+    await started(f);
+    const before = f.spoken.length;
+    await vi.advanceTimersByTimeAsync(4_000);
+    active = false; // the camera stalled
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(f.spoken.at(-1)).toBe(QUIET_RETRY_OFFER));
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(f.spoken.slice(before)).toEqual([QUIET_RETRY_OFFER]); // nothing more, and the end timer did not fire a second readback
+    f.flow.close();
+  });
+
+  it("stops when the call is closed", async () => {
+    const f = window();
+    await started(f);
+    const before = f.spoken.length;
+    f.flow.close();
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(f.spoken.length).toBe(before);
+  });
+
+  it("the prompt says how long the window is and that she will hear the time counted down", async () => {
+    const f = window({ quietMeasurementMs: 30_000 });
+    await started(f);
+    expect(f.spoken.at(-1)).toMatch(/30 seconds once I stop talking.*count down/i);
+    f.flow.close();
+  });
+});
+
+describe("ConversationOrchestrator: she hangs up while the reading is being finished", () => {
+  it("a call that can no longer be ended is logged, and nothing is thrown out of the timer", async () => {
+    vi.useFakeTimers();
+    const logged: string[] = [];
+    const llm = new FakeLlmClient({ callTurn: () => plan() });
+    const f = buildFlow(llm, {
+      canMeasure: () => true,
+      getVitals: () => ({ ...emptyCallVitals(), heartRate: 72 }),
+      onComplete: () => { throw new Error("Relay Call room is not connected."); },
+      log: (event) => logged.push(event),
+    });
+    await f.say("I have had a bit of a cough.");
+    await f.say("Yes, please.");
+    await vi.advanceTimersByTimeAsync(30_500); // a rejection nobody awaits would fail the whole run here
+    await vi.waitFor(() => expect(logged).toContain("call_turn_failed"));
+    f.flow.close();
+  });
+});
+
+describe("ConversationOrchestrator: a reading with nothing usable is offered once more", () => {
+  const NO_READING = "I couldn't get a clear camera reading this time. That's okay.";
+  const DECLINE = "Of course. We can skip the camera measurement.";
+  /** She said yes to the reading; `state.active` is false once her video stalls, `state.camera` is her video. */
+  function retryFlow() {
+    vi.useFakeTimers();
+    const state = { active: true, camera: true, vitals: emptyCallVitals() };
+    const llm = new FakeLlmClient({ callTurn: () => plan() });
+    const flow = buildFlow(llm, { canMeasure: () => state.camera, measurementActive: () => state.active, getVitals: () => state.vitals });
+    return { ...flow, state };
+  }
+  type Retry = ReturnType<typeof retryFlow>;
+  const stall = async (f: Retry) => {
+    f.state.active = false; // the camera stalled
+    await vi.advanceTimersByTimeAsync(1_000);
+    f.state.active = true;
+  };
+  const firstTryFails = async (f: Retry) => {
+    await f.say("I have had a bit of a cough.");
+    await f.say("Yes, please.");
+    await stall(f);
+    await vi.waitFor(() => expect(f.spoken.at(-1)).toBe(QUIET_RETRY_OFFER));
+    expect(f.onComplete).not.toHaveBeenCalled();
+  };
+  const offers = (f: Retry) => f.spoken.filter((text) => text === QUIET_RETRY_OFFER).length;
+
+  it("yes: takes the reading again and reads it back, and the offer is not made twice", async () => {
+    const f = retryFlow();
+    await firstTryFails(f);
+    await f.say("Yes.");
+    expect(f.beginQuietMeasurement).toHaveBeenCalledTimes(2);
+    expect(f.spoken.at(-1)).toMatch(/face and upper chest.*30 seconds/i);
+    f.state.vitals = { ...emptyCallVitals(), heartRate: 72, breathingRate: 14 };
+    await vi.advanceTimersByTimeAsync(30_500);
+    await vi.waitFor(() => expect(f.onComplete).toHaveBeenCalledOnce());
+    expect(f.spoken.slice(-2)).toEqual(["The camera estimate is about 72 beats a minute for your heart rate and 14 breaths a minute for your breathing. This is an estimate, not a medical test.", callClosing("Harriet")]);
+    expect(offers(f)).toBe(1);
+    f.flow.close();
+  });
+
+  it("'try again' is a yes", async () => {
+    const f = retryFlow();
+    await firstTryFails(f);
+    await f.say("Let's try again.");
+    expect(f.beginQuietMeasurement).toHaveBeenCalledTimes(2);
+    f.flow.close();
+  });
+
+  it("no: the decline line, no second reading, then the goodbye", async () => {
+    const f = retryFlow();
+    await firstTryFails(f);
+    await f.say("No thanks.");
+    expect(f.spoken.slice(-2)).toEqual([DECLINE, callClosing("Harriet")]);
+    expect(f.beginQuietMeasurement).toHaveBeenCalledOnce();
+    expect(f.onComplete).toHaveBeenCalledOnce();
+  });
+
+  it("a second failure ends with the no-reading words and the goodbye, with no third try offered", async () => {
+    const f = retryFlow();
+    await firstTryFails(f);
+    await f.say("Yes.");
+    await stall(f);
+    await vi.waitFor(() => expect(f.onComplete).toHaveBeenCalledOnce());
+    expect(f.spoken.slice(-2)).toEqual([NO_READING, callClosing("Harriet")]);
+    expect(offers(f)).toBe(1);
+    expect(f.beginQuietMeasurement).toHaveBeenCalledTimes(2);
+  });
+
+  it("is not offered when her camera has gone off meanwhile", async () => {
+    const f = retryFlow();
+    await f.say("I have had a bit of a cough.");
+    await f.say("Yes, please.");
+    f.state.camera = false;
+    await stall(f);
+    await vi.waitFor(() => expect(f.onComplete).toHaveBeenCalledOnce());
+    expect(f.spoken.slice(-2)).toEqual([NO_READING, callClosing("Harriet")]);
+    expect(offers(f)).toBe(0);
   });
 });

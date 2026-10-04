@@ -2,7 +2,7 @@ import type { Call, CallWebhookEvent } from "@relaymessenger/sdk";
 import type { RelayCallTransport } from "@relaymessenger/sdk/calls";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ElevenLabsRealtimeStt, ElevenLabsTts } from "../src/calls/audio.ts";
-import { CAMERA_OFFER_AT_END, callClosing, cantHearYou } from "../src/calls/copy.ts";
+import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, callClosing, cantHearYou } from "../src/calls/copy.ts";
 import { emptyCallVitals } from "../src/calls/screening.ts";
 import { CallService, type CallEngine } from "../src/calls/service.ts";
 import { createCheckinEngine } from "../src/checkin/engine.ts";
@@ -69,6 +69,7 @@ class FakeBridge {
   readonly stop = vi.fn(async () => emptyCallVitals());
   readonly result = vi.fn(() => emptyCallVitals());
   readonly beginQuietMeasurement = vi.fn();
+  readonly measuring = vi.fn(() => this.quiet.status !== "interrupted");
 }
 
 class FakeStt {
@@ -482,18 +483,58 @@ describe("her audio goes to the transcriber", () => {
   });
 });
 
-describe("the camera reading is offered only while her video is on", () => {
+describe("the camera reading is offered only while her video is on, and without it she is told how to turn it on", () => {
   const withCamera = { PRESAGE_API_KEY: "presage-test-key" }; // a bridge exists, as on the demo machine
   const endsTheCall = () => modelPlan();
   const turn = "My ankles are a bit swollen.";
 
-  it("an audio-only call is never offered it", async () => {
+  it("an audio-only call is not offered the reading but told how to turn her camera on, and may say no", async () => {
     const service = setup({ callTurn: endsTheCall, env: withCamera });
     await start(service);
     stt.emit(turn);
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_GUIDANCE));
+    expect(tts.spoken).not.toContain(CAMERA_OFFER_AT_END);
+    expect(transport.end).not.toHaveBeenCalled(); // the call waits for her answer
+    stt.emit("No thanks.");
     await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
     expect(tts.spoken.at(-1)).toBe(callClosing("Harriet", []));
-    expect(tts.spoken).not.toContain(CAMERA_OFFER_AT_END);
+    expect(bridge.beginQuietMeasurement).not.toHaveBeenCalled();
+  });
+
+  it("she turns her camera on after the guidance and says ready: the quiet reading starts", async () => {
+    const service = setup({ callTurn: endsTheCall, env: withCamera });
+    await start(service);
+    stt.emit(turn);
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_GUIDANCE));
+    transport.emit("remoteVideo", true);
+    stt.emit("Ready.");
+    await vi.waitFor(() => expect(bridge.beginQuietMeasurement).toHaveBeenCalledOnce());
+    expect(tts.spoken.at(-1)).toMatch(/face and upper chest/i);
+    await service.end("call-1");
+  });
+
+  it("she says ready but her camera is still off: she is told once more, then the call goes on without the reading", async () => {
+    const service = setup({ callTurn: endsTheCall, env: withCamera });
+    await start(service);
+    stt.emit(turn);
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_GUIDANCE));
+    stt.emit("Ready.");
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_STILL_OFF));
+    stt.emit("Ready now.");
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(tts.spoken.at(-1)).toBe(callClosing("Harriet", []));
+    expect(bridge.beginQuietMeasurement).not.toHaveBeenCalled();
+  });
+
+  it("she hangs up as the call is being ended: ending a room that is gone is logged, not thrown", async () => {
+    const service = setup({ callTurn: endsTheCall });
+    transport.end.mockImplementation(() => { throw new Error("Relay Call room is not connected."); });
+    await start(service);
+    stt.emit(turn);
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(logs.find((entry) => entry.event === "call_end_failed")).toMatchObject({ error: "Error: Relay Call room is not connected." });
+    expect(logs.some((entry) => entry.event === "call_turn_failed")).toBe(false);
+    await service.end("call-1");
   });
 
   it("a call without Presage is never offered it, video or not", async () => {
@@ -522,7 +563,7 @@ describe("the camera reading is offered only while her video is on", () => {
   it.each([
     ["turns her camera off", () => transport.emit("remoteVideo", false)],
     ["loses her video track", () => transport.emit("trackUnsubscribed", {})],
-  ])("a call where she %s before the goodbye gets no offer", async (_how, cameraOff) => {
+  ])("a call where she %s before the goodbye gets the guidance, not the offer", async (_how, cameraOff) => {
     let turns = 0;
     const service = setup({ callTurn: () => (turns += 1) === 1 ? modelPlan({ nextAction: "ask_follow_up", nextQuestion: "When did the swelling start?" }) : modelPlan(), env: withCamera });
     await start(service);
@@ -531,8 +572,7 @@ describe("the camera reading is offered only while her video is on", () => {
     await vi.waitFor(() => expect(tts.spoken.at(-1)).toContain("When did the swelling start?"));
     cameraOff();
     stt.emit("Since Monday.");
-    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
-    expect(tts.spoken.at(-1)).toBe(callClosing("Harriet", []));
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_GUIDANCE));
     expect(tts.spoken).not.toContain(CAMERA_OFFER_AT_END);
   });
 });

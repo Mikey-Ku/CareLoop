@@ -324,6 +324,7 @@ export class CallService implements CallEventHandler {
             apiKey: calls.presageApiKey,
             quietDurationMs: calls.quietMeasurementMs,
             minConfidence: calls.vitalsMinConfidence,
+            maxFrameGapMs: calls.maxFrameGapMs,
             log: (event, fields) => this.#log(event, { call_id: call.id, ...fields }),
           })
         : undefined;
@@ -339,6 +340,8 @@ export class CallService implements CallEventHandler {
         loadSnapshot: this.#options.loadSnapshot,
         getVitals: () => active.bridge?.result() ?? emptyCallVitals(),
         canMeasure: () => Boolean(active.bridge) && videoOn,
+        cameraNeedsVideo: () => Boolean(active.bridge) && !videoOn,
+        measurementActive: () => active.bridge?.measuring() ?? true,
         quietMeasurementMs: calls.quietMeasurementMs,
         speak: (text) => tts.speak(text),
         beforeGreeting: async () => {
@@ -364,7 +367,11 @@ export class CallService implements CallEventHandler {
         onComplete: (screening) => {
           if (screening) active.geminiScreening = screening;
           patchCallSession(this.#options.db, call.id, { phase: "screening" });
-          active.transport?.end();
+          try {
+            active.transport?.end();
+          } catch (error) {
+            this.#log("call_end_failed", { call_id: call.id, error: summary(error) }); // she already hung up: the room is gone and there is nothing left to end
+          }
         },
         log: (event, fields) => this.#log(event, { call_id: call.id, ...fields }),
       });

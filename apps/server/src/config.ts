@@ -74,6 +74,8 @@ const ConfigSchema = z.object({
   CALL_MAX_MINUTES: z.coerce.number().positive().max(30).default(4),
   /** Lowest SmartSpectra confidence (0 to 100) a camera reading needs to be used. 1 keeps out warm-up zeros; the team tunes it. */
   VITALS_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(1),
+  /** Longest pause in her video (ms) a camera reading rides out. A phone's first frames often come in a burst and then a pause of 2 s or so. */
+  VITALS_MAX_FRAME_GAP_MS: z.coerce.number().int().min(1_000).max(10_000).default(3_000),
 });
 
 /**
@@ -145,6 +147,8 @@ export type CallsConfig = {
   maxMinutes: number;
   /** VITALS_MIN_CONFIDENCE: lowest SmartSpectra confidence (0 to 100) a reading needs. */
   vitalsMinConfidence: number;
+  /** VITALS_MAX_FRAME_GAP_MS: a longer pause in her video cuts the quiet reading short. */
+  maxFrameGapMs: number;
 };
 
 export type Config = {
@@ -204,6 +208,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     quietMeasurementMs: c.CALL_QUIET_MEASUREMENT_MS,
     maxMinutes: c.CALL_MAX_MINUTES,
     vitalsMinConfidence: c.VITALS_MIN_CONFIDENCE,
+    maxFrameGapMs: c.VITALS_MAX_FRAME_GAP_MS,
   };
   Object.defineProperty(calls, "elevenLabsApiKey", { value: ELEVENLABS_API_KEY?.trim() || undefined, enumerable: false });
   Object.defineProperty(calls, "presageApiKey", { value: PRESAGE_API_KEY?.trim() || undefined, enumerable: false });

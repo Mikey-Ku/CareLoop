@@ -4,7 +4,7 @@ import type { CallCheckinContext } from "../checkin/engine-types.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import type { CallScreeningLlmOutput, CallTurnLlmOutput, LlmClient } from "../llm/types.ts";
 import type { VitalsResult } from "../vitals/types.ts";
-import { CAMERA_OFFER_AT_END, callClosing, callFirstMessage, quietMeasurementPrompt } from "./copy.ts";
+import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, QUIET_COUNTDOWN_SECONDS, QUIET_RETRY_OFFER, callClosing, callFirstMessage, quietCountdown, quietMeasurementPrompt } from "./copy.ts";
 import { emergencyDecision } from "./emergency.ts";
 import type { TranscriptTurn } from "./types.ts";
 
@@ -23,6 +23,16 @@ export type ConversationOrchestratorOptions = {
    * video is on (the call service watches the transport). An audio-only call, or a camera turned off, gets no offer.
    */
   canMeasure: () => boolean;
+  /**
+   * The camera reading is set up but her camera is off (asked each turn): before the goodbye she is told how
+   * to turn it on, once. Absent: never.
+   */
+  cameraNeedsVideo?: () => boolean;
+  /**
+   * Whether the quiet window is still running (not cut short, for example by a stalled camera), asked every
+   * second of it: when it is not, the window ends at once instead of counting down to nothing. Absent: always.
+   */
+  measurementActive?: () => boolean;
   quietMeasurementMs: number;
   speak: (text: string) => Promise<void>;
   /**
@@ -39,6 +49,8 @@ export type ConversationOrchestratorOptions = {
   log?: (event: string, fields?: Record<string, unknown>) => void;
 };
 
+/** The same few words committed again within this long are one answer, not two. */
+const REPEATED_TURN_MS = 3_000;
 /** Said in place of the model's acknowledgment when it may not be said (src/context/guard.ts guardSpoken). */
 const FALLBACK_ACKNOWLEDGMENT = "Thank you for telling me.";
 /** Asked when the model's question may not be said and no unanswered check-in question is left. */
@@ -56,14 +68,23 @@ export class ConversationOrchestrator {
   #greeted = false;
   /** Moves when she adds to what she said (a newer turn is queued, or she starts speaking again): see #stale. */
   #turnSeq = 0;
+  #lastTurn = { key: "", at: 0 };
   #completed = false;
   #waitingForMeasurementConsent = false;
+  /** She was told how to turn her camera on and her answer is awaited; the reading starts on her "ready". */
+  #waitingForCameraOn = false;
+  #cameraGuided = false;
+  #cameraStillOffAsked = false;
   /** She was asked "yes or no" once more after an answer that was neither; a second one is taken as no. */
   #consentReasked = false;
+  /** A reading with nothing usable is offered once more, once. */
+  #retryOffered = false;
+  #waitingForRetry = false;
   #measurementDeclined = false;
   /** She said yes and the quiet reading was started: it is never offered or asked for again. */
   #measurementDone = false;
   #measurementTimer: ReturnType<typeof setTimeout> | undefined;
+  #countdownTimer: ReturnType<typeof setInterval> | undefined;
   /** Her FinchNode record, read on the first turn that needs it (see #loadContext). */
   #record: Promise<HealthRecord> | undefined;
   #phase: "interview" | "quiet_measurement" | "screening" = "interview";
@@ -105,6 +126,7 @@ export class ConversationOrchestrator {
   }
 
   handlePatientTurn(text: string): Promise<void> {
+    if (this.#isRepeat(text)) return this.#queue; // not a new answer: the turn in progress stays current
     const seq = text.trim() ? ++this.#turnSeq : this.#turnSeq;
     this.#queue = this.#queue.then(() => this.#handlePatientTurn(text, seq)).catch(async (error) => {
       this.#log("call_turn_failed", { error: summary(error) });
@@ -122,6 +144,15 @@ export class ConversationOrchestrator {
     return this.#queue;
   }
 
+  /** The speech-to-text can commit one short answer twice ("No." "No."); the second would read as an answer to whatever is asked next. */
+  #isRepeat(text: string): boolean {
+    const key = text.toLowerCase().replace(/[^a-z0-9' ]+/g, " ").trim().replace(/\s+/g, " ");
+    const now = Date.now();
+    const repeat = key !== "" && key.split(" ").length <= 3 && key === this.#lastTurn.key && now - this.#lastTurn.at < REPEATED_TURN_MS;
+    if (!repeat) this.#lastTurn = { key, at: now };
+    return repeat;
+  }
+
   /**
    * She started speaking again (the call service calls this when a partial transcript has two real words).
    * Whatever Gemini is still planning for her earlier words is out of date: its reply is dropped, and her
@@ -134,6 +165,7 @@ export class ConversationOrchestrator {
   close(): void {
     this.#completed = true;
     clearTimeout(this.#measurementTimer);
+    clearInterval(this.#countdownTimer);
   }
 
   async #handlePatientTurn(text: string, seq: number): Promise<void> {
@@ -141,15 +173,35 @@ export class ConversationOrchestrator {
     // Keep transcription/audit of speech during the quiet window, but don't break the measurement or
     // make Gemini talk over the patient. The complete transcript is reconsidered after the window.
     if (this.#phase === "quiet_measurement") return;
+    if (this.#waitingForCameraOn) {
+      this.#waitingForCameraOn = false;
+      const ready = !negative(text) && (affirmative(text) || cameraIsOn(text));
+      if (ready && this.#options.canMeasure()) {
+        await this.#startMeasurement(); // her camera is on and she said ready: that is her yes
+        return;
+      }
+      if (!negative(text) && !this.#cameraStillOffAsked) {
+        this.#cameraStillOffAsked = true;
+        this.#waitingForCameraOn = true;
+        await this.#speak(CAMERA_STILL_OFF);
+        return;
+      }
+      // A no, or a camera that never came on: there is no reading.
+      this.#measurementDeclined = true;
+      await this.#speak("Of course. We can skip the camera measurement.");
+    }
+    if (this.#waitingForRetry) {
+      this.#waitingForRetry = false;
+      if (!negative(text) && (affirmative(text) || /\btry again\b/i.test(text)) && this.#options.canMeasure()) {
+        await this.#startMeasurement(); // her camera is still on and she said yes
+        return;
+      }
+      await this.#speak("Of course. We can skip the camera measurement.");
+    }
     if (this.#waitingForMeasurementConsent) {
       this.#waitingForMeasurementConsent = false;
       if (affirmative(text)) {
-        this.#phase = "quiet_measurement";
-        this.#measurementDone = true;
-        await this.#speak(quietMeasurementPrompt(Math.round(this.#options.quietMeasurementMs / 1000)));
-        this.#options.beginQuietMeasurement();
-        this.#measurementTimer = setTimeout(() => void this.#afterMeasurement(), this.#options.quietMeasurementMs + 500);
-        this.#measurementTimer.unref?.();
+        await this.#startMeasurement();
         return;
       }
       if (!negative(text) && !this.#consentReasked) {
@@ -238,6 +290,13 @@ export class ConversationOrchestrator {
       await this.#speak(CAMERA_OFFER_AT_END);
       return;
     }
+    if (decision.nextAction === "complete_screening" && this.#needsCameraOn) {
+      // The reading is set up but her camera is off: how to turn it on, once, in fixed words, before the goodbye.
+      this.#cameraGuided = true;
+      this.#waitingForCameraOn = true;
+      await this.#speak(CAMERA_GUIDANCE);
+      return;
+    }
     if (decision.nextAction === "complete_screening" || decision.nextAction === "emergency" || decision.nextAction === "end_call") {
       if (decision.nextAction === "complete_screening" && !this.#measurementDeclined && !this.#measurementDone) this.#options.onCameraOfferSkipped?.();
       // The screening is stored with the call and runs while the goodbye is spoken; none of its words, and
@@ -261,11 +320,24 @@ export class ConversationOrchestrator {
     await this.#speak(`${FALLBACK_ACKNOWLEDGMENT} ${question}`);
   }
 
+  /** From a timer: nothing awaits it, so a failure (she hung up while the call was ending) is logged, never thrown. */
+  #endMeasurement(): void {
+    void this.#afterMeasurement().catch((error) => this.#log("call_turn_failed", { error: summary(error) }));
+  }
+
   async #afterMeasurement(): Promise<void> {
+    clearInterval(this.#countdownTimer);
     if (this.#completed) return;
     this.#phase = "screening";
     const vitals = this.#options.getVitals();
-    await this.#speak(vitals.heartRate === null && vitals.breathingRate === null
+    const noReading = vitals.heartRate === null && vitals.breathingRate === null;
+    if (noReading && !this.#retryOffered && this.#options.canMeasure()) {
+      this.#retryOffered = true;
+      this.#waitingForRetry = true;
+      await this.#speak(QUIET_RETRY_OFFER);
+      return;
+    }
+    await this.#speak(noReading
       ? "I couldn't get a clear camera reading this time. That's okay."
       : `The camera estimate is about ${vitals.heartRate === null ? "" : `${Math.round(vitals.heartRate)} beats a minute for your heart rate`}${vitals.heartRate !== null && vitals.breathingRate !== null ? " and " : ""}${vitals.breathingRate === null ? "" : `${Math.round(vitals.breathingRate)} breaths a minute for your breathing`}. This is an estimate, not a medical test.`);
     await this.#planTurn("screening");
@@ -276,6 +348,50 @@ export class ConversationOrchestrator {
     if (!spoken) return;
     this.#options.recordAgentTurn(spoken);
     await this.#options.speak(spoken);
+  }
+
+  /** She said yes (or ready) to the quiet reading: the prompt, the window, and the readback when it ends. */
+  async #startMeasurement(): Promise<void> {
+    this.#phase = "quiet_measurement";
+    this.#measurementDone = true;
+    await this.#speak(quietMeasurementPrompt(Math.round(this.#options.quietMeasurementMs / 1000)));
+    this.#options.beginQuietMeasurement();
+    this.#measurementTimer = setTimeout(() => this.#endMeasurement(), this.#options.quietMeasurementMs + 500);
+    this.#measurementTimer.unref?.();
+    this.#runCountdown();
+  }
+
+  /**
+   * Once a second of the quiet window: says how many seconds are left at the marks (copy.ts), and ends the
+   * window at once, with the usual "no clear reading" words, if it was cut short, instead of counting down
+   * to nothing.
+   */
+  #runCountdown(): void {
+    const total = Math.round(this.#options.quietMeasurementMs / 1000);
+    const marks = QUIET_COUNTDOWN_SECONDS.filter((left) => left <= total - 5);
+    let elapsed = 0;
+    clearInterval(this.#countdownTimer);
+    this.#countdownTimer = setInterval(() => {
+      elapsed += 1;
+      if (this.#completed || this.#phase !== "quiet_measurement" || elapsed >= total) {
+        clearInterval(this.#countdownTimer);
+        return;
+      }
+      if (this.#options.measurementActive && !this.#options.measurementActive()) {
+        clearInterval(this.#countdownTimer);
+        clearTimeout(this.#measurementTimer);
+        this.#endMeasurement();
+        return;
+      }
+      const left = total - elapsed;
+      if (marks.includes(left)) void this.#speak(quietCountdown(left)).catch((error) => this.#log("call_countdown_failed", { error: summary(error) }));
+    }, 1000);
+    this.#countdownTimer.unref?.();
+  }
+
+  /** The reading is set up, her camera is off, and she has not been told yet, said no, or had it taken. */
+  get #needsCameraOn(): boolean {
+    return Boolean(this.#options.cameraNeedsVideo?.()) && !this.#cameraGuided && !this.#measurementDeclined && !this.#measurementDone;
   }
 
   /** The camera reading is possible now, she hasn't said no, and it hasn't been taken: so it can be offered, and never twice. */
@@ -356,6 +472,11 @@ function affirmative(text: string): boolean {
 /** "Sorry, what did you ask?", "pardon", "can you say that again": the whole utterance, not a sentence that merely starts so. */
 function asksToRepeat(text: string): boolean {
   return /^(?:sorry|excuse me|oh)?[\s,.]*(?:what|pardon|huh|come again|what did you (?:say|ask)|(?:can|could) you (?:say|repeat) that(?: again)?|say that again|i (?:didn'?t|couldn'?t) (?:catch|hear) (?:that|you))[\s?.!]*$/i.test(text.trim());
+}
+
+/** "Ready", "it's on", "done": she turned her camera on, as asked. */
+function cameraIsOn(text: string): boolean {
+  return /^(ready|i'?m ready|it'?s on|it is on|its on|done|all set|i turned it on|camera'?s on|on now)\b/i.test(text.trim());
 }
 
 function negative(text: string): boolean {
