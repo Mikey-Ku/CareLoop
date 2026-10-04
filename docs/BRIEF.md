@@ -47,12 +47,6 @@ Everything we build serves one of these. `docs/DEFINITION_OF_DONE.md` says when 
 - **Doctor delivery:** a printable report (two pages; page 1 stands alone) and a shareable link. Optional: the same data as a FHIR bundle, to show it speaks the hospital's format.
 - **Family channel:** Relay family chats. SMS or iMessage only if time allows after everything else.
 
-### Already built (2026-10-03)
-
-Records and rules (R1 to R6), the text check-in live on a real phone (open question, graded answers, severity ladder 0 to 5, safety screen, follow-ups, notes for the doctor), family chats, sharing levels, the paper photo check logic, a terminal simulator, CI.
-
-Later, not MVP: smart pillbox, other languages, weekly family summary, voice memos between family and Harriet.
-
 ## Constraints
 
 - Synthetic data only. Never connect to real patient records during the hackathon.
