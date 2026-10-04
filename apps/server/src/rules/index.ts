@@ -13,6 +13,7 @@ import {
 } from "../finchnode/normalize.ts";
 import { DEFAULT_RULES_CONFIG, type RulesConfig } from "./config.ts";
 import { ingredientOf, medsInClass } from "./drug-classes.ts";
+import { andList } from "../text.ts";
 
 // Deterministic medication rules. The LLM never decides what is risky; it only
 // rewords `message`. See docs/DESIGN.md "Rules engine".
@@ -158,7 +159,7 @@ export function ruleBleedingCombination({ record }: RuleContext): RuleResult {
     ...medsInClass(meds, "aspirin").map((m) => ingredientOf(m, "aspirin")),
     ...medsInClass(meds, "ssri").map((m) => ingredientOf(m, "ssri")),
   ];
-  return result("R3", "flag", `You take ${drugs.length > 1 ? `${drugs.slice(0, -1).join(", ")} and ${drugs.at(-1)}` : drugs.join("")}. Taken together, they can raise the chance of bleeding.`, {
+  return result("R3", "flag", `You take ${andList(drugs)}. Taken together, they can raise the chance of bleeding.`, {
     severity: "medium",
     evidence: [...anticoagulants, ...partners].flatMap(medEvidence),
     details: { drugs },

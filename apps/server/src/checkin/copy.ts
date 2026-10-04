@@ -1,4 +1,5 @@
 import type { SharingLevel } from "../db/index.ts";
+import { andList, orList } from "../text.ts";
 
 // Every word the senior and her family read, as fixed templates. No LLM here:
 // run 4 may reword through Claude, but these are the safe defaults and the
@@ -33,16 +34,10 @@ export type DayOutcome = "checked_in" | "not_today" | "missed";
 
 export type AnsweredQuestion = { questionId: string; questionText: string; answer: string };
 
-/** "a", "a and b", "a, b and c" (or "a, b or c" with `or`). */
-function listJoin(items: readonly string[], word: "and" | "or" = "and"): string {
-  if (items.length <= 1) return items.join("");
-  return `${items.slice(0, -1).join(", ")} ${word} ${items.at(-1)}`;
-}
-
 /** The family members who were told (display names, blanks dropped): undefined means "your family", [] means no one. */
 function whoWasTold(familyNames: string[] | undefined): string | undefined {
   const names = familyNames?.map((n) => n.trim()).filter((n) => n.length > 0);
-  return names === undefined ? "your family" : names.length > 0 ? listJoin(names) : undefined;
+  return names === undefined ? "your family" : names.length > 0 ? andList(names) : undefined;
 }
 
 // Senior-facing
@@ -133,7 +128,7 @@ export function checkinDoneAfterConcern(name: string): string {
 /** The model read her words but couldn't match them to an answer. `buttons`: the answers (not "Let me explain"). */
 export function didntUnderstand(buttons: string[]): string {
   const quoted = buttons.map((b) => `"${b}"`);
-  return `Sorry, I didn't quite catch that. You can tap one of these, or tell me in a few words: ${listJoin(quoted, "or")}.`;
+  return `Sorry, I didn't quite catch that. You can tap one of these, or tell me in a few words: ${orList(quoted)}.`;
 }
 
 /**
@@ -142,7 +137,7 @@ export function didntUnderstand(buttons: string[]): string {
  */
 export function typedReplyUnavailable(buttons: string[]): string {
   const quoted = buttons.map((b) => `"${b}"`);
-  return `I'm having trouble reading typed replies right now. You can tap one of these: ${listJoin(quoted, "or")}.`;
+  return `I'm having trouble reading typed replies right now. You can tap one of these: ${orList(quoted)}.`;
 }
 
 // Free text (src/checkin/engine.ts): what she types instead of tapping a button.
@@ -258,7 +253,7 @@ export function topicWords(topic: string): string | undefined {
  */
 export function symptomNotedReply(name: string, topics: string[]): string {
   const words = [...new Set(topics.map(topicWords).filter((w): w is string => w !== undefined))].slice(0, 2);
-  const sorry = words.length > 0 ? `Sorry to hear about your ${listJoin(words)}, ${name}.` : `Sorry that's bothering you, ${name}.`;
+  const sorry = words.length > 0 ? `Sorry to hear about your ${andList(words)}, ${name}.` : `Sorry that's bothering you, ${name}.`;
   return `${sorry} I've made a note for your doctor.`;
 }
 
@@ -315,12 +310,12 @@ export function understoodLine(items: readonly UnderstoodItem[]): string | undef
     return phrase === undefined ? [] : [phrase];
   });
   const sentences: string[] = [];
-  if (answered.length > 0) sentences.push(`Got it: ${listJoin(answered)}.`);
+  if (answered.length > 0) sentences.push(`Got it: ${andList(answered)}.`);
   if (top >= 1) {
     const atTop = items.filter((i) => i.level === top);
     const names = [...new Set(atTop.map((i) => ECHO_TOPICS[i.topic] ?? topicWords(i.topic)).filter((n): n is string => n !== undefined))].slice(0, 2);
     const justSaid = atTop.every((i) => i.answer !== undefined) && answered.length === 1;
-    const what = justSaid || names.length === 0 ? "that" : listJoin(names.map((n) => `the ${n}`));
+    const what = justSaid || names.length === 0 ? "that" : andList(names.map((n) => `the ${n}`));
     if (top === 2) sentences.push(`Let's keep an eye on ${what}.`);
     else if (atTop.every((i) => i.topic === "mood" && i.answer !== undefined)) sentences.push("I'm sorry to hear that.");
     else sentences.push(`I've noted ${what} for your doctor.`);

@@ -3,6 +3,7 @@ import { LEVEL_WORDS, type CheckinOutcome } from "../care/facts.ts";
 import type { Evidence } from "../rules/index.ts";
 import type { Discrepancy } from "../rules/paper-diff.ts";
 import type { DoctorReport, ReportDose, ReportSymptom } from "./build.ts";
+import { andList } from "../text.ts";
 
 // One printable page (US letter) for her doctor, from a DoctorReport, laid out like a clinical
 // summary for a visit: identifiers, problem list, Subjective (what she reported), Objective (camera
@@ -54,11 +55,6 @@ function esc(text: string | number | null | undefined): string {
 /** Her words in quotes, with any long dash in them shown as a comma (house style). */
 function quoted(text: string): string {
   return `&ldquo;${esc(text.replace(/\s*[‒-―]\s*/g, ", "))}&rdquo;`;
-}
-
-function listJoin(items: readonly string[]): string {
-  if (items.length <= 1) return items.join("");
-  return `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
 }
 
 /** A number without trailing zeros and with a leading zero ("5", "0.075", never "5.0" or ".5"). */
@@ -267,7 +263,7 @@ export function renderDoctorReportHtml(r: DoctorReport): string {
   const name = p.name ?? p.preferredName;
   const clock = (hhmm: string | null) => (hhmm ? `${esc(hhmm)} ${esc(zone)}` : "");
   const generated = `${reportDate(r.generatedOn)}, ${new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(r.generatedAt))} ${zone} (${tz})`;
-  const sources = p.sources.length > 0 ? listJoin(p.sources) : "her health record";
+  const sources = p.sources.length > 0 ? andList(p.sources) : "her health record";
 
   // Identifiers and problem list.
   const ids = `
@@ -287,8 +283,8 @@ export function renderDoctorReportHtml(r: DoctorReport): string {
   const c = r.checkins;
   const datesOf = (o: CheckinOutcome) => c.perDay.filter((d) => d.outcome === o).map((d) => reportDate(d.day));
   const checkinParts = [`${c.answered} answered`];
-  if (c.notToday > 0) checkinParts.push(`${c.notToday} &ldquo;Not today&rdquo; (${esc(listJoin(datesOf("not_today")))})`);
-  if (c.missed > 0) checkinParts.push(`${c.missed} missed (${esc(listJoin(datesOf("missed")))})`);
+  if (c.notToday > 0) checkinParts.push(`${c.notToday} &ldquo;Not today&rdquo; (${esc(andList(datesOf("not_today")))})`);
+  if (c.missed > 0) checkinParts.push(`${c.missed} missed (${esc(andList(datesOf("missed")))})`);
   if (c.inProgress > 0) checkinParts.push(`${c.inProgress} started, not finished`);
   if (c.none > 0) checkinParts.push(`${c.none} with no check-in sent`);
   const top = r.highest;

@@ -1,5 +1,6 @@
 import type { ContextPacket } from "../context/packet.ts";
 import { ANSWER_PHRASES, ECHO_TOPICS, answerPhrase, crisisReply, keepAnEye, notedForDoctor, redFlagAdvice, topicWords, urgentReply, type UnderstoodItem } from "../checkin/copy.ts";
+import { andList } from "../text.ts";
 
 // Every word the call says to her (or texts her about the call) that the server decides: fixed
 // templates, no model text. The ElevenLabs voice holds the conversation, but what it reads back
@@ -8,12 +9,6 @@ import { ANSWER_PHRASES, ECHO_TOPICS, answerPhrase, crisisReply, keepAnEye, note
 //   gets much worse"), 4 911 now, 5 988. The same functions as the text check-in where they exist.
 // House rules (test/calls.test.ts scans these): short sentences, no long dashes, no dosing, no
 // diagnosis, no 911 below level 3. The voice always says it is an AI and ends by pointing to family.
-
-/** "a", "a and b", "a, b and c". */
-export function listJoin(items: readonly string[]): string {
-  if (items.length <= 1) return items.join("");
-  return `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
-}
 
 /** The call's first sentence (ElevenLabs first_message): it is an AI, the call is short, then the open question. */
 export function callFirstMessage(name: string): string {
@@ -26,7 +21,7 @@ export const QUIET_MINUTE_PROMPT = "Rest your phone so I can see your face, and 
 /** The goodbye: points her to her family, by name when we know them. */
 export function callClosing(name: string, familyNames: readonly string[] = []): string {
   const names = familyNames.map((n) => n.trim()).filter(Boolean);
-  const who = names.length > 0 ? listJoin(names) : "someone you're close to";
+  const who = names.length > 0 ? andList(names) : "someone you're close to";
   return `Thank you for talking with me, ${name}. Maybe give ${who} a call today. Take care.`;
 }
 
@@ -78,7 +73,7 @@ function notedLine(items: readonly UnderstoodItem[]): string {
   const names = [
     ...new Set(items.filter((i) => i.level === top).map((i) => ECHO_TOPICS[i.topic] ?? topicWords(i.topic)).filter((n): n is string => n !== undefined)),
   ].slice(0, 2);
-  const what = names.length === 0 ? "that" : listJoin(names.map((n) => `the ${n}`));
+  const what = names.length === 0 ? "that" : andList(names.map((n) => `the ${n}`));
   return top === 2 ? `Let's keep an eye on ${what}.` : `I've noted ${what} for your doctor.`;
 }
 
@@ -111,7 +106,7 @@ export function callSummary(input: { name: string; level: number; items: readonl
     const phrase = i.answer === undefined ? undefined : answerPhrase(i.topic, i.answer);
     return phrase === undefined ? [] : [phrase];
   });
-  const sentences = [answered.length > 0 ? `Here's what I noted from our call: ${listJoin(answered)}.` : "Here's what I noted from our call."];
+  const sentences = [answered.length > 0 ? `Here's what I noted from our call: ${andList(answered)}.` : "Here's what I noted from our call."];
   if (input.level >= 5) sentences.push("You can call or text 988 any time, day or night.");
   else if (input.level === 4) sentences.push("If it's happening now, please call 911.");
   else if (input.level === 3) sentences.push("Please call your doctor today about this. If it gets much worse, call 911.");

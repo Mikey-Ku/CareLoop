@@ -13,10 +13,11 @@ import { type Config } from "../config.ts";
 import type { Db } from "../db/index.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import type { VitalsResult } from "../vitals/types.ts";
-import { QUIET_MINUTE_PROMPT, callClosing, callFirstMessage, heartRateReadback, listJoin, noReadingReadback, noVideoReadback, stillMeasuring, wrongCallerDecline } from "./copy.ts";
+import { QUIET_MINUTE_PROMPT, callClosing, callFirstMessage, heartRateReadback, noReadingReadback, noVideoReadback, stillMeasuring, wrongCallerDecline } from "./copy.ts";
 import { emergencyDecision } from "./emergency.ts";
 import { callResult, emptyCallVitals, loadUsualRange } from "./screening.ts";
 import { RelayPresageBridge } from "./video.ts";
+import { andList } from "../text.ts";
 import type { ScreeningResult, TranscriptTurn } from "./types.ts";
 
 // A video check-in call (docs/CALLS.md). Relay rings, ElevenLabs holds a short warm conversation
@@ -233,7 +234,7 @@ export class CallService implements CallEventHandler {
               todays_questions: context.questions.map((q) => q.text).join(" | ") || "none",
               yesterday: context.yesterday.join("; ") || "nothing",
               recent_memories: context.memories.join("; ") || "none",
-              family_names: listJoin(context.familyNames) || "none",
+              family_names: andList(context.familyNames) || "none",
               quiet_prompt: QUIET_MINUTE_PROMPT,
               closing_line: callClosing(context.firstName, context.familyNames),
               max_minutes: String(calls.maxMinutes),

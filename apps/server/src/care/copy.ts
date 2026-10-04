@@ -1,6 +1,7 @@
 import type { RuleId } from "../rules/index.ts";
 import type { CareContact, CareContacts } from "./contacts.ts";
 import { LEVEL_WORDS, type CareFacts, type CareSymptom } from "./facts.ts";
+import { andList } from "../text.ts";
 
 // Every word the doctor and the emergency contact read over Photon, as fixed templates
 // built from CareFacts. Rules decided everything in the facts; these only word them.
@@ -19,11 +20,6 @@ export function localTime(iso: string, timezone: string | null): string {
 export function displayPhone(e164: string): string {
   const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(e164);
   return m ? `+1 ${m[1]}-${m[2]}-${m[3]}` : e164;
-}
-
-function listJoin(items: readonly string[]): string {
-  if (items.length <= 1) return items.join("");
-  return `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
 }
 
 /** "Glomerular filtration rate [Volume Rate/Area] in Serum: 31 mL/min" -> "Glomerular filtration rate: 31 mL/min". */
@@ -105,7 +101,7 @@ function quotedIfHers(r: CareFacts["redFlags"][number]): string {
 export function doctorRedFlags(f: CareFacts): string {
   const redLines = [`RED FLAGS: ${f.redFlags.length}`];
   for (const r of f.redFlags) {
-    const told = f.familyAlerted.length > 0 ? `${listJoin(f.familyAlerted)} alerted in Relay` : "no family chat linked";
+    const told = f.familyAlerted.length > 0 ? `${andList(f.familyAlerted)} alerted in Relay` : "no family chat linked";
     const advice =
       r.level >= 5 || r.questionId === "crisis"
         ? "She was given 988 (911 if in danger)"
@@ -246,7 +242,7 @@ function vitalsForFamily(f: CareFacts): string | undefined {
   const bits: string[] = [];
   if (r.heartRate !== null) bits.push(`her heart rate was about ${Math.round(r.heartRate)} beats a minute`);
   if (r.breathingRate !== null) bits.push(`her breathing was about ${Math.round(r.breathingRate)} breaths a minute`);
-  const lines = [`On her camera check, ${listJoin(bits)}. ${estimate}`];
+  const lines = [`On her camera check, ${andList(bits)}. ${estimate}`];
   if (r.inUsualRange === true) lines.push("Her heart rate was within her usual range from clinic visits.");
   else if (r.inUsualRange === false) lines.push("Her heart rate was outside her usual range from clinic visits, which is worth mentioning to her doctor.");
   else if (isAfib(f)) lines.push("Because she has an irregular heartbeat (atrial fibrillation), the camera number is only a rough estimate.");
