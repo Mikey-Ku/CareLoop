@@ -24,30 +24,40 @@ Older adults with several conditions face two problems at once: medicines and re
 
 | Person | Gets | Where |
 | --- | --- | --- |
-| Harriet (senior) | Friendly check-ins, plain answers about her own medicines, heart rate compared with her usual range, messages from family | Relay chat and calls |
-| Sarah (daughter, caregiver) | Daily status, missed check-in alerts, flags, limited to what Harriet allows | Her own Relay chat with the agent (Relay chats hold at most one person, so there is no shared group) |
-| Doctor | Vitals trend, reported symptoms, medication flags with sources, her questions | Visit-prep PDF (stretch) |
+| Harriet (senior) | A daily check-in by text or by video call, help with her medicines, heart rate as a wellness estimate, messages from family | Relay chat and Relay calls |
+| Sarah (daughter, caregiver) | Daily status, alerts when something needs attention, limited to what Harriet allows | Her own Relay chat with the agent (Relay chats hold at most one person, so there is no shared group) |
+| Doctor | A weekly summary: symptoms by severity, her words, vitals, medicine questions, flags with sources | A one-page printable report and a link |
 
 Demo patient: Harriet Lindqvist, FinchNode synthetic scenario `polypharmacy-senior` (patient id `patient-demo-polypharmacy`): 78, CKD stage 3, atrial fibrillation, heart failure, type 2 diabetes, 14 medicines.
 
-## MVP (demo core)
+## MVP: the five features (team goal, set 2026-10-03)
 
-1. Morning chat check-in in Relay with buttons, at most 3 questions picked from her record.
-2. "Call me to chat": ElevenLabs voice call through Relay that remembers what she shared and ends by pointing her to family.
-3. "Check my vitals": Relay video call, quiet minute, Presage heart rate compared with her usual range from clinic readings in the record; breathing rate said back and saved, not compared (her record has no breathing-rate readings).
-4. Voice messages between Harriet and family through Relay, both ways.
-5. Hospital paper check: photo of discharge or visit papers, read back for her to confirm, compared with her FinchNode medication list.
-6. Missed check-in alert to each family chat.
+Everything we build serves one of these. `docs/TEAM_PLAN.md` says who builds which; `docs/DEFINITION_OF_DONE.md` says when each is finished.
 
-If time: medication rules shown to the user, consent controls and revocation, visit-prep PDF, weekly family summary.
-Slide only: plain-language lab explanations, other languages, story capture.
-Later: smart pillbox.
+1. **Video check-in call.** Harriet calls the agent on Relay. An ElevenLabs voice holds a short, warm conversation that covers the same check-in as the text path (today's questions, how she's feeling), and guides her through a Presage reading during the call ("look at the camera and hold still for a minute"), then says her heart rate back as an estimate. After the call, what she said goes through the same extraction and severity ladder as text, so a spoken answer and a typed answer are recorded the same way. The voice says it is an AI and ends by pointing her to her family.
+2. **Text check-in.** The Relay chat check-in that exists today: open question first, buttons as a fallback, the severity ladder, the safety screen. Goal now: smooth and reliable, with the Gemini calls working every time.
+3. **Medication helper.** A morning reminder listing the medicines she takes in the morning, from her FinchNode record. "Do you remember how many to take?" with a gentle check. She can send a photo of a bottle or label; the agent reads it, names the medicine and strength, and checks it against her record. When a fill is running low, a refill reminder that guides her: who to ask, a ready-to-read request, and an offer to tell her family.
+4. **Doctor report.** All of the week's data, from our local database and her FinchNode record, as one organized, professional summary her doctor can read in a minute.
+5. **Family updates.** Check-ins, alerts and updates to each family member, plus Harriet's messages passed on. Relay family chats today; SMS or iMessage is a possible later channel, not part of the MVP.
+
+### Defaults for the open questions (change them in FEEDBACK.md if you disagree)
+
+- **Dosing:** the agent reads back what her prescription or label says ("Your metformin label says: take 1 tablet with your evening meal"). It never tells her to change, skip, double or stop a dose. If a photo and her record disagree: "These don't match. Please check with your pharmacist before taking it."
+- **Refills:** guide, don't act. Detect running low from her fill dates, remind her, give her a ready-to-read refill request (medicine, strength, prescriber) and offer to tell her family. No automated calls or orders to pharmacies.
+- **Doctor delivery:** a one-page printable report and a shareable link. Optional: the same data as a FHIR bundle, to show it speaks the hospital's format.
+- **Family channel:** Relay family chats. SMS or iMessage only if time allows after everything else.
+
+### Already built (2026-10-03)
+
+Records and rules (R1 to R6), the text check-in live on a real phone (open question, graded answers, severity ladder 0 to 5, safety screen, follow-ups, notes for the doctor), family chats, sharing levels, the paper photo check logic, a terminal simulator, CI. See `RUN_LOG.md`.
+
+Later, not MVP: smart pillbox, other languages, weekly family summary, voice memos between family and Harriet.
 
 ## Constraints
 
 - Synthetic data only. Never connect to real patient records during the hackathon.
 - FinchNode is read-only. Nothing is written back to the EHR; our own database holds what Harriet tells us.
-- No diagnosis and no dosing advice. Fixed rules decide flags; the LLM only words them.
+- No diagnosis and no dosing advice. Fixed rules decide flags and severity; the LLM only reads and words. Reading back what her prescription or label says is allowed; recommending any change is not.
 - Presage FDA clearance (K254169) covers pulse rate and breathing rate on its iOS/Android setup only. Readings taken from Relay call video on our server are a wellness estimate. Never show blood pressure or HRV.
 - Red flags always alert the family, even at the lowest sharing level; the sharing level only limits how much the alert says. Safety wins over privacy here, on purpose.
 - At most 3 questions a day. "Not today" is always an option and never gets a guilt message.
@@ -56,10 +66,12 @@ Later: smart pillbox.
 
 ## Success criteria for the demo
 
-- Paper check catches the planted change in a printed synthetic discharge sheet.
-- Medication rules match a written answer key on the FinchNode demo patients.
-- In-call heart rate is close to Presage's own app on the same person in the same minute (or the fallback scan screen is used).
-- A full check-in takes a few taps and under a minute for the text path.
+- A video call that checks in by voice and reads her heart rate, recorded the same way as a text check-in.
+- A text check-in that takes one message on a good day and reacts in proportion (no alarm for small things).
+- A morning medication reminder that matches her record, and a photographed bottle recognised and checked against it.
+- A one-page doctor report built from a week of check-ins.
+- Family updates reaching a second phone.
+- Medication rules match the answer key; the paper check catches the planted change.
 
 ## Claims we will not make
 
