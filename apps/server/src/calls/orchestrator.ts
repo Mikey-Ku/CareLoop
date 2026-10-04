@@ -256,11 +256,12 @@ export class ConversationOrchestrator {
   /**
    * What she hears when Gemini declares an emergency: the text check-in's fixed replies, 988 for a crisis
    * (the fixed screen over her turns decides, never the model) and 911 otherwise. Nobody has been told yet,
-   * so no family member is named; the ladder after the call decides who is alerted.
+   * so they are asked for with an empty family list and claim no alert. (Without the list they would say "I've
+   * let your family know".) The ladder after the call decides who is alerted.
    */
   #emergencyWords(): string {
     const crisis = (emergencyDecision(this.#options.transcript)?.level ?? 0) >= 5;
-    return crisis ? crisisReply(this.#options.firstName) : urgentReply(this.#options.firstName);
+    return crisis ? crisisReply(this.#options.firstName, []) : urgentReply(this.#options.firstName, []);
   }
 
   async #loadContext(): Promise<unknown> {

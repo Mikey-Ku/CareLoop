@@ -286,9 +286,9 @@ describe("ConversationOrchestrator: the end of the call is fixed words", () => {
     const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction: "emergency", patientResponseText: "Please lie down and rest, and keep an eye on it." }), screenCall: () => screening });
     const { spoken, onComplete, say } = buildFlow(llm, { initialContext: { firstName: "Harriet", questions: [], yesterday: [], memories: [], familyNames: ["Sarah"] } });
     await say("I feel a bit odd today.");
-    expect(spoken).toEqual([urgentReply("Harriet")]);
-    expect(spoken[0]).toMatch(/call 911 right away/);
-    expect(spoken[0]).not.toMatch(/Sarah|lie down|keep an eye/); // nobody has been told yet, so no one is named
+    expect(spoken).toEqual(["Harriet, if this is happening now, please call 911 right away. After that, call your doctor."]);
+    expect(spoken).toEqual([urgentReply("Harriet", [])]);
+    expect(spoken[0]).not.toMatch(/I've let|family|Sarah|lie down|keep an eye/); // nobody has been told yet: no claim that anyone was
     expect(onComplete).toHaveBeenCalledWith(screening);
   });
 
@@ -296,8 +296,9 @@ describe("ConversationOrchestrator: the end of the call is fixed words", () => {
     const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction: "emergency", patientResponseText: "That sounds hard." }), screenCall: () => screening });
     const { spoken, say } = buildFlow(llm);
     await say("I don't want to live anymore.");
-    expect(spoken).toEqual([crisisReply("Harriet")]);
+    expect(spoken).toEqual([crisisReply("Harriet", [])]);
     expect(spoken[0]).toMatch(/988/);
+    expect(spoken[0]).not.toMatch(/I've let|family/);
   });
 });
 
@@ -403,7 +404,7 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
     const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction: "emergency" }) });
     const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: () => true });
     await say("I feel a bit odd today.");
-    expect(spoken).toEqual([urgentReply("Harriet")]);
+    expect(spoken).toEqual([urgentReply("Harriet", [])]);
     expect(onComplete).toHaveBeenCalledOnce();
   });
 });
