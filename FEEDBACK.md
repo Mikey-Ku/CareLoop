@@ -40,7 +40,7 @@ Relay setup (WebSocket, so no public URL and no webhook secret):
 
 Voice, vitals, vision:
 
-- [ ] ElevenLabs: create an Agent with a warm stock voice. Its prompt says it is an AI, keeps calls short, never gives medical or dosing advice, and ends by suggesting a real person. Put `ELEVENLABS_API_KEY` and `ELEVENLABS_AGENT_ID` in `.env`. (Relay-SDK `cookbook/elevenlabs-agents-call` is the reference.)
+- [ ] Relay video symptom-screening: use the backend's direct ElevenLabs realtime STT and streaming TTS APIs (not an ElevenLabs conversational Agent). Configure `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, `GEMINI_API_KEY`, and optionally `PRESAGE_API_KEY` in the server `.env`; see `docs/CALLS.md`. Validate real-device call setup, transcription quality, TTS playback/interruption, consented quiet measurement, and cleanup before a phone demo.
 - [ ] Presage: sign up for the free tier (https://www.mlh.com/partners/presage) and put `PRESAGE_API_KEY` in `.env`.
 - [ ] Presage spike, the riskiest unknown: try `@smartspectra/node-sdk` (npm, 3.4.0, has a darwin-arm64 build) with raw RGBA frames first. If it accepts frames from Relay's `VideoStream`, it replaces the C++ sidecar. Compare its heart rate with Presage's own app on the same person in the same minute. Write the result here.
 

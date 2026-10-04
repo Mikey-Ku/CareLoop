@@ -1,4 +1,3 @@
-import { createHash, timingSafeEqual } from "node:crypto";
 import express from "express";
 import type { ErrorRequestHandler, Express, RequestHandler } from "express";
 import type { Config } from "./config.ts";
@@ -11,14 +10,6 @@ export const SERVICE_NAME = "mhacks2026-server";
 
 export type AppDeps = {
   config: Pick<Config, "finchnode">;
-  /** Narrow server-tool surface exposed to ElevenLabs. It accepts identifiers and structured state only, never media. */
-  calls?: {
-    screen(callId: string): Promise<unknown>;
-    beginQuietMeasurement(callId: string, permissionGranted: boolean): Promise<unknown>;
-    /** After the quiet minute: the heart rate as a camera estimate and the ladder's line, as fixed copy. */
-    vitalsReadback?(callId: string): Promise<{ status: string; patientResponseText: string }>;
-    toolSecret?: string | undefined;
-  };
   /**
    * The doctor report page for a patient and the week ending on `day` (default her latest check-in date),
    * or undefined for an unknown patient (src/report). Without it, /report is not served.
@@ -38,8 +29,6 @@ export function createApp(deps: AppDeps): Express {
   app.get("/health", (_req, res) => {
     res.json({ ok: true, service: SERVICE_NAME, finchnode: finchnodeHost });
   });
-
-  if (deps.calls) app.use("/integrations/elevenlabs", callToolRouter(deps.calls));
 
   // The doctor report, the shareable link (docs/BRIEF.md feature 4). Local only, synthetic data: the
   // call tools' public tunnel forwards this port, so a request through a tunnel or proxy gets a 404.
@@ -83,71 +72,6 @@ export function createApp(deps: AppDeps): Express {
   app.use(onError);
 
   return app;
-}
-
-function callToolRouter(calls: NonNullable<AppDeps["calls"]>): express.Router {
-  const router = express.Router();
-  router.use(express.json({ limit: "32kb" }));
-  router.use((req, res, next) => {
-    const expected = calls.toolSecret;
-    const received = req.header("authorization")?.replace(/^Bearer\s+/i, "");
-    if (!expected || received === undefined || !sameSecret(received, expected)) {
-      res.status(401).json({ error: "unauthorized" });
-      return;
-    }
-    next();
-  });
-  router.post("/screen-symptoms", async (req, res, next) => {
-    const callId = typeof req.body?.callId === "string" ? req.body.callId.trim() : "";
-    if (!callId) {
-      res.status(400).json({ error: "callId_required" });
-      return;
-    }
-    try {
-      // Only the fixed words she hears; the level and everything else stay on the server.
-      const result = (await calls.screen(callId)) as { patientResponseText?: unknown };
-      res.json({ patientResponseText: typeof result.patientResponseText === "string" && result.patientResponseText ? result.patientResponseText : "Thank you for telling me." });
-    } catch (error) {
-      next(error);
-    }
-  });
-  router.post("/quiet-measurement", async (req, res, next) => {
-    const callId = typeof req.body?.callId === "string" ? req.body.callId.trim() : "";
-    const permissionGranted = req.body?.permissionGranted === true;
-    if (!callId) {
-      res.status(400).json({ error: "callId_required" });
-      return;
-    }
-    try {
-      res.json(await calls.beginQuietMeasurement(callId, permissionGranted));
-    } catch (error) {
-      next(error);
-    }
-  });
-  router.post("/vitals-result", async (req, res, next) => {
-    const callId = typeof req.body?.callId === "string" ? req.body.callId.trim() : "";
-    if (!callId) {
-      res.status(400).json({ error: "callId_required" });
-      return;
-    }
-    if (!calls.vitalsReadback) {
-      res.status(404).json({ error: "not_found" });
-      return;
-    }
-    try {
-      const result = await calls.vitalsReadback(callId);
-      res.json({ status: result.status, patientResponseText: result.patientResponseText });
-    } catch (error) {
-      next(error);
-    }
-  });
-  return router;
-}
-
-/** Constant-time comparison of the tool secret (hashed first, so lengths never leak through timing). */
-function sameSecret(received: string, expected: string): boolean {
-  const digest = (s: string) => createHash("sha256").update(s, "utf8").digest();
-  return timingSafeEqual(digest(received), digest(expected));
 }
 
 function hostOf(url: string): string {

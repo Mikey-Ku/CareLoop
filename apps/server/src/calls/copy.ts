@@ -16,7 +16,11 @@ export function callFirstMessage(name: string): string {
 }
 
 /** Before the Presage reading: she rests the phone and the voice stays quiet. */
-export const QUIET_MINUTE_PROMPT = "Rest your phone so I can see your face, and I'll stay quiet for half a minute.";
+export function quietMeasurementPrompt(durationSeconds = 30): string {
+  return `Thank you. For this optional camera estimate, please prop up your phone so I can see your face and upper chest. When I finish speaking, please stay still and quiet for about ${durationSeconds} seconds. This is only an estimate, not a medical test.`;
+}
+
+export const QUIET_MINUTE_PROMPT = quietMeasurementPrompt();
 
 /** The goodbye: points her to her family, by name when we know them. */
 export function callClosing(name: string, familyNames: readonly string[] = []): string {
