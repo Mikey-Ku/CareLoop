@@ -55,6 +55,11 @@ export class RelayPresageBridge {
   #inputStarted = false;
   #stopped = false;
   #speechActive = false;
+  /** Telemetry for the quiet window, logged every few seconds and when it is cut short: counts and average colour, never pixels. */
+  #telemetry: FrameTelemetry | undefined;
+  #metricsPackets = 0;
+  #lastValidation: string | undefined;
+  #validationLogged = 0;
 
   constructor(transport: RelayCallTransport, options: RelayVideoBridgeOptions) {
     this.#transport = transport;
@@ -65,6 +70,7 @@ export class RelayPresageBridge {
     this.#session = (options.sessionFactory ?? ((input) => new SmartSpectraSDK(input)))({ apiKey: options.apiKey, requestedMetrics: [...REQUESTED_METRICS] });
     this.#adapter = createRelayVideoFrameAdapter(this.#session);
     this.#session.on("metrics", (buffer, timestampUs) => {
+      this.#metricsPackets += 1;
       if (this.#measurementStartUs === undefined || timestampUs < this.#measurementStartUs) return;
       try {
         const next = normalizePresageMetrics(decodeMetrics(buffer), timestampUs);
@@ -87,6 +93,12 @@ export class RelayPresageBridge {
       }
     });
     this.#session.on("validationStatus", (code, timestampUs, hint) => {
+      const key = `${code}:${hint}`;
+      if (key !== this.#lastValidation && this.#validationLogged < 30) {
+        this.#lastValidation = key;
+        this.#validationLogged += 1;
+        this.#log("call_presage_validation", { code, hint });
+      }
       if (!this.#validation.some((event) => event.code === code && event.hint === hint)) this.#validation.push({ code, timestampUs, hint });
     });
     this.#session.on("error", (code, message, retryable) => this.#errors.push({ code, message, retryable }));
@@ -117,6 +129,7 @@ export class RelayPresageBridge {
     this.#measurementStartUs = undefined;
     this.#measurementEndUs = undefined;
     this.#lastFrameWallMs = undefined;
+    this.#telemetry = undefined;
     this.quiet.requestPermission(permissionGranted);
     if (permissionGranted && this.#inputStarted) this.#restartProcessing();
     if (permissionGranted) this.#log("call_quiet_measurement_started", { duration_ms: this.quiet.durationMs });
@@ -223,8 +236,13 @@ export class RelayPresageBridge {
       // A stalled camera must not count as a continuous quiet capture window.
       if (this.#lastFrameWallMs !== undefined && (nowMs - this.#lastFrameWallMs > 1_000
         || (this.#measurementEndUs !== undefined && timestampUs - this.#measurementEndUs > 1_000_000))) {
+        this.#log("call_quiet_measurement_interrupted", {
+          reason: "video_gap",
+          gap_ms: this.#lastFrameWallMs === undefined ? null : nowMs - this.#lastFrameWallMs,
+          media_gap_ms: this.#measurementEndUs === undefined ? null : Math.round((timestampUs - this.#measurementEndUs) / 1000),
+          ...this.#telemetrySummary(nowMs),
+        });
         this.#interruptMeasurement();
-        this.#log("call_quiet_measurement_interrupted", { reason: "video_gap" });
         continue;
       }
       const frame = event.frame;
@@ -245,12 +263,44 @@ export class RelayPresageBridge {
         continue;
       }
       this.#inputStarted = true;
+      this.#noteFrame(nowMs, frame);
       this.#lastFrameWallMs = nowMs;
       this.#timestampOriginMs ??= nowMs - result.timestampUs / 1000;
       this.#measurementStartUs ??= result.timestampUs;
       this.quiet.recordFrame(result.timestampUs, this.#speechActive, nowMs);
       this.#measurementEndUs = result.timestampUs;
     }
+  }
+
+  /** Counts the frame and logs the window's cadence every 3 s: frames per second, the longest gap, size, average colour. */
+  #noteFrame(nowMs: number, frame: { data: Uint8Array; width: number; height: number }): void {
+    const t = (this.#telemetry ??= { startedMs: nowMs, lastLogMs: nowMs, prevMs: undefined, frames: 0, windowFrames: 0, maxGapMs: 0, width: frame.width, height: frame.height, color: [0, 0, 0, 0] });
+    if (t.prevMs !== undefined) t.maxGapMs = Math.max(t.maxGapMs, nowMs - t.prevMs);
+    t.prevMs = nowMs;
+    t.frames += 1;
+    t.windowFrames += 1;
+    t.width = frame.width;
+    t.height = frame.height;
+    t.color = sampleAverageColor(frame.data, frame.width, frame.height);
+    if (nowMs - t.lastLogMs >= 3_000) {
+      this.#log("call_video_cadence", { ...this.#telemetrySummary(nowMs), fps: Math.round((t.windowFrames * 10_000) / (nowMs - t.lastLogMs)) / 10 });
+      t.lastLogMs = nowMs;
+      t.windowFrames = 0;
+    }
+  }
+
+  #telemetrySummary(nowMs: number): Record<string, unknown> {
+    const t = this.#telemetry;
+    if (!t) return { frames: 0, metrics_packets: this.#metricsPackets };
+    return {
+      since_start_ms: nowMs - t.startedMs,
+      frames: t.frames,
+      max_gap_ms: t.maxGapMs,
+      width: t.width,
+      height: t.height,
+      mean_rgba: t.color,
+      metrics_packets: this.#metricsPackets,
+    };
   }
 
   #updateSpeech(frame: RelayAudioFrame): void {
@@ -262,3 +312,33 @@ export class RelayPresageBridge {
 }
 
 export type RelayVideoBridgeOptions = RelayPresageBridgeOptions;
+
+type FrameTelemetry = {
+  startedMs: number;
+  lastLogMs: number;
+  prevMs: number | undefined;
+  frames: number;
+  windowFrames: number;
+  maxGapMs: number;
+  width: number;
+  height: number;
+  color: [number, number, number, number];
+};
+
+/** Average red, green, blue and alpha of 144 sampled pixels of an RGBA frame: enough to tell a black, blank or odd frame apart. */
+export function sampleAverageColor(data: Uint8Array, width: number, height: number): [number, number, number, number] {
+  const sum = [0, 0, 0, 0];
+  let n = 0;
+  for (let gy = 0; gy < 12; gy += 1) {
+    for (let gx = 0; gx < 12; gx += 1) {
+      const i = (Math.floor(((gy + 0.5) * height) / 12) * width + Math.floor(((gx + 0.5) * width) / 12)) * 4;
+      if (i < 0 || i + 3 >= data.length) continue;
+      sum[0]! += data[i]!;
+      sum[1]! += data[i + 1]!;
+      sum[2]! += data[i + 2]!;
+      sum[3]! += data[i + 3]!;
+      n += 1;
+    }
+  }
+  return n === 0 ? [0, 0, 0, 0] : [Math.round(sum[0]! / n), Math.round(sum[1]! / n), Math.round(sum[2]! / n), Math.round(sum[3]! / n)];
+}
