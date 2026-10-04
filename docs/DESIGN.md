@@ -77,6 +77,8 @@ Mhacks_2026/
 - Read-only. Production uses Connect sessions, a stable `subject` per app (`u_` + 16 hex), and signed webhooks (`consent.granted`, `consent.revoked`, `consent.expired`, `sync.completed`, `sync.partial`, `sync.failed`). Sandbox keys start with `ck_test_`.
 - Demo limit: 120 requests a minute per address, separate budget for behavior scenarios.
 - Record patients: `patient-demo-001` (baseline-adult), `patient-demo-polypharmacy` (polypharmacy-senior, the demo patient), `patient-demo-pediatric-asthma`, `patient-demo-multi-source`, `patient-demo-sparse`, `patient-demo-messy-coding`.
+- **Multi-user demo identities:** the catalog above contains reusable FinchNode synthetic subjects, not app accounts. Each Relay user is assigned a separate local `patients` row keyed by their normalized Relay handle and chat, and all check-ins, memories, snapshots, flags, sharing choices and family links are scoped to that local row. Two Relay users may read the same FinchNode subject without sharing local state. This isolation is a demo-only arrangement; real deployments use a stable FinchNode subject per connected person.
+- **Caregiver pairing:** a senior invites a caregiver by Relay handle, the caregiver claims the invitation with its temporary code, and the senior approves it. The link is stored against the senior's local account and the caregiver's Relay chat. Phone numbers are not identity or pairing keys.
 - Behavior scenarios are their own subjects: `patient-demo-rate-limited`, `patient-demo-consent-revoked`, `patient-demo-consent-partial`, `patient-demo-source-unavailable`. Session scenarios `connect-cancelled` and `connect-failed` are passed as `scenario` to `POST /connect/sessions`.
 - Behavior scenarios the client must handle:
 
