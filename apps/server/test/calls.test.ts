@@ -65,7 +65,7 @@ describe("quiet measurement", () => {
     const zero = quiet.finish({ ...emptyVitalsResult("relay_video"), heartRate: 70, breathingRate: 14, confidence: 0 });
     expect(zero.heartRate).toBeNull();
     expect(zero.confidence).toBeNull();
-    const pulseOnly = quiet.finish({ ...emptyVitalsResult("relay_video"), heartRate: 70, heartRateConfidence: 40, breathingRate: null }, 10);
+    const pulseOnly = quiet.finish({ ...emptyVitalsResult("relay_video"), heartRate: 70, heartRateConfidence: 40, heartRateStable: true, breathingRate: null }, 10);
     expect(pulseOnly.heartRate).toBe(70);
     expect(quiet.finish({ ...emptyVitalsResult("relay_video"), heartRate: 70, heartRateConfidence: 5 }, 10).heartRate).toBeNull();
   });
@@ -133,6 +133,7 @@ describe("Presage: pulse and breathing only", () => {
       }
       const bridge = new RelayPresageBridge({ on: () => undefined, remoteVideoTrack: track } as never, { apiKey: "test", sessionFactory: () => new ThrowingSession() as never });
       bridge.start();
+      bridge.beginQuietMeasurement(true);
       const frame = (timestampUs: number) => ({ frame: { type: VideoBufferType.RGBA, data: new Uint8Array(16), width: 2, height: 2 }, timestampUs });
       for (const t of [1, 2, 3]) push(frame(t));
       await new Promise((resolve) => setTimeout(resolve, 10));

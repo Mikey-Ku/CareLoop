@@ -4,6 +4,7 @@ export type QuietMeasurementStatus = "waiting_for_permission" | "measuring" | "c
 
 /** VITALS_MIN_CONFIDENCE's default: SmartSpectra confidence is 0 to 100 and starts at 0 while it warms up. */
 export const DEFAULT_VITALS_MIN_CONFIDENCE = 1;
+export const PULSE_WARM_UP_MS = 12_000;
 
 /**
  * Share of the quiet window's video frames she may be talking over before the reading is void. One loud
@@ -13,7 +14,7 @@ export const MAX_TALKING_SHARE = 0.2;
 
 /**
  * The quiet window for a Presage reading. Readings come only from a window she agreed to. Heart rate
- * is gated on its own confidence (a missing breathing rate never drops it); breathing also needs the
+ * needs 12 seconds of capture and explicit stability and confidence (missing breathing never drops it); breathing also needs the
  * full window. Talking through much of the window voids both.
  */
 export class QuietMeasurement {
@@ -24,6 +25,7 @@ export class QuietMeasurement {
   #talkingFrames = 0;
   #frames = 0;
   #windowComplete = false;
+  #elapsedMs = 0;
 
   constructor(durationMs = 30_000) {
     if (!Number.isInteger(durationMs) || durationMs < 30_000 || durationMs > 45_000) throw new Error("quiet measurement must be 30 to 45 seconds");
@@ -52,6 +54,11 @@ export class QuietMeasurement {
     }
     this.#status = "measuring";
     this.#startedAtMs = undefined;
+    this.#lastTimestampUs = 0;
+    this.#talkingFrames = 0;
+    this.#frames = 0;
+    this.#windowComplete = false;
+    this.#elapsedMs = 0;
   }
 
   recordFrame(timestampUs: number | bigint, talking: boolean, nowMs: number): boolean {
@@ -60,6 +67,7 @@ export class QuietMeasurement {
     if (!Number.isFinite(timestamp) || timestamp <= this.#lastTimestampUs) return false;
     this.#lastTimestampUs = timestamp;
     this.#startedAtMs ??= nowMs;
+    this.#elapsedMs = nowMs - this.#startedAtMs;
     this.#frames += 1;
     if (talking) this.#talkingFrames += 1;
     if (nowMs - this.#startedAtMs >= this.durationMs) {
@@ -72,11 +80,11 @@ export class QuietMeasurement {
   /** The usable part of a reading. Pure: it can be asked mid-call and again at the end. */
   finish(vitals: VitalsResult, minConfidence = DEFAULT_VITALS_MIN_CONFIDENCE): VitalsResult {
     const talking = this.#frames > 0 && this.#talkingFrames / this.#frames > MAX_TALKING_SHARE;
-    const confident = (value: number | null) => value !== null && value > 0 && value >= minConfidence;
-    const started = this.#frames > 0;
-    const heartRate = started && !talking && vitals.heartRate !== null && confident(vitals.heartRateConfidence) ? vitals.heartRate : null;
+    const confident = (value: number | null) => value !== null && Number.isFinite(value) && value > 0 && value <= 100 && value >= minConfidence;
+    const started = this.#frames > 0 && this.#status !== "interrupted";
+    const heartRate = started && this.#elapsedMs >= PULSE_WARM_UP_MS && !talking && vitals.heartRateStable === true && vitals.heartRate !== null && confident(vitals.heartRateConfidence) ? vitals.heartRate : null;
     const breathingRate =
-      started && !talking && this.#windowComplete && vitals.breathingRate !== null && confident(vitals.breathingRateConfidence) ? vitals.breathingRate : null;
+      started && !talking && vitals.breathingRateStable === true && this.#windowComplete && vitals.breathingRate !== null && confident(vitals.breathingRateConfidence) ? vitals.breathingRate : null;
     if (heartRate !== null && breathingRate !== null) return vitals;
     const reason = !started
       ? "No quiet measurement was taken"
