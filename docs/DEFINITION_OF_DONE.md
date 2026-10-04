@@ -2,19 +2,19 @@
 
 What "finished" means for the MVP (the five features in `docs/BRIEF.md`), and the benchmark that proves each part. A feature is done when every benchmark in its section passes, checked the way the "How we check" column says. Tick boxes in a pull request when a benchmark passes, with the evidence (a command's output, a log line, a photo or a short note) in the PR description.
 
-**If you are an AI coding agent:** before you call your lane done, run every automated check in your section and quote the results in your pull request. Don't tick a box you didn't verify. Keep new tests to the safety-critical paths (safety screen, severity levels, red flags, dosing never advised); the team chose speed over exhaustive flow tests.
+**If you are an AI coding agent:** before you call your work done, run every automated check in your section and quote the results in your pull request. Don't tick a box you didn't verify. Keep new tests to the safety-critical paths (safety screen, severity levels, red flags, dosing never advised); the team chose speed over exhaustive flow tests.
 
 ## Scoreboard
 
-| # | MVP feature | Lane | Status |
-| --- | --- | --- | --- |
-| 0 | Foundation: records, rules, engine, simulator, CI | done | Done |
-| 1 | Video check-in call (ElevenLabs voice, Presage heart rate) | B | Built and tested offline (AI disclosure, ladder, call shape, post-call text, vitals saved); not yet tried on a live call |
-| 2 | Text check-in | A | Live on a phone; polishing |
-| 3 | Medication helper (reminders, label photo, refills) | A | Built (reminders, memory check, label photo, refills, discharge-paper notes); live label-photo test pending |
-| 4 | Doctor report | C | Built: two pages, clinical format, served by the agent at `/report/<patient id>`; phone and spot-check pending |
-| 5 | Family updates | C | Status, alerts and replies ("Sarah says: ...") built in Relay family chats; second-phone test pending |
-| 6 | Demo ready | everyone | Not started |
+| # | MVP feature | Status |
+| --- | --- | --- |
+| 0 | Foundation: records, rules, engine, simulator, CI | Done |
+| 1 | Video check-in call (ElevenLabs voice, Presage heart rate) | Built and tested offline (AI disclosure, ladder, call shape, post-call text, vitals saved); not yet tried on a live call |
+| 2 | Text check-in | Live on a phone; polishing |
+| 3 | Medication helper (reminders, label photo, refills) | Built (reminders, memory check, label photo, refills, discharge-paper notes); live label-photo test pending |
+| 4 | Doctor report | Built: two pages, clinical format, served by the agent at `/report/<patient id>`; phone and spot-check pending |
+| 5 | Family updates | Status, alerts and replies ("Sarah says: ...") built in Relay family chats; second-phone test pending |
+| 6 | Demo ready | Not started |
 
 Order (Oct 4): everything is built; what is left is live testing on phones (`docs/QA.md`), the live call with ElevenLabs and Presage, then 6.
 
@@ -39,7 +39,7 @@ Order (Oct 4): everything is built; what is left is live testing on phones (`doc
 | [x] Packet for Harriet: age 78, usual range 65 to 91 kept but not compared (AFib), open flags R1, R3, R4 | `npm run packet -- patient-demo-polypharmacy` |
 | [x] All scripted demos run offline | every `scripts/demo/*.txt` exits 0 |
 
-### 1. Video check-in call (lane B)
+### 1. Video check-in call
 
 | Benchmark | How we check |
 | --- | --- |
@@ -52,7 +52,7 @@ Order (Oct 4): everything is built; what is left is live testing on phones (`doc
 | [ ] After the call, her answers are recorded through the same extraction and severity ladder as text (a spoken "ankles a bit puffy" becomes a level-1 ankle answer) | `checkins`, `symptom_observations` rows after a live call |
 | [ ] Ends within about 3 minutes by pointing her to a real person | Live |
 
-### 2. Text check-in (lane A)
+### 2. Text check-in
 
 | Benchmark | How we check |
 | --- | --- |
@@ -73,7 +73,7 @@ Order (Oct 4): everything is built; what is left is live testing on phones (`doc
 | [ ] A natural one-message check-in on a good day ("feeling fine, ankles ok, slept well") closes with no extra questions it already answered | Live |
 | [ ] Bundled replies understood: answers and extra symptoms recorded under the right topics, with the "Got it" line | Live, the Oct 7 cases |
 
-### 3. Medication helper (lane A)
+### 3. Medication helper
 
 | Benchmark | How we check |
 | --- | --- |
@@ -84,7 +84,7 @@ Order (Oct 4): everything is built; what is left is live testing on phones (`doc
 | [ ] Refill reminder a few days before a fill runs out (fill date plus days supply), with a ready-to-read request and an offer to tell her family | Simulator with `CLOCK_DATE` near a run-out date |
 | [ ] No dosing advice anywhere: no "take more", "skip", "double", "stop" in any reply | Copy scan test |
 
-### 4. Doctor report (lane C)
+### 4. Doctor report
 
 | Benchmark | How we check |
 | --- | --- |
@@ -93,7 +93,7 @@ Order (Oct 4): everything is built; what is left is live testing on phones (`doc
 | [ ] Shareable link served locally | Open it on a phone |
 | [x] Never prints dosing advice or a diagnosis | Read it; copy test: `test/report.test.ts` scans the rendered report (no dosing words, no Do Not Use abbreviations, no trailing zeros), Oct 4 |
 
-### 5. Family updates (lane C)
+### 5. Family updates
 
 | Benchmark | How we check |
 | --- | --- |

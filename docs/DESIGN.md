@@ -46,9 +46,7 @@ Backend parts:
 
 ```
 Mhacks_2026/
-├── CLAUDE.md                 # auto-loaded by Claude Code; points to the brief
-├── CLAUDE_CODE_BRIEF.md      # spec for each Claude Code run
-├── RUN_LOG.md                # written by Claude Code
+├── CLAUDE.md                 # auto-loaded by Claude Code; the project rules
 ├── FEEDBACK.md               # written by the team
 ├── README.md
 ├── .env.example
@@ -201,7 +199,7 @@ Every typed message goes through a fixed phrase screen first (`src/safety/screen
 | family_message | Forwarded to every family chat ("Harriet asked me to pass this on: ...") |
 | chat | LLM small talk. Symptoms she mentions get a ladder level instead: level 1 "Sorry to hear about your knee pain. I've made a note for your doctor.", level 2 "Let's keep an eye on that" plus a follow-up, level 3 and up as in the ladder. No 911 below level 3 |
 | LLM down | During a question: "I'm having trouble reading typed replies right now", with the buttons. At the open question: "Thanks, Harriet. I'm having trouble reading typed replies right now, so let's do a few quick questions." |
-| photo | "I can't read photos yet" until lane C's paper reading lands |
+| photo | With no Gemini key: "I can't read photos yet" |
 
 After a red flag or a safety hit: an acknowledging reply that names who was told, the remaining questions, no flag offer and no noon missed alert that day, a closing "I'll check on you again this afternoon", and one follow-up `FOLLOW_UP_DELAY_MINUTES` later (default 180; about 2 for a demo): "How is your breathing now?" with Better / About the same / Worse. Worse repeats the advice and alerts the family at every level; after a crisis the replies point to 988.
 

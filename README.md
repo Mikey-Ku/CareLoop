@@ -132,13 +132,11 @@ DATABASE_PATH=../../data/simulator.db npm run dev
 - How: [docs/DESIGN.md](docs/DESIGN.md)
 - Glossary of domain terms: [CONTEXT.md](CONTEXT.md)
 
-## Working with Claude Code
+## Working on it
 
-The remaining work is split into five lanes in [docs/TEAM_PLAN.md](docs/TEAM_PLAN.md). Pick one, then:
-
-1. Add notes for your lane to `FEEDBACK.md` if you have any.
-2. Open Claude Code in your clone and say: "Read CLAUDE_CODE_BRIEF.md and docs/TEAM_PLAN.md. I own lane N. Start the next run for my lane."
-3. It works on a lane branch and opens a pull request. Merge it once CI is green and a teammate has looked.
+- One branch per piece of work, a pull request into `main`, CI green, then a merge commit. `CLAUDE.md` has the rules Claude Code follows in your clone.
+- Test with [docs/QA.md](docs/QA.md). "Done" is [docs/DEFINITION_OF_DONE.md](docs/DEFINITION_OF_DONE.md). Product and medical questions go in [FEEDBACK.md](FEEDBACK.md).
+- If you ran the `photon/care-summaries` or `lane3/presage-spike` branch, delete `data/*.db` and `apps/server/data/*.db` once: the database migrations were renumbered when those branches merged.
 
 ## License
 
