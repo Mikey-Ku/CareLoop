@@ -19,6 +19,7 @@
     "llm:check": "node --env-file-if-exists=../../.env src/cli/llm-check.ts",
     "content:eval": "node --env-file-if-exists=../../.env src/cli/content-eval.ts",
     "vitals:video": "node --env-file-if-exists=../../.env src/cli/vitals-video.ts",
+    "report": "node --env-file-if-exists=../../.env src/cli/report.ts",
     "record-fixtures": "node --env-file-if-exists=../../.env ../../scripts/record-fixtures.ts"
   },
   "dependencies": {

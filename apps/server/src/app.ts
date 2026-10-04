@@ -14,6 +14,11 @@ export type AppDeps = {
     beginQuietMeasurement(callId: string, permissionGranted: boolean): Promise<unknown>;
     toolSecret?: string;
   };
+  /**
+   * The doctor report page for a patient and the week ending on `day` (default her latest check-in date),
+   * or undefined for an unknown patient (src/report). Without it, /report is not served.
+   */
+  doctorReport?: (patientId: string, day: string | undefined) => string | undefined;
   /** Where server-side errors are reported. Never receives request bodies or secrets. */
   logError?: (line: string) => void;
 };
@@ -30,6 +35,27 @@ export function createApp(deps: AppDeps): Express {
   });
 
   if (deps.calls) app.use("/integrations/elevenlabs", callToolRouter(deps.calls));
+
+  // The doctor report, the shareable link (docs/BRIEF.md feature 4). Local only, synthetic data.
+  const doctorReport = deps.doctorReport;
+  if (doctorReport)
+    app.get("/report/:patientId", (req, res, next) => {
+      const day = typeof req.query.day === "string" ? req.query.day : undefined;
+      if (day !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(day) || Number.isNaN(Date.parse(day)))) {
+        res.status(400).json({ error: "bad_request" });
+        return;
+      }
+      try {
+        const html = doctorReport(req.params.patientId, day);
+        if (html === undefined) {
+          res.status(404).json({ error: "not_found" });
+          return;
+        }
+        res.set("Cache-Control", "no-store").type("html").send(html);
+      } catch (error) {
+        next(error);
+      }
+    });
 
   app.use("/webhooks/relay", relayWebhookRouter());
 
