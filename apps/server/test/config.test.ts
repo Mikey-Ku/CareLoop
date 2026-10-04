@@ -35,6 +35,13 @@ describe("loadConfig defaults", () => {
     });
   });
 
+  it("CAMERA_CALLBACK is off unless set to on", () => {
+    expect(loadConfig({}).calls.cameraCallback).toBe(false);
+    expect(loadConfig({ CAMERA_CALLBACK: " On " }).calls.cameraCallback).toBe(true);
+    expect(loadConfig({ CAMERA_CALLBACK: "off" }).calls.cameraCallback).toBe(false);
+    expect(() => loadConfig({ CAMERA_CALLBACK: "yes" })).toThrow("CAMERA_CALLBACK must be on or off");
+  });
+
   it("keeps the longest video pause under SmartSpectra's own 2 s limit, whatever VITALS_MAX_FRAME_GAP_MS says", () => {
     expect(loadConfig({}).calls.maxFrameGapMs).toBe(1_900);
     expect(loadConfig({ VITALS_MAX_FRAME_GAP_MS: "1500" }).calls.maxFrameGapMs).toBe(1_500);

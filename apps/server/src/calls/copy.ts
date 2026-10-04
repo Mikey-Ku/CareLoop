@@ -56,6 +56,13 @@ export const CAMERA_CHECK_START =
 export const CAMERA_CHECK_END = "Thank you, that's all. I'll text you the estimate in about a minute.";
 export const CAMERA_CHECK_MISSED = "I couldn't reach your camera for the check this time. That's okay, we can try again another day.";
 export const CAMERA_STILL_OFF = "I can't see your camera yet. Please tap the video button, then say ready, or say no thanks and we can skip it.";
+/**
+ * With CAMERA_CALLBACK=on the reading is always the call-back: offered before the goodbye in these words, camera on
+ * or not. A yes asked for earlier in the call gets the LATER line and the call goes on; the goodbye starts with SOON.
+ */
+export const CAMERA_CALLBACK_OFFER = "Before we finish, would you like a quick camera check of your heart rate? I'll call you right back for it. You can say yes or no.";
+export const CAMERA_CALLBACK_LATER = "Thank you. I'll call you back for the camera check after we finish.";
+export const CAMERA_CALLBACK_SOON = "I'll call you right back for the camera check. When it rings, please answer and tap the video button.";
 
 /** The goodbye: points her to her family, by name when we know them. */
 export function callClosing(name: string, familyNames: readonly string[] = []): string {
@@ -193,6 +200,9 @@ export function callCopySamples(name = "Harriet"): { level: number; text: string
     { level: 0, text: CAMERA_CHECK_START },
     { level: 0, text: CAMERA_CHECK_END },
     { level: 0, text: CAMERA_CHECK_MISSED },
+    { level: 0, text: CAMERA_CALLBACK_OFFER },
+    { level: 0, text: CAMERA_CALLBACK_LATER },
+    { level: 0, text: `${CAMERA_CALLBACK_SOON} ${callClosing(name, ["Sarah"])}` },
     { level: 0, text: MEDICINE_QUESTION_REPLY },
     { level: 0, text: callClosing(name, ["Sarah"]) },
     { level: 0, text: callClosing(name) },

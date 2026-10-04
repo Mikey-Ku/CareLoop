@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, QUIET_RETRY_OFFER, callClosing, callFirstMessage, quietCountdown, quietMeasurementRetryPrompt } from "../src/calls/copy.ts";
+import { CAMERA_CALLBACK_LATER, CAMERA_CALLBACK_OFFER, CAMERA_CALLBACK_SOON, CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, QUIET_RETRY_OFFER, callClosing, callFirstMessage, quietCountdown, quietMeasurementRetryPrompt } from "../src/calls/copy.ts";
 import { emptyCallVitals } from "../src/calls/screening.ts";
 import { ConversationOrchestrator, type ConversationOrchestratorOptions } from "../src/calls/orchestrator.ts";
 import { crisisReply, urgentReply } from "../src/checkin/copy.ts";
@@ -1125,5 +1125,65 @@ describe("ConversationOrchestrator: a reading with nothing usable is offered onc
     await vi.waitFor(() => expect(f.onComplete).toHaveBeenCalledOnce());
     expect(f.spoken.slice(-2)).toEqual([NO_READING, callClosing("Harriet")]);
     expect(offers(f)).toBe(0);
+  });
+});
+
+describe("ConversationOrchestrator: the camera reading as a call-back (CAMERA_CALLBACK=on)", () => {
+  const DECLINE = "Of course. We can skip the camera measurement.";
+
+  it("before the goodbye it offers the call-back; her yes is the goodbye, saying it is coming, with no quiet window", async () => {
+    const llm = new FakeLlmClient({ callTurn: () => plan() });
+    const cameraCallBack = vi.fn();
+    const { spoken, onComplete, beginQuietMeasurement, say } = buildFlow(llm, { canMeasure: () => true, cameraCallBack });
+    await say("I have had a bit of a cough.");
+    expect(spoken).toEqual([CAMERA_CALLBACK_OFFER]);
+    expect(cameraCallBack).not.toHaveBeenCalled();
+    await say("Yes, please.");
+    expect(spoken).toEqual([CAMERA_CALLBACK_OFFER, `${CAMERA_CALLBACK_SOON} ${callClosing("Harriet")}`]);
+    expect(cameraCallBack).toHaveBeenCalledOnce();
+    expect(onComplete).toHaveBeenCalledOnce();
+    expect(beginQuietMeasurement).not.toHaveBeenCalled();
+    expect(llm.calls.filter((call) => call.method === "callTurn")).toHaveLength(1); // the goodbye was already decided
+  });
+
+  it("her no: the decline line and the plain goodbye, and no call-back", async () => {
+    const llm = new FakeLlmClient({ callTurn: () => plan() });
+    const cameraCallBack = vi.fn();
+    const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: () => true, cameraCallBack });
+    await say("I have had a bit of a cough.");
+    await say("No thanks.");
+    expect(spoken).toEqual([CAMERA_CALLBACK_OFFER, DECLINE, callClosing("Harriet")]);
+    expect(cameraCallBack).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledOnce();
+  });
+
+  it("a yes earlier in the call: she is told it comes after, the call goes on, and the goodbye says it is coming", async () => {
+    let turns = 0;
+    const llm = new FakeLlmClient({
+      callTurn: () => ((turns += 1) === 1 ? plan({ nextAction: "request_measurement_permission" }) : turns === 2 ? plan({ nextAction: "ask_follow_up", nextQuestion: "When did the cough start?" }) : plan()),
+    });
+    const cameraCallBack = vi.fn();
+    const { spoken, onComplete, beginQuietMeasurement, say } = buildFlow(llm, { canMeasure: () => true, cameraCallBack });
+    await say("I have had a bit of a cough.");
+    await say("Yes.");
+    expect(spoken.slice(1)).toEqual([CAMERA_CALLBACK_LATER, "Thank you for telling me. When did the cough start?"]);
+    expect(cameraCallBack).not.toHaveBeenCalled();
+    await say("Since Monday.");
+    expect(spoken.at(-1)).toBe(`${CAMERA_CALLBACK_SOON} ${callClosing("Harriet")}`);
+    expect(cameraCallBack).toHaveBeenCalledOnce();
+    expect(onComplete).toHaveBeenCalledOnce();
+    expect(beginQuietMeasurement).not.toHaveBeenCalled();
+  });
+
+  it("a yes earlier in the call, then she has to go: the plain goodbye, and no call-back", async () => {
+    let turns = 0;
+    const llm = new FakeLlmClient({ callTurn: () => ((turns += 1) === 1 ? plan({ nextAction: "request_measurement_permission" }) : plan({ nextAction: "end_call" })) });
+    const cameraCallBack = vi.fn();
+    const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: () => true, cameraCallBack });
+    await say("I have had a bit of a cough.");
+    await say("Yes.");
+    expect(spoken.slice(1)).toEqual([CAMERA_CALLBACK_LATER, callClosing("Harriet")]);
+    expect(cameraCallBack).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledOnce();
   });
 });

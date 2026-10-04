@@ -4,7 +4,7 @@ import type { CallCheckinContext } from "../checkin/engine-types.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import type { CallScreeningLlmOutput, CallTurnLlmOutput, LlmClient } from "../llm/types.ts";
 import type { VitalsResult } from "../vitals/types.ts";
-import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, QUIET_COUNTDOWN_SECONDS, QUIET_RETRY_OFFER, callClosing, callFirstMessage, quietCountdown, quietMeasurementRetryPrompt, quietMeasurementPrompt } from "./copy.ts";
+import { CAMERA_CALLBACK_LATER, CAMERA_CALLBACK_OFFER, CAMERA_CALLBACK_SOON, CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, QUIET_COUNTDOWN_SECONDS, QUIET_RETRY_OFFER, callClosing, callFirstMessage, quietCountdown, quietMeasurementRetryPrompt, quietMeasurementPrompt } from "./copy.ts";
 import { emergencyDecision } from "./emergency.ts";
 import type { TranscriptTurn } from "./types.ts";
 
@@ -45,6 +45,12 @@ export type ConversationOrchestratorOptions = {
   beginQuietMeasurement: () => void;
   /** The call ended with no camera offer because canMeasure() said no (not because she declined or it was taken): the service logs why. */
   onCameraOfferSkipped?: () => void;
+  /**
+   * The camera reading is a call-back (src/calls/camera-callback.ts), not a quiet window on this call: the offer
+   * says so, and after her yes the goodbye does too. Called once, as that goodbye starts (not after the emergency
+   * words or her "I have to go"); the call service calls her back once the call is recorded. Absent: the quiet window.
+   */
+  cameraCallBack?: () => void;
   onComplete: (screening?: CallScreeningLlmOutput) => void;
   log?: (event: string, fields?: Record<string, unknown>) => void;
 };
@@ -83,6 +89,10 @@ export class ConversationOrchestrator {
   #measurementDeclined = false;
   /** She said yes and the quiet reading was started: it is never offered or asked for again. */
   #measurementDone = false;
+  /** The offer was the one before the goodbye: her yes to a call-back ends the call. */
+  #offeredAtEnd = false;
+  /** She said yes to the camera check call-back; the goodbye says it is coming. */
+  #callBackAgreed = false;
   #measurementTimer: ReturnType<typeof setTimeout> | undefined;
   #countdownTimer: ReturnType<typeof setInterval> | undefined;
   /** Her FinchNode record, read on the first turn that needs it (see #loadContext). */
@@ -287,7 +297,8 @@ export class ConversationOrchestrator {
       // consent path above; after the reading or her no, the next turn that ends the call says goodbye.
       // Not for end_call: she said she has to go, and gets the goodbye without another question.
       this.#waitingForMeasurementConsent = true;
-      await this.#speak(CAMERA_OFFER_AT_END);
+      this.#offeredAtEnd = true;
+      await this.#speak(this.#options.cameraCallBack ? CAMERA_CALLBACK_OFFER : CAMERA_OFFER_AT_END);
       return;
     }
     if (decision.nextAction === "complete_screening" && this.#needsCameraOn) {
@@ -301,12 +312,7 @@ export class ConversationOrchestrator {
     }
     if (decision.nextAction === "complete_screening" || decision.nextAction === "emergency" || decision.nextAction === "end_call") {
       if (decision.nextAction === "complete_screening" && !this.#measurementDeclined && !this.#measurementDone) this.#options.onCameraOfferSkipped?.();
-      // The screening is stored with the call and runs while the goodbye is spoken; none of its words, and
-      // none of the model's, are ever said. The goodbye or the emergency words are ours (src/calls/copy.ts).
-      const screening = this.#finalScreening();
-      await this.#speak(this.#farewell(decision.nextAction));
-      this.#completed = true;
-      this.#options.onComplete(await screening);
+      await this.#goodbye(decision.nextAction);
       return;
     }
     this.#lastQuestion = undefined;
@@ -320,6 +326,32 @@ export class ConversationOrchestrator {
     const question = this.#question(null);
     this.#lastQuestion = question;
     await this.#speak(`${FALLBACK_ACKNOWLEDGMENT} ${question}`);
+  }
+
+  /**
+   * The screening is stored with the call and runs while the goodbye is spoken; none of its words, and none of
+   * the model's, are ever said. The goodbye or the emergency words are ours (src/calls/copy.ts). A camera check
+   * call-back she agreed to is asked for first, so it still comes if she hangs up during the goodbye.
+   */
+  async #goodbye(action: CallTurnLlmOutput["nextAction"]): Promise<void> {
+    const callBack = action === "complete_screening" && this.#callBackAgreed;
+    if (callBack) this.#options.cameraCallBack?.();
+    const screening = this.#finalScreening();
+    await this.#speak(callBack ? `${CAMERA_CALLBACK_SOON} ${this.#farewell(action)}` : this.#farewell(action));
+    this.#completed = true;
+    this.#options.onComplete(await screening);
+  }
+
+  /** Her yes when the reading is a call-back: before the goodbye it ends the call; earlier in the call she is told, and it goes on. */
+  async #agreeToCallBack(): Promise<void> {
+    this.#measurementDone = true;
+    this.#callBackAgreed = true;
+    if (this.#offeredAtEnd) {
+      await this.#goodbye("complete_screening");
+      return;
+    }
+    await this.#speak(CAMERA_CALLBACK_LATER);
+    await this.#planTurn("screening");
   }
 
   /** From a timer: nothing awaits it, so a failure (she hung up while the call was ending) is logged, never thrown. */
@@ -354,6 +386,7 @@ export class ConversationOrchestrator {
 
   /** She said yes (or ready) to the quiet reading: the prompt, the window, and the readback when it ends. */
   async #startMeasurement(retry = false): Promise<void> {
+    if (this.#options.cameraCallBack) return this.#agreeToCallBack();
     this.#phase = "quiet_measurement";
     this.#measurementDone = true;
     const seconds = Math.round(this.#options.quietMeasurementMs / 1000);

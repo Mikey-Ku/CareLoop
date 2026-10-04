@@ -2,9 +2,9 @@ import type { Call, CallWebhookEvent } from "@relaymessenger/sdk";
 import type { RelayCallTransport } from "@relaymessenger/sdk/calls";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ElevenLabsRealtimeStt, ElevenLabsTts } from "../src/calls/audio.ts";
-import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, callClosing, cantHearYou } from "../src/calls/copy.ts";
+import { CAMERA_CALLBACK_OFFER, CAMERA_CALLBACK_SOON, CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, callClosing, cantHearYou } from "../src/calls/copy.ts";
 import { emptyCallVitals } from "../src/calls/screening.ts";
-import { CallService, type CallEngine } from "../src/calls/service.ts";
+import { CallService, type CallEngine, type CallServiceOptions } from "../src/calls/service.ts";
 import { createCheckinEngine } from "../src/checkin/engine.ts";
 import { crisisReply, urgentReply } from "../src/checkin/copy.ts";
 import { callTranscript, getCallSession } from "../src/db/calls.ts";
@@ -111,7 +111,7 @@ let sttsHandedOut: FakeStt[];
 let logs: { event: string; [field: string]: unknown }[];
 let relay: { calls: { end: ReturnType<typeof vi.fn> }; chats: { messages: { send: ReturnType<typeof vi.fn> } } };
 
-function setup(options: { wallNow?: () => string; callTurn?: (input: Parameters<NonNullable<FakeLlmClient["callTurn"]>>[0]) => CallTurnLlmOutput | Error; env?: Record<string, string>; engine?: CallEngine } = {}) {
+function setup(options: { wallNow?: () => string; callTurn?: (input: Parameters<NonNullable<FakeLlmClient["callTurn"]>>[0]) => CallTurnLlmOutput | Error; env?: Record<string, string>; engine?: CallEngine; cameraCallBack?: CallServiceOptions["cameraCallBack"] } = {}) {
   transport = new FakeTransport();
   stt = new FakeStt();
   sttsToHandOut = [stt];
@@ -128,6 +128,7 @@ function setup(options: { wallNow?: () => string; callTurn?: (input: Parameters<
     loadSnapshot: async (subject) => loadSnapshot(subject),
     llm,
     ...(options.engine ? { engine: options.engine } : {}),
+    ...(options.cameraCallBack ? { cameraCallBack: options.cameraCallBack } : {}),
     today: () => DATE,
     now: () => NOW,
     wallNow: options.wallNow ?? (() => NOW),
@@ -998,5 +999,72 @@ describe("a call this agent placed itself (the camera check call-back)", () => {
 
     await service.handle(created(relayCall("stranger", "call-stranger"))); // someone else's call is still declined
     await vi.waitFor(() => expect(relay.chats.messages.send).toHaveBeenCalledOnce());
+  });
+});
+
+describe("the camera reading as a call-back (CAMERA_CALLBACK=on)", () => {
+  const withCamera = { PRESAGE_API_KEY: "presage-test-key" };
+  const turn = "My ankles are a bit swollen.";
+  /** The call is recorded (the call-back, if any, starts right after). */
+  const recorded = () => vi.waitFor(() => expect(getCallSession(db, "call-1")?.status).toBe("ended"));
+
+  it("an audio-only call is offered it; her yes is the goodbye, and once the call is recorded she is called back", async () => {
+    let statusWhenCalled: string | undefined;
+    const cameraCallBack = vi.fn(async () => { statusWhenCalled = getCallSession(db, "call-1")?.status; });
+    const service = setup({ callTurn: () => modelPlan(), env: withCamera, cameraCallBack });
+    await start(service);
+    stt.emit(turn);
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_CALLBACK_OFFER)); // her camera is off, and it is still offered
+    expect(tts.spoken).not.toContain(CAMERA_GUIDANCE);
+    stt.emit("Yes please.");
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(tts.spoken.at(-1)).toBe(`${CAMERA_CALLBACK_SOON} ${callClosing("Harriet", [])}`);
+    await vi.waitFor(() => expect(cameraCallBack).toHaveBeenCalledOnce());
+    expect(cameraCallBack).toHaveBeenCalledWith({ id: PATIENT, chatId: "chat-harriet", handle: "harriet" });
+    expect(statusWhenCalled).toBe("ended"); // the call is recorded first
+    expect(bridge.start).not.toHaveBeenCalled(); // no Presage session on this call
+    expect(logs.some((entry) => entry.event === "call_back_started")).toBe(true);
+  });
+
+  it("her no: the plain goodbye and no call-back", async () => {
+    const cameraCallBack = vi.fn(async () => {});
+    const service = setup({ callTurn: () => modelPlan(), env: withCamera, cameraCallBack });
+    await start(service);
+    stt.emit(turn);
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_CALLBACK_OFFER));
+    stt.emit("No thanks.");
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    await recorded();
+    expect(cameraCallBack).not.toHaveBeenCalled();
+  });
+
+  it("not after a call the after-call reading puts at the urgent level, even with her yes", async () => {
+    const cameraCallBack = vi.fn(async () => {});
+    const engine = {
+      callCheckinContext: async () => ({ firstName: "Harriet", questions: [], yesterday: [], memories: [], familyNames: [] }),
+      screenSpokenTurn: async () => undefined,
+      recordSpokenCheckin: async () => ({ level: 4, items: [] }),
+    } as unknown as CallEngine;
+    const service = setup({ callTurn: () => modelPlan(), env: withCamera, cameraCallBack, engine });
+    await start(service);
+    stt.emit(turn);
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_CALLBACK_OFFER));
+    stt.emit("Yes please.");
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    await recorded();
+    expect(tts.spoken.at(-1)).toBe(`${CAMERA_CALLBACK_SOON} ${callClosing("Harriet", [])}`); // she was told, and the reading overrides it
+    expect(getCallSession(db, "call-1")?.phase).toBe("emergency");
+    expect(cameraCallBack).not.toHaveBeenCalled();
+  });
+
+  it("without Presage there is no reading to call back for: the call has no camera offer", async () => {
+    const cameraCallBack = vi.fn(async () => {});
+    const service = setup({ callTurn: () => modelPlan(), cameraCallBack });
+    await start(service);
+    stt.emit(turn);
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(tts.spoken).not.toContain(CAMERA_CALLBACK_OFFER);
+    await recorded();
+    expect(cameraCallBack).not.toHaveBeenCalled();
   });
 });
