@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { familyCrisisAbout, familyEmergencyAbout, familyPassedOn } from "../src/checkin/copy.ts";
+import { BUTTON, familyCrisisAbout, familyEmergencyAbout, familyPassedOn } from "../src/checkin/copy.ts";
 import { createCheckinEngine } from "../src/checkin/engine.ts";
 import { getCheckin } from "../src/db/checkins.ts";
 import { familyMembersForChat, linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
@@ -79,6 +79,29 @@ describe("family messages passed on to Harriet", () => {
     expect(await from(SARAH, "Thanks")).toEqual(["acknowledgement"]);
     expect(messenger.sent).toEqual([]);
   });
+
+  it.each(["Yes", "Yes, I'll bring the pie", "No", "Not today"])(
+    "her %j after Sarah's words is plain chat: nothing answered or alerted, the waiting question again",
+    async (reply) => {
+      let now = "2026-10-04T13:00:00.000Z";
+      const engine = createCheckinEngine({ db, messenger, clock: { now: () => now }, loadSnapshot: async (s) => loadSnapshot(s) }, { rxnav: loadRxNavCache() });
+      await engine.startDay(P, "2026-10-04");
+      await engine.handleInbound({ chatId: ME, messageId: "h_start", text: BUTTON.start, at: now });
+      const question = messenger.lastIn(ME)!;
+      now = T;
+      await passOnFamilyMessage({ db, messenger, now: () => now }, familyMembersForChat(db, SARAH), { chatId: SARAH, messageId: "fam_lunch", text: "Are you still coming to lunch on Sunday?" });
+      now = "2026-10-04T14:01:00.000Z";
+      const before = messenger.sent.length;
+      await engine.handleInbound({ chatId: ME, messageId: "h_reply", text: reply, at: now });
+      expect(getCheckin(db, P, "2026-10-04")).toMatchObject({ status: "sent", step: "question", questionIndex: 0, answers: [] });
+      expect(texts(SARAH)).toEqual([familyPassedOn("Harriet")]);
+      expect(messenger.sent.slice(before).at(-1)).toMatchObject({ chatId: ME, text: question.text, buttons: question.buttons });
+      // The question was asked again after her reply: her next typed answer is its.
+      now = "2026-10-04T14:02:00.000Z";
+      await engine.handleInbound({ chatId: ME, messageId: "h_answer", text: "Fine", at: now });
+      expect(getCheckin(db, P, "2026-10-04")!.answers.map((a) => a.answer)).toEqual(["Fine"]);
+    },
+  );
 
   it("stores only who and when, never their words", async () => {
     await from(SARAH, "Bring the photos on Sunday");

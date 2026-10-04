@@ -85,6 +85,7 @@ import { ImageRejectedError } from "../llm/types.ts";
 import { DEFAULT_MEDS_NUDGE_MINUTES, MEDS_LABELS, createMedsFlow, paperFromReading, type MedPromptRef } from "../meds/flow.ts";
 import { DEFAULT_REFILL_REMIND_DAYS, refillsDue } from "../meds/refills.ts";
 import { medicationSchedule } from "../meds/schedule.ts";
+import { lastPassedOnAt } from "../relay/family-inbound.ts";
 import type { InboundMessage, OutboundMessage } from "../relay/messenger.ts";
 import { runRules } from "../rules/index.ts";
 import type { ExtractedPaper } from "../rules/paper-diff.ts";
@@ -229,7 +230,8 @@ import {
 // with no replyTo that isn't one of our labels goes to the MOST RECENTLY SENT prompt still waiting for her
 // (newestWaiting): the check-in's latest step (checkin_prompts, or "Let me explain"), an open follow-up,
 // "I have a question" ("Go ahead", src/db/waiting-prompts.ts), a medicines reminder, memory check or refill
-// reminder (med_prompts), the paper check, or the sharing menu. A check-in whose latest prompt is older than
+// reminder (med_prompts), the paper check, the sharing menu, or a family member's words passed on
+// (src/relay/family-inbound.ts; a label typed after them counts too). A check-in whose latest prompt is older than
 // another waiting prompt doesn't take it: a follow-up gets it as before, "I have a question" makes it her
 // medicine question (fixed reply, visit_questions), a paper check leaves it alone, and anything else reads
 // it as plain chat with nothing pending (then the check-in's step again). On a tie the check-in keeps it.
@@ -402,7 +404,7 @@ type Waiting =
   | { kind: "checkin"; at: string }
   | { kind: "follow_up"; at: string; f: FollowUpRow }
   | { kind: "meds_question"; at: string; promptId: number }
-  | { kind: "meds" | "paper" | "sharing_menu"; at: string };
+  | { kind: "meds" | "paper" | "sharing_menu" | "family"; at: string };
 
 /** The latest of some ISO timestamps, ignoring missing ones. */
 function latestOf(...xs: (string | null | undefined)[]): string | undefined {
@@ -1648,8 +1650,10 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (onFollowUp && onFollowUp.patientId === patient.id && !onFollowUp.answeredAt)
       return planTyped(patient, msg, { at: "follow_up", f: onFollowUp }, typed);
 
-    // Latest prompt wins (see above): typed text goes to the newest prompt still waiting for her.
-    const newest = isFreeText(msg) ? newestWaiting(patient, c) : undefined;
+    // Latest prompt wins (see above): typed text goes to the newest prompt still waiting for her. After a
+    // family member's words, her next typed message is plain chat even when it is a label ("Yes", "Not today").
+    const latest = msg.replyTo === undefined && msg.text.trim() ? newestWaiting(patient, c) : undefined;
+    const newest = isFreeText(msg) || latest?.kind === "family" ? latest : undefined;
     if (newest?.kind === "meds_question") return planTyped(patient, msg, { at: "meds_question", promptId: newest.promptId }, typed);
     if (c && newest && newest.kind !== "checkin") {
       // Something was sent after anything the check-in asked: her words are not the check-in's.
@@ -1721,6 +1725,8 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (medsAt) all.push({ kind: "meds", at: medsAt });
     const paperAt = latestOf(pendingReadback(db, patient.id)?.createdAt, pendingPaperFollowUp(db, patient.id)?.confirmedAt);
     if (paperAt) all.push({ kind: "paper", at: paperAt });
+    const familyAt = lastPassedOnAt(db, patient.id);
+    if (familyAt) all.push({ kind: "family", at: familyAt });
     return all.reduce<Waiting | undefined>((best, w) => (best === undefined || w.at > best.at ? w : best), undefined);
   }
 
