@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MetricType } from "@smartspectra/node-sdk";
 import { VideoBufferType } from "@relaymessenger/sdk/calls";
-import { callCopySamples, callFirstMessage, heartRateReadback } from "../src/calls/copy.ts";
+import { callCopySamples, callFirstMessage, heartRateReadback, quietMeasurementRetryPrompt } from "../src/calls/copy.ts";
 import { emergencyDecision } from "../src/calls/emergency.ts";
 import { QuietMeasurement } from "../src/calls/quiet-measurement.ts";
 import { loadUsualRange } from "../src/calls/screening.ts";
@@ -115,7 +115,7 @@ describe("Presage: pulse and breathing only", () => {
     expect(requested).toHaveLength(2);
   });
 
-  it("a frame SmartSpectra throws on (it throws, never returns false) ends the video pump, not the agent", async () => {
+  it("a frame SmartSpectra throws on (it throws, never returns false) restarts the session; the video pump and the agent go on", async () => {
     const rejections: unknown[] = [];
     const onRejection = (reason: unknown) => rejections.push(reason);
     process.on("unhandledRejection", onRejection);
@@ -124,10 +124,14 @@ describe("Presage: pulse and breathing only", () => {
       let push!: (event: unknown) => void;
       const track = { _subscribe: (consumer: { push: (event: unknown) => void }) => ((push = consumer.push), () => undefined) };
       let sent = 0;
+      let starts = 0;
       class ThrowingSession extends FakeSession {
+        override start() {
+          starts += 1;
+        }
         override sendFrame() {
           sent += 1;
-          if (sent === 2) throw new Error("kTimestampGap");
+          if (sent === 2) throw Object.assign(new Error("kTimestampGap"), { code: 11 });
           return true;
         }
       }
@@ -138,7 +142,11 @@ describe("Presage: pulse and breathing only", () => {
       for (const t of [1, 2, 3]) push(frame(t));
       await new Promise((resolve) => setTimeout(resolve, 10));
       expect(rejections).toEqual([]);
-      await vi.waitFor(() => expect(bridge.result().errors.map((e) => e.code)).toContain("video_stream"));
+      expect(starts).toBe(2); // started once, restarted once after the throw
+      expect(bridge.quiet.status).toBe("measuring");
+      push(frame(4));
+      await vi.waitFor(() => expect(sent).toBeGreaterThanOrEqual(3)); // the pump is alive and frames reach the session again
+      expect(bridge.result().errors.map((e) => e.code)).not.toContain("video_stream");
       expect((await bridge.stop()).heartRate).toBeNull();
     } finally {
       process.off("unhandledRejection", onRejection);
@@ -206,6 +214,7 @@ describe("call copy scan (the house rules cover every fixed call text)", () => {
       if (level === 3 && /\b911\b/.test(text)) expect(text, text).toMatch(/if it gets much worse, call 911/i);
       if (level < 4) expect(/911 (now|right away)|call 911 now|please call 911\./i.test(text), text).toBe(false);
     }
+    expect(samples.map((s) => s.text)).toContain(quietMeasurementRetryPrompt());
     const at = (level: number) => samples.filter((s) => s.level === level).map((s) => s.text).join(" ");
     expect(at(4)).toMatch(/call 911 right away|please call 911/i);
     expect(at(5)).toMatch(/988/);
