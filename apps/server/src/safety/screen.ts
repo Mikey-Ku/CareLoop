@@ -269,7 +269,11 @@ export function tokenize(text: string): Token[] {
   for (let i = 0; i < raw.length; i += 1) {
     const here = raw[i]!;
     const next = raw[i + 1];
-    const pair = next && next.clause === here.clause ? PAIR_FOLDS[`${here.word} ${next.word}`] : undefined;
+    const after = raw[i + 2];
+    // Preserve the affirmative "not only" construction before folding auxiliary
+    // negations ("has not", "had not", "do not") into a single word.
+    const notOnly = next?.word === "not" && after?.word === "only" && next.clause === here.clause && after.clause === here.clause;
+    const pair = next && next.clause === here.clause && !notOnly ? PAIR_FOLDS[`${here.word} ${next.word}`] : undefined;
     if (pair) {
       for (const word of pair) out.push({ word, clause: here.clause });
       i += 1;
@@ -335,8 +339,14 @@ function isNegated(tokens: Token[], start: number, rule: CompiledRule): boolean 
   if (rule.ignoreNegation) return false;
   // A phrase that starts with its own subject ("I fell") can't be negated from before it: "no I fell" is an answer, then the news.
   if (SUBJECTS.has(rule.words[0]!)) return false;
-  for (const word of wordsBefore(tokens, start, NEGATION_WINDOW)) {
+  const before = wordsBefore(tokens, start, NEGATION_WINDOW);
+  for (let offset = 0; offset < before.length; offset += 1) {
+    const word = before[offset]!;
     if (SUBJECTS.has(word)) return false;
+    // "Not only chest pain" affirms the symptom; it does not deny it. Only skip
+    // this exact same-clause pair, so another negation still cancels the hit.
+    const next = tokens[start - offset];
+    if (word === "not" && next?.word === "only" && next.clause === tokens[start]!.clause) continue;
     if (NEGATION_SET.has(word)) return true;
   }
   return false;
