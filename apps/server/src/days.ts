@@ -8,6 +8,11 @@ export function dayNumber(day: string): number {
   return Math.floor(Date.parse(day) / DAY_MS);
 }
 
+/** A real calendar date written YYYY-MM-DD: "2026-09-01" yes; "2026-02-30" and "2026-9-1" no. */
+export function isCalendarDay(day: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) && addDays(day, 0) === day;
+}
+
 /** YYYY-MM-DD plus n days (minus, when n is negative). */
 export function addDays(day: string, n: number): string {
   const [y, mo, d] = day.split("-").map(Number) as [number, number, number];

@@ -28,7 +28,9 @@ import { getCheckin } from "../src/db/checkins.ts";
 import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import { openDatabase, setSharing, upsertPatient, type Db } from "../src/db/index.ts";
 import { insertDose, insertLabelCheck, markRefillReminded, setDoseStatus } from "../src/db/meds.ts";
+import { addMemories } from "../src/db/memories.ts";
 import { addCheckinNote, addVisitQuestion } from "../src/db/notes.ts";
+import { addVitalsReading } from "../src/db/vitals.ts";
 import { addObservation } from "../src/db/observations.ts";
 import { normalizeHealthRecord } from "../src/finchnode/normalize.ts";
 import { REPO_ROOT, loadRxNavCache, loadSnapshot } from "../src/finchnode/fixtures.ts";
@@ -221,7 +223,7 @@ describe("care facts: the day's severity, notes and medicines", () => {
     markRefillReminded(db, { patientId: P, medicationKey: apixaban.key, fillDate: "2026-08-02", name: "apixaban 5 mg", runOut: "2026-09-04", day: DAY1, at });
   }
 
-  it("visit questions, label checks and refills belong to her day in America/Detroit, not the UTC date", async () => {
+  it("visit questions, label checks, refills, readings and memories belong to her day in America/Detroit, not the UTC date", async () => {
     await checkIn();
     const apixaban = normalizeHealthRecord(loadSnapshot(SUBJECT), { rxnav }).medications.find((m) => /apixaban/i.test(m.name))!;
     const next = new Date(Date.parse(`${DAY1}T00:00:00.000Z`) + 86_400_000).toISOString().slice(0, 10);
@@ -234,7 +236,13 @@ describe("care facts: the day's severity, notes and medicines", () => {
     insertLabelCheck(db, { patientId: P, attachmentId: "att_prev", outcome: "not_on_list", medicationKey: null, labelMedicine: "Naproxen", labelStrength: "220 mg", createdAt: prevEvening });
     const id = markRefillReminded(db, { patientId: P, medicationKey: apixaban.key, fillDate: "2026-08-02", name: "apixaban 5 mg", runOut: "2026-09-04", day: "2026-08-30", at: prevEvening });
     db.prepare(`UPDATE med_refills SET status = 'asked', updated_at = ? WHERE id = ?`).run(lateEvening, id);
+    addVitalsReading(db, { patientId: P, takenAt: lateEvening, heartRate: 74, breathingRate: null, method: "relay_call", confidence: 80 });
+    addVitalsReading(db, { patientId: P, takenAt: prevEvening, heartRate: 99, breathingRate: null, method: "relay_call", confidence: 80 });
+    addMemories(db, P, ["Granddaughter visiting Sunday"], lateEvening);
+    addMemories(db, P, ["Went to the library"], prevEvening);
     const f = facts();
+    expect(f.vitals.readings.map((r) => r.heartRate)).toEqual([74]);
+    expect(f.memories).toEqual(["Granddaughter visiting Sunday"]);
     expect(f.visitQuestions).toEqual(["Asked late in the evening"]);
     expect(f.medicines.labelMismatches.map((l) => l.label)).toEqual(["Ibuprofen 200 mg"]);
     expect(f.medicines.refills).toEqual([{ medicine: "apixaban 5 mg", runsOut: "2026-09-04", status: "asked", familyTold: false }]);

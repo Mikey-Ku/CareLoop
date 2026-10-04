@@ -7,6 +7,7 @@ import { activeMedications, ageOn, asOf, normalizeHealthRecord, type Measurement
 import type { RxNavCache } from "../finchnode/rxnav.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import { addDays } from "../days.ts";
+import { isLabelPhotoQuestion } from "../meds/flow.ts";
 import { latestFill } from "../meds/refills.ts";
 import { plainName } from "../meds/schedule.ts";
 import type { Evidence, RuleId, Severity } from "../rules/index.ts";
@@ -406,7 +407,8 @@ export function buildDoctorReport(db: Db, patientId: string, options: BuildDocto
     },
     labs,
     flags,
-    visitQuestions: facts.flatMap((f) => f.visitQuestions.map((text) => ({ day: f.day, text }))),
+    // Only her own questions: the one the assistant writes after a label photo is in the label mismatches above.
+    visitQuestions: facts.flatMap((f) => f.visitQuestions.filter((text) => !isLabelPhotoQuestion(text)).map((text) => ({ day: f.day, text }))),
     notes: facts.flatMap((f) => f.notes.map((n) => ({ day: f.day, about: n.about, text: n.text }))),
   };
 }

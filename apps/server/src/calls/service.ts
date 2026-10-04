@@ -56,6 +56,8 @@ export type CallServiceOptions = {
   today?: () => string;
   log?: CallLog;
   now?: () => string;
+  /** The real clock, for Relay's own timestamps (the 32-second answer deadline). Defaults to `now`. */
+  wallNow?: () => string;
 };
 
 type ActiveCall = {
@@ -88,6 +90,7 @@ export class CallService implements CallEventHandler {
   readonly #options: CallServiceOptions;
   readonly #log: CallLog;
   readonly #now: () => string;
+  readonly #wallNow: () => string;
   readonly #today: () => string;
   readonly #active = new Map<string, ActiveCall>();
 
@@ -95,6 +98,7 @@ export class CallService implements CallEventHandler {
     this.#options = options;
     this.#log = options.log ?? (() => {});
     this.#now = options.now ?? (() => new Date().toISOString());
+    this.#wallNow = options.wallNow ?? this.#now;
     this.#today = options.today ?? (() => this.#now().slice(0, 10));
   }
 
@@ -108,7 +112,7 @@ export class CallService implements CallEventHandler {
       const call = event.data.call;
       const active = this.#active.get(call.id);
       if (active) active.call = call;
-      if (call.status === "in-progress") patchCallSession(this.#options.db, call.id, { status: "in_progress", answeredAt: call.answered_at ?? this.#now() });
+      if (call.status === "in-progress") patchCallSession(this.#options.db, call.id, { status: "in_progress", answeredAt: this.#now() });
       return;
     }
     const callId = event.data.call.id;
@@ -247,7 +251,7 @@ export class CallService implements CallEventHandler {
         onWarning: (message) => this.#log("call_bridge_warning", { call_id: call.id, message }),
       });
       active.elevenLabs = bridge;
-      if (call.ringing_at && !withinRelayAnswerDeadline(call.ringing_at, this.#now())) {
+      if (call.ringing_at && !withinRelayAnswerDeadline(call.ringing_at, this.#wallNow())) {
         throw new Error(`Relay answer deadline exceeded (${RELAY_ANSWER_DEADLINE_MS} ms)`);
       }
       active.bridge = calls.presageApiKey

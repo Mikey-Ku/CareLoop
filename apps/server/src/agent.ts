@@ -146,6 +146,13 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
     });
   const ops: RelayOps = { assertNoWebhookSubscriptions, runRelayInbox, ...deps.relayOps };
   const { finchnodeSubject: subject, relayHandle, timezone } = config.patient;
+  // With CLOCK_DATE (demos), what the agent records lands on that day: its data clock starts at
+  // CHECKIN_TIME on CLOCK_DATE and runs forward in real time, so even a late-night session stays on
+  // the pinned day. Without it, the data clock is the real clock. Job times, the late start and
+  // Relay's call deadlines always use the real clock.
+  const startedAtMs = now().getTime();
+  const dataAnchorMs = config.clockDate ? zonedInstant(config.clockDate, config.checkinTime, timezone) : undefined;
+  const dataNow = dataAnchorMs === undefined ? now : () => new Date(dataAnchorMs + (now().getTime() - startedAtMs));
   if (!relayHandle) throw new AgentStartError(MISSING_HANDLE_MESSAGE);
   // Her own handle as a family member would send her the family's alerts about herself.
   const familyHandles = config.patient.familyHandles.filter((h) => h !== relayHandle);
@@ -155,7 +162,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   log(
     `[agent] starting: subject ${subject}, senior @${relayHandle}, ${familyHandles.length} family handle(s), ` +
       `check-in ${config.checkinTime} and missed check-in ${config.missedCheckinTime}, medicines ${config.meds.morningTime} and ${config.meds.eveningTime} ${timezone}` +
-      (config.clockDate ? `, demo check-in date pinned to ${config.clockDate}` : "") +
+      (config.clockDate ? `, demo check-in date pinned to ${config.clockDate} (records stamped from ${config.checkinTime} that day)` : "") +
       `, Relay ${config.relay.apiUrl}`,
   );
 
@@ -191,7 +198,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
 
   // 3. Engine over Relay, with free text when an LLM is configured.
   const relayLog: RelayLog = (event, fields) => log(`[relay] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`);
-  const clock: Clock = { now: () => now().toISOString() };
+  const clock: Clock = { now: () => dataNow().toISOString() };
   const messenger = deps.messenger ?? new RelayMessenger(relay, { log: relayLog });
   log(`[agent] ${llmStatus(config, deps.llm)}`);
   // 3a. Care summaries to her doctor and emergency contact over Photon, when configured.
@@ -222,7 +229,8 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
         engine,
         today: () => config.clockDate ?? localDate(now(), timezone),
         log: (event, fields) => log(`[calls] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`),
-        now: () => now().toISOString(),
+        now: () => dataNow().toISOString(),
+        wallNow: () => now().toISOString(),
       })
     : undefined;
 
@@ -308,9 +316,9 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
     if (ticking) return;
     ticking = true;
     try {
-      const sent = await engine.runDueFollowUps(now().toISOString());
+      const sent = await engine.runDueFollowUps(dataNow().toISOString());
       if (sent > 0) log(`[agent] sent ${sent} follow-up check-in(s)`);
-      const nudged = await engine.runMedsNudges(now().toISOString());
+      const nudged = await engine.runMedsNudges(dataNow().toISOString());
       if (nudged > 0) log(`[agent] sent ${nudged} medicines re-reminder(s)`);
       const passed = await engine.passOnFamilyMessages(patientId);
       if (passed > 0) log(`[agent] passed on ${passed} message(s) she left for her family`);

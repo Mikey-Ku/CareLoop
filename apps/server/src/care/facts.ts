@@ -201,13 +201,26 @@ export function buildCareFacts(db: Db, input: BuildCareFactsInput): CareFacts {
     return red ? [{ questionId: red.questionId, question: red.questionText, answer: red.answer, level: 3, source: "answer" as const }] : [];
   });
 
+  // Timestamped rows (readings, memories, visit questions, label checks, refills) belong to the day in
+  // her time zone (America/Detroit by default), not the UTC date of their timestamp: an evening question
+  // in Detroit is already "tomorrow" in UTC.
+  const timezone = (db.prepare(`SELECT timezone FROM patients WHERE id = ?`).get(patientId) as { timezone: string | null } | undefined)?.timezone ?? null;
+  const zone = timezone ?? DEFAULT_TIMEZONE;
+  const nearDays = [addDays(day, -1), day, addDays(day, 1)];
+  const onHerDay = (iso: string) => {
+    const t = new Date(iso);
+    return !Number.isNaN(t.getTime()) && localDate(t, zone) === day;
+  };
+
   const usualRange = packet?.usualRange ?? null;
-  const vitalsRows = db
-    .prepare(
-      `SELECT taken_at AS takenAt, heart_rate AS heartRate, breathing_rate AS breathingRate, method, confidence
-       FROM vitals_readings WHERE patient_id = ? AND substr(taken_at, 1, 10) = ? ORDER BY taken_at`,
-    )
-    .all(patientId, day) as VitalsRow[];
+  const vitalsRows = (
+    db
+      .prepare(
+        `SELECT taken_at AS takenAt, heart_rate AS heartRate, breathing_rate AS breathingRate, method, confidence
+         FROM vitals_readings WHERE patient_id = ? AND substr(taken_at, 1, 10) IN (?, ?, ?) ORDER BY taken_at`,
+      )
+      .all(patientId, ...nearDays) as VitalsRow[]
+  ).filter((v) => onHerDay(v.takenAt));
   const readings = vitalsRows.map((v) => {
     const range = usualRange?.compareHeartRate ? usualRange.heartRate : undefined;
     return {
@@ -228,9 +241,11 @@ export function buildCareFacts(db: Db, input: BuildCareFactsInput): CareFacts {
 
   const memories = (
     db
-      .prepare(`SELECT text FROM memories WHERE patient_id = ? AND deleted_at IS NULL AND substr(created_at, 1, 10) = ? ORDER BY created_at DESC, id DESC`)
-      .all(patientId, day) as { text: string }[]
-  ).map((m) => m.text);
+      .prepare(`SELECT text, created_at AS createdAt FROM memories WHERE patient_id = ? AND deleted_at IS NULL AND substr(created_at, 1, 10) IN (?, ?, ?) ORDER BY created_at DESC, id DESC`)
+      .all(patientId, ...nearDays) as { text: string; createdAt: string }[]
+  )
+    .filter((m) => onHerDay(m.createdAt))
+    .map((m) => m.text);
 
   // The severity ladder: one entry per topic at its highest level today, highest first.
   const observed = db
@@ -265,15 +280,6 @@ export function buildCareFacts(db: Db, input: BuildCareFactsInput): CareFacts {
   }
 
   const notes = checkin ? checkinNotes(db, checkin.id).map((n) => ({ about: topicAbout(n.questionId ?? n.topic), text: oneLine(n.text) ?? "" })).filter((n) => n.text) : [];
-  // Visit questions, label checks and refills belong to the day in her time zone (America/Detroit by
-  // default), not the UTC date of their timestamp: an evening question in Detroit is already "tomorrow" in UTC.
-  const timezone = (db.prepare(`SELECT timezone FROM patients WHERE id = ?`).get(patientId) as { timezone: string | null } | undefined)?.timezone ?? null;
-  const zone = timezone ?? DEFAULT_TIMEZONE;
-  const nearDays = [addDays(day, -1), day, addDays(day, 1)];
-  const onHerDay = (iso: string) => {
-    const t = new Date(iso);
-    return !Number.isNaN(t.getTime()) && localDate(t, zone) === day;
-  };
   const visitQuestions = (
     db
       .prepare(`SELECT text, created_at AS createdAt FROM visit_questions WHERE patient_id = ? AND substr(created_at, 1, 10) IN (?, ?, ?) ORDER BY created_at, id`)

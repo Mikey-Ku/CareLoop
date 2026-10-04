@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { loadConfig } from "../config.ts";
+import { isCalendarDay } from "../days.ts";
 import { openDatabase } from "../db/index.ts";
 import { REPO_ROOT } from "../finchnode/fixtures.ts";
 import { buildDoctorReport, hasPatient, latestCheckinDay, patientIds, renderDoctorReportHtml, weekStart } from "../report/index.ts";
@@ -13,7 +14,6 @@ import { buildDoctorReport, hasPatient, latestCheckinDay, patientIds, renderDoct
 // Default output: data/report-<day>.html at the repo root.
 
 const USAGE = "usage: npm run report -- [--day YYYY-MM-DD] [--db path] [--out file.html] [--patient id]";
-const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 function main(argv: string[]): number {
   let values;
@@ -36,7 +36,7 @@ function main(argv: string[]): number {
     console.log(USAGE);
     return 0;
   }
-  if (values.day !== undefined && (!DAY.test(values.day) || Number.isNaN(Date.parse(values.day)))) {
+  if (values.day !== undefined && !isCalendarDay(values.day)) {
     console.error(`error: --day must be YYYY-MM-DD, got "${values.day}"\n${USAGE}`);
     return 2;
   }

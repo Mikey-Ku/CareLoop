@@ -76,6 +76,17 @@ import { addDays } from "../days.ts";
 import { paperChangeFor, unresolvedPaperChanges } from "./paper-notes.ts";
 import { labelInstructions, medicineWords, medsForSlot, memoryCandidates, plainName, strengthWords, type ScheduledMedication } from "./schedule.ts";
 
+/**
+ * After a label photo that doesn't match, her visit list gets a question in her words ("A medicine label I
+ * photographed says ..."). The assistant wrote it, not her, so the doctor report leaves it out of "Her
+ * questions" (the mismatch is already in its items for clinician review).
+ */
+export const LABEL_PHOTO_QUESTION = "A medicine label I photographed";
+
+export function isLabelPhotoQuestion(text: string): boolean {
+  return text.startsWith(LABEL_PHOTO_QUESTION);
+}
+
 // The medication helper's planning, inside the engine's transactions (like src/checkin/paper-flow.ts):
 // synchronous, returns what to send. The engine loads her record first and delivers after.
 //
@@ -508,9 +519,9 @@ export function createMedsFlow(deps: { db: Db; clock: Clock; hooks: MedsHooks; o
         let question: string | undefined;
         if (result.outcome === "strength_differs") {
           const list = strengthWords(result.med.strength) ?? "another strength";
-          question = `A medicine label I photographed says ${medicineWords(result.med.name)} ${result.labelStrength}, but my medication list has ${list}. Which is right?`;
+          question = `${LABEL_PHOTO_QUESTION} says ${medicineWords(result.med.name)} ${result.labelStrength}, but my medication list has ${list}. Which is right?`;
         } else if (result.outcome === "not_on_list") {
-          question = `A medicine label I photographed${labelName ? ` (${labelName})` : ""} isn't on my medication list. Should it be?`;
+          question = `${LABEL_PHOTO_QUESTION}${labelName ? ` (${labelName})` : ""} isn't on my medication list. Should it be?`;
         }
         if (question) {
           addVisitQuestion(db, { patientId: patient.id, text: question, createdAt: now });

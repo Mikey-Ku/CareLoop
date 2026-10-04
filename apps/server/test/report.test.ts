@@ -121,6 +121,9 @@ describe("doctor report from a simulated week", () => {
     expect(text).toContain("aspirin 81 mg marked stopped on the papers");
     expect(text).toContain("morning 6 taken, 1 not confirmed; evening 6 taken, 1 not confirmed");
     expect(text).toContain("Is the aspirin still on my list after the hospital?");
+    // The assistant's own question after the label photo is not quoted as hers; the mismatch is listed above.
+    expect(report.visitQuestions.map((q) => q.text)).not.toContainEqual(expect.stringContaining("A medicine label I photographed"));
+    expect(text).not.toContain("A medicine label I photographed");
   });
 
   it("has the R1, R3 and R4 flags with their evidence: record ids, dates and values", () => {
@@ -230,5 +233,6 @@ describe("GET /report/:patientId", () => {
   it("404s an unknown patient and 400s a bad day", async () => {
     expect((await fetch(`${base}/report/nobody`)).status).toBe(404);
     expect((await fetch(`${base}/report/${PATIENT}?day=tuesday`)).status).toBe(400);
+    expect((await fetch(`${base}/report/${PATIENT}?day=2026-02-30`)).status).toBe(400);
   });
 });

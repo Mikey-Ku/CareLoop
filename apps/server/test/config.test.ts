@@ -96,7 +96,8 @@ describe("times and dates", () => {
   });
 
   it("rejects a malformed CLOCK_DATE", () => {
-    expect(() => loadConfig({ CLOCK_DATE: "10/03/2026" })).toThrow("CLOCK_DATE must be YYYY-MM-DD");
+    expect(() => loadConfig({ CLOCK_DATE: "10/03/2026" })).toThrow("CLOCK_DATE must be a real date, YYYY-MM-DD");
+    expect(() => loadConfig({ CLOCK_DATE: "2026-02-30" })).toThrow("CLOCK_DATE must be a real date, YYYY-MM-DD");
   });
 
   it("resolveCheckinDate prefers the demo clock, then data as-of, then today", () => {

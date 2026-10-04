@@ -1,9 +1,9 @@
 import { z } from "zod";
+import { isCalendarDay } from "./days.ts";
 
 // App configuration from the environment. Secrets live only in .env and never
 // appear in an error message, a log line or a printed config.
 
-const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 export const DEFAULT_RELAY_API_URL = "https://api.relayapp.im";
@@ -35,7 +35,7 @@ const ConfigSchema = z.object({
     .string()
     .optional()
     .transform((v) => (v ? v : undefined))
-    .refine((v) => v === undefined || DAY.test(v), "CLOCK_DATE must be YYYY-MM-DD"),
+    .refine((v) => v === undefined || isCalendarDay(v), "CLOCK_DATE must be a real date, YYYY-MM-DD"),
   RELAY_API_URL: z.string().default(DEFAULT_RELAY_API_URL),
   PATIENT_RELAY_HANDLE: z.string().optional(),
   FAMILY_RELAY_HANDLES: z.string().optional(),

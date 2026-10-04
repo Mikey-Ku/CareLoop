@@ -185,7 +185,9 @@ function discrepancyLine(d: Discrepancy): string {
 }
 
 function symptomRow(s: ReportSymptom): string {
-  const said = [s.answer ? `Answer ${quoted(s.answer)}` : "", s.words ? `her words ${quoted(s.words)}` : ""].filter(Boolean).join("; ");
+  // A label photo's row keeps the assistant's own sentence, not hers: say where it came from instead.
+  const words = s.source === "photo" ? "a label photo that didn't match her list (see Items for clinician review)" : s.words ? `her words ${quoted(s.words)}` : "";
+  const said = [s.answer ? `Answer ${quoted(s.answer)}` : "", words].filter(Boolean).join("; ");
   return `<tr><td class="nw">${levelBadge(s.level)}</td><td class="nw">${esc(reportDate(s.day))}</td><td>${esc(s.about)}</td><td>${said || '<span class="muted">no words kept</span>'}</td><td class="nw">${esc(SOURCE_WORDS[s.source] ?? s.source)}</td></tr>`;
 }
 

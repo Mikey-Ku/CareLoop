@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import express from "express";
 import type { ErrorRequestHandler, Express, RequestHandler } from "express";
 import type { Config } from "./config.ts";
+import { isCalendarDay } from "./days.ts";
 import { errorSummary } from "./errors.ts";
 
 // The HTTP app. Kept separate from src/server.ts so tests can start it on port 0.
@@ -45,7 +46,7 @@ export function createApp(deps: AppDeps): Express {
   if (doctorReport)
     app.get("/report/:patientId", (req, res, next) => {
       const day = typeof req.query.day === "string" ? req.query.day : undefined;
-      if (day !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(day) || Number.isNaN(Date.parse(day)))) {
+      if (day !== undefined && !isCalendarDay(day)) {
         res.status(400).json({ error: "bad_request" });
         return;
       }
