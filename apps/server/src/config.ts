@@ -82,6 +82,15 @@ const ConfigSchema = z.object({
    * more than 2000 ms after the last one it took, so this is clamped to MAX_FRAME_GAP_LIMIT_MS (1900) whatever is set.
    */
   VITALS_MAX_FRAME_GAP_MS: z.coerce.number().int().min(1_000).max(10_000).default(MAX_FRAME_GAP_LIMIT_MS).transform((ms) => Math.min(ms, MAX_FRAME_GAP_LIMIT_MS)),
+  /**
+   * on: the camera reading is the camera check call-back (src/calls/camera-callback.ts; needs apps/camera-check set up
+   * with uv). The live call's video drops frames, so a second call records her camera and Presage reads the file.
+   */
+  CAMERA_CALLBACK: z
+    .string()
+    .default("off")
+    .transform((v) => v.trim().toLowerCase())
+    .pipe(z.enum(["on", "off"], "CAMERA_CALLBACK must be on or off")),
 });
 
 /**
@@ -95,6 +104,7 @@ export const KNOWN_ENV_NAMES: ReadonlySet<string> = new Set([
   "FOLLOW_UP_DELAY_MINUTES", // src/agent.ts
   "SPECTRUM_PROJECT_ID", "SPECTRUM_PROJECT_SECRET", "CARE_CONTACTS_PATH", // src/care/config.ts
   "NO_COLOR", // src/cli/sim-render.ts
+  "CAMERA_CHECK_PYTHON", // src/calls/camera-callback.ts
 ]);
 
 export type RelayConfig = {
@@ -155,6 +165,8 @@ export type CallsConfig = {
   vitalsMinConfidence: number;
   /** VITALS_MAX_FRAME_GAP_MS: a longer pause in her video restarts the reading inside the same quiet window (at most 1900). */
   maxFrameGapMs: number;
+  /** CAMERA_CALLBACK=on: the reading is the camera check call-back, not the quiet window on the call. */
+  cameraCallback: boolean;
 };
 
 export type Config = {
@@ -215,6 +227,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     maxMinutes: c.CALL_MAX_MINUTES,
     vitalsMinConfidence: c.VITALS_MIN_CONFIDENCE,
     maxFrameGapMs: c.VITALS_MAX_FRAME_GAP_MS,
+    cameraCallback: c.CAMERA_CALLBACK === "on",
   };
   Object.defineProperty(calls, "elevenLabsApiKey", { value: ELEVENLABS_API_KEY?.trim() || undefined, enumerable: false });
   Object.defineProperty(calls, "presageApiKey", { value: PRESAGE_API_KEY?.trim() || undefined, enumerable: false });

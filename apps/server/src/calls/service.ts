@@ -20,6 +20,7 @@ import { emergencyDecision } from "./emergency.ts";
 import { callResult, emptyCallVitals, loadUsualRange } from "./screening.ts";
 import { RelayPresageBridge } from "./video.ts";
 import type { ScreeningResult, TranscriptTurn } from "./types.ts";
+import type { CameraCallbackPatient } from "./camera-callback.ts";
 import { ElevenLabsRealtimeStt, ElevenLabsTts, isBargeIn, relayAudioToStt } from "./audio.ts";
 import { ConversationOrchestrator } from "./orchestrator.ts";
 
@@ -72,6 +73,12 @@ export type CallServiceOptions = {
   sttFactory?: (options: ConstructorParameters<typeof ElevenLabsRealtimeStt>[0]) => ElevenLabsRealtimeStt;
   ttsFactory?: (transport: RelayCallTransport, options: ConstructorParameters<typeof ElevenLabsTts>[1]) => ElevenLabsTts;
   bridgeFactory?: (transport: RelayCallTransport, options: ConstructorParameters<typeof RelayPresageBridge>[1]) => RelayPresageBridge;
+  /**
+   * The camera reading as a call-back (CAMERA_CALLBACK=on; the agent passes runCameraCallback). With Presage
+   * configured it replaces the quiet window: offered on every call, camera on or not, and run once a call whose
+   * goodbye promised it is recorded, unless the call reached the urgent or crisis level.
+   */
+  cameraCallBack?: (patient: CameraCallbackPatient) => Promise<unknown>;
 };
 
 type ActiveCall = {
@@ -98,6 +105,8 @@ type ActiveCall = {
   maxTimer?: ReturnType<typeof setTimeout>;
   videoStateTimer?: ReturnType<typeof setTimeout>;
   readingSaved: boolean;
+  /** Her goodbye promised the camera check call-back. */
+  callBack?: boolean;
   /** Undefined until asked; null when her record couldn't be read (no comparison then). */
   usualRange?: ContextPacket["usualRange"] | null;
   geminiScreening?: CallScreeningLlmOutput;
@@ -115,6 +124,8 @@ export class CallService implements CallEventHandler {
   readonly #wallNow: () => string;
   readonly #today: () => string;
   readonly #active = new Map<string, ActiveCall>();
+  /** A camera check call-back is ringing or being read: one at a time, since each rings her one phone. */
+  #callingBack = false;
 
   constructor(options: CallServiceOptions) {
     this.#options = options;
@@ -209,6 +220,11 @@ export class CallService implements CallEventHandler {
   async #start(call: Call): Promise<void> {
     if (this.#active.has(call.id)) {
       this.#log("call_duplicate_start_ignored", { call_id: call.id });
+      return;
+    }
+    if (call.from.kind === "agent") {
+      // A call this agent placed itself (the camera check call-back): its recorder takes it, so it is not declined.
+      this.#log("call_outbound_ignored", { call_id: call.id });
       return;
     }
     const patient = this.#patientForCall(call);
@@ -319,7 +335,9 @@ export class CallService implements CallEventHandler {
       } finally {
         clearTimeout(connectTimer);
       }
-      active.bridge = calls.presageApiKey
+      // A call-back takes the reading on its own call, so this call needs no Presage session.
+      const callBack = calls.presageApiKey ? this.#options.cameraCallBack : undefined;
+      active.bridge = calls.presageApiKey && !callBack
         ? (this.#options.bridgeFactory ?? ((target, options) => new RelayPresageBridge(target, options)))(transport, {
             apiKey: calls.presageApiKey,
             quietDurationMs: calls.quietMeasurementMs,
@@ -339,8 +357,9 @@ export class CallService implements CallEventHandler {
         llm: this.#options.llm,
         loadSnapshot: this.#options.loadSnapshot,
         getVitals: () => active.bridge?.result() ?? emptyCallVitals(),
-        canMeasure: () => Boolean(active.bridge) && videoOn,
+        canMeasure: () => Boolean(callBack) || (Boolean(active.bridge) && videoOn),
         cameraNeedsVideo: () => Boolean(active.bridge) && !videoOn,
+        ...(callBack ? { cameraCallBack: () => { active.callBack = true; } } : {}),
         measurementActive: () => active.bridge?.measuring() ?? true,
         quietMeasurementMs: calls.quietMeasurementMs,
         speak: (text) => tts.speak(text),
@@ -613,11 +632,27 @@ export class CallService implements CallEventHandler {
         screeningJson: JSON.stringify(active.geminiScreening ? { ...result, geminiScreening: active.geminiScreening } : result),
         measurementEndedAt: active.bridge?.quiet.status === "complete" ? this.#now() : undefined,
       });
+      if (active.callBack && !failed && level < 4) this.#callBack(active);
     } catch (error) {
       this.#log("call_finish_failed", { call_id: callId, error: summary(error) });
     } finally {
       this.#active.delete(callId);
     }
+  }
+
+  /** The camera check call-back her goodbye promised, once the call is recorded. Never awaited, and one at a time. */
+  #callBack(active: ActiveCall): void {
+    const run = this.#options.cameraCallBack;
+    if (!run) return;
+    if (this.#callingBack) {
+      this.#log("call_back_skipped", { call_id: active.call.id, reason: "another_call_back_running" });
+      return;
+    }
+    this.#callingBack = true;
+    this.#log("call_back_started", { call_id: active.call.id });
+    void run({ id: active.patientId, chatId: active.call.chat_id, handle: active.call.from.handle })
+      .catch((error) => this.#log("call_back_failed", { call_id: active.call.id, error: summary(error) }))
+      .finally(() => { this.#callingBack = false; });
   }
 
   /** Each accepted camera reading goes to vitals_readings once per call (method relay_call). */

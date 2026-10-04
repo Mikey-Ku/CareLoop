@@ -40,7 +40,7 @@ cp ../../.env.example ../../.env    # the .env lives at the repo root
 | Relay Messenger | Chat, video call and photos with the agent | `RELAY_AGENT_TOKEN`, `PATIENT_RELAY_HANDLE`, and `FAMILY_RELAY_HANDLES` for family | `npm run relay:check` |
 | Gemini | Understands typed and spoken words, words the questions | `GEMINI_API_KEY` (without it, buttons only) | `npm run llm:check` |
 | ElevenLabs | Hears and speaks on the call | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | `npm run voice:check` |
-| Presage | Pulse and breathing estimate from the call's video | `PRESAGE_API_KEY` (optional) | a video call with the camera on |
+| Presage | Pulse and breathing estimate from the call's video | `PRESAGE_API_KEY` (optional; for the camera check call-back also `CAMERA_CALLBACK=on` and [uv](https://docs.astral.sh/uv/)) | a video call with the camera on, or `npm run camera:check` |
 | Photon (optional) | Texts care summaries to the doctor and emergency contact over iMessage | `SPECTRUM_PROJECT_ID`, `SPECTRUM_PROJECT_SECRET` | `npm run care:send -- --dry-run` |
 
 `npm run demo:check` reads the config and the synthetic fixtures without any network request and never prints a key. Exit `0` means configured, `2` means an optional part is missing, `1` means something required is. It shows presence, not that a key works: `relay:check`, `llm:check` and `voice:check` call the providers (`llm:check` uses a little quota, `voice:check` about 6 characters of speech). `content:eval` runs 145 messages through Gemini and overwrites `docs/content-eval.md`. Phone calls, the camera and family delivery need a live rehearsal with a synthetic patient on a phone.
@@ -82,6 +82,10 @@ The commands above are for macOS (`sed -i ''`, zsh `read`). Your conversation is
 
 Off by default and not part of the MVP. After each check-in the doctor and the emergency contact can get a text over [Photon](https://photon.codes/docs/spectrum-ts/getting-started) (iMessage). To try it: copy `care-contacts.example.json` to `care-contacts.json` with their numbers, set `SPECTRUM_PROJECT_ID` and `SPECTRUM_PROJECT_SECRET` in `.env`, have both contacts text the Photon line once, then run the agent. Preview with `npm run care:send -- --day 2026-09-01 --dry-run`.
 
+### Optional: the camera check call-back
+
+The camera reading on the call itself rarely works, because the live call's video drops frames. With `CAMERA_CALLBACK=on` in `.env` (and `PRESAGE_API_KEY`), Carey offers the camera check before the goodbye as a call-back instead: after a yes, Carey ends the call, calls Harriet straight back, records 35 seconds of her camera through the Relay Python SDK, and texts her the estimate about a minute later. Set it up once from the repo root with `uv sync --project apps/camera-check`, and try it on demand with `npm run camera:check`. See [the call docs](docs/CALLS.md#camera-check-call-back).
+
 ## Usage
 
 All commands run in `apps/server`.
@@ -97,6 +101,7 @@ All commands run in `apps/server`.
 | `npm run report -- [--day YYYY-MM-DD] [--db path] [--out file.html]` | Writes the doctor report for the 7 days ending on `--day` (default her latest check-in) and prints its path (default `data/report-<day>.html`). See "Doctor report". |
 | `npm run relay:check` | Checks your Relay setup: token, no webhook subscriptions, who has messaged the agent. |
 | `npm run agent` | Runs the Relay agent (WebSocket, daily scheduler, free text through Gemini). `--checkin-now` sends today's check-in right away. |
+| `npm run camera:check -- [--patient id] [--db path]` | Calls her for the camera check now and texts her the estimate (the call-back without a check-in call; needs `uv sync --project ../camera-check` once). |
 | `npm run llm:check` | One live call of each Gemini job, with timings. |
 | `npm run content:eval` | Runs 145 realistic messages (history questions and answers that need the context digest included) through the safety screen and Gemini; writes `docs/content-eval.md`. |
 

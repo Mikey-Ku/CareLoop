@@ -102,6 +102,18 @@ describe("the model's safety reading on a call", () => {
     expect(w.messenger.inChat(SARAH).map((m) => m.text)).toEqual([familyCrisisAlert({ seniorName: "Harriet", sharing: "status" })]);
   });
 
+  it("a call after the day's check-in is over in the chat still goes through all of today's questions", async () => {
+    const w = world();
+    await w.engine.startDay(P, DAY);
+    const today = getCheckin(w.db, P, DAY)!.questionIds;
+    await w.engine.handleInbound({ chatId: ME, messageId: "in_1", text: "Not today", at: NOW });
+    const c = getCheckin(w.db, P, DAY)!;
+    expect(c.finishedAt !== null || c.step === "done").toBe(true); // the chat check-in is over
+    const context = await w.engine.callCheckinContext(P, DAY);
+    expect(context.questions.map((q) => q.id)).toEqual(today);
+    expect(today.length).toBeGreaterThan(0);
+  });
+
   it("instruction-like words still count as nothing read", async () => {
     const w = world();
     await w.engine.callCheckinContext(P, DAY);

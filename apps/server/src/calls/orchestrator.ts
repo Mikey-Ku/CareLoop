@@ -4,7 +4,7 @@ import type { CallCheckinContext } from "../checkin/engine-types.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import type { CallScreeningLlmOutput, CallTurnLlmOutput, LlmClient } from "../llm/types.ts";
 import type { VitalsResult } from "../vitals/types.ts";
-import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, QUIET_COUNTDOWN_SECONDS, QUIET_RETRY_OFFER, callClosing, callFirstMessage, quietCountdown, quietMeasurementRetryPrompt, quietMeasurementPrompt } from "./copy.ts";
+import { CAMERA_CALLBACK_LATER, CAMERA_CALLBACK_OFFER, CAMERA_CALLBACK_SOON, CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, QUIET_COUNTDOWN_SECONDS, QUIET_RETRY_OFFER, callClosing, callFirstMessage, quietCountdown, quietMeasurementRetryPrompt, quietMeasurementPrompt } from "./copy.ts";
 import { emergencyDecision } from "./emergency.ts";
 import type { TranscriptTurn } from "./types.ts";
 
@@ -45,6 +45,12 @@ export type ConversationOrchestratorOptions = {
   beginQuietMeasurement: () => void;
   /** The call ended with no camera offer because canMeasure() said no (not because she declined or it was taken): the service logs why. */
   onCameraOfferSkipped?: () => void;
+  /**
+   * The camera reading is a call-back (src/calls/camera-callback.ts), not a quiet window on this call: the offer
+   * says so, and after her yes the goodbye does too. Called once, as that goodbye starts (not after the emergency
+   * words or her "I have to go"); the call service calls her back once the call is recorded. Absent: the quiet window.
+   */
+  cameraCallBack?: () => void;
   onComplete: (screening?: CallScreeningLlmOutput) => void;
   log?: (event: string, fields?: Record<string, unknown>) => void;
 };
@@ -83,6 +89,10 @@ export class ConversationOrchestrator {
   #measurementDeclined = false;
   /** She said yes and the quiet reading was started: it is never offered or asked for again. */
   #measurementDone = false;
+  /** The offer was the one before the goodbye: her yes to a call-back ends the call. */
+  #offeredAtEnd = false;
+  /** She said yes to the camera check call-back; the goodbye says it is coming. */
+  #callBackAgreed = false;
   #measurementTimer: ReturnType<typeof setTimeout> | undefined;
   #countdownTimer: ReturnType<typeof setInterval> | undefined;
   /** Her FinchNode record, read on the first turn that needs it (see #loadContext). */
@@ -265,7 +275,7 @@ export class ConversationOrchestrator {
     // reassurance, 911 or 988); a sentence that does not is replaced by a fixed one.
     const acknowledgment = guardSpoken(decision.acknowledgment) ?? FALLBACK_ACKNOWLEDGMENT;
     if (decision.nextAction === "ask_follow_up" && decision.nextQuestion) {
-      const question = this.#question(decision.nextQuestion);
+      const question = this.#checkinWording(this.#question(decision.nextQuestion));
       this.#lastQuestion = question;
       if (isRepeatedQuestion(question, this.#options.transcript)) {
         await this.#speak("Thank you. I have that information, so I will ask about the next detail instead. What changed most recently?");
@@ -281,13 +291,25 @@ export class ConversationOrchestrator {
       await this.#speak(`${acknowledgment} ${question}`);
       return;
     }
+    if (decision.nextAction === "complete_screening") {
+      // Gemini finishes when it has enough ("I'm feeling great" can be enough), but the call is a full check-in: each of
+      // today's questions is asked first, in fixed words, before the camera check and the goodbye. Not for the
+      // emergency words or her "I have to go".
+      const next = this.#unaskedQuestion;
+      if (next) {
+        this.#lastQuestion = next;
+        await this.#speak(`${FALLBACK_ACKNOWLEDGMENT} ${next}`);
+        return;
+      }
+    }
     if (decision.nextAction === "complete_screening" && this.#canMeasure) {
       // Gemini has what it needs, but the reading only happens if she is asked, and Gemini asks only
       // sometimes. So the offer is ours: once, in fixed words, before the goodbye. Her answer takes the
       // consent path above; after the reading or her no, the next turn that ends the call says goodbye.
       // Not for end_call: she said she has to go, and gets the goodbye without another question.
       this.#waitingForMeasurementConsent = true;
-      await this.#speak(CAMERA_OFFER_AT_END);
+      this.#offeredAtEnd = true;
+      await this.#speak(this.#options.cameraCallBack ? CAMERA_CALLBACK_OFFER : CAMERA_OFFER_AT_END);
       return;
     }
     if (decision.nextAction === "complete_screening" && this.#needsCameraOn) {
@@ -301,12 +323,7 @@ export class ConversationOrchestrator {
     }
     if (decision.nextAction === "complete_screening" || decision.nextAction === "emergency" || decision.nextAction === "end_call") {
       if (decision.nextAction === "complete_screening" && !this.#measurementDeclined && !this.#measurementDone) this.#options.onCameraOfferSkipped?.();
-      // The screening is stored with the call and runs while the goodbye is spoken; none of its words, and
-      // none of the model's, are ever said. The goodbye or the emergency words are ours (src/calls/copy.ts).
-      const screening = this.#finalScreening();
-      await this.#speak(this.#farewell(decision.nextAction));
-      this.#completed = true;
-      this.#options.onComplete(await screening);
+      await this.#goodbye(decision.nextAction);
       return;
     }
     this.#lastQuestion = undefined;
@@ -320,6 +337,32 @@ export class ConversationOrchestrator {
     const question = this.#question(null);
     this.#lastQuestion = question;
     await this.#speak(`${FALLBACK_ACKNOWLEDGMENT} ${question}`);
+  }
+
+  /**
+   * The screening is stored with the call and runs while the goodbye is spoken; none of its words, and none of
+   * the model's, are ever said. The goodbye or the emergency words are ours (src/calls/copy.ts). A camera check
+   * call-back she agreed to is asked for first, so it still comes if she hangs up during the goodbye.
+   */
+  async #goodbye(action: CallTurnLlmOutput["nextAction"]): Promise<void> {
+    const callBack = action === "complete_screening" && this.#callBackAgreed;
+    if (callBack) this.#options.cameraCallBack?.();
+    const screening = this.#finalScreening();
+    await this.#speak(callBack ? `${CAMERA_CALLBACK_SOON} ${this.#farewell(action)}` : this.#farewell(action));
+    this.#completed = true;
+    this.#options.onComplete(await screening);
+  }
+
+  /** Her yes when the reading is a call-back: before the goodbye it ends the call; earlier in the call she is told, and it goes on. */
+  async #agreeToCallBack(): Promise<void> {
+    this.#measurementDone = true;
+    this.#callBackAgreed = true;
+    if (this.#offeredAtEnd) {
+      await this.#goodbye("complete_screening");
+      return;
+    }
+    await this.#speak(CAMERA_CALLBACK_LATER);
+    await this.#planTurn("screening");
   }
 
   /** From a timer: nothing awaits it, so a failure (she hung up while the call was ending) is logged, never thrown. */
@@ -354,6 +397,7 @@ export class ConversationOrchestrator {
 
   /** She said yes (or ready) to the quiet reading: the prompt, the window, and the readback when it ends. */
   async #startMeasurement(retry = false): Promise<void> {
+    if (this.#options.cameraCallBack) return this.#agreeToCallBack();
     this.#phase = "quiet_measurement";
     this.#measurementDone = true;
     const seconds = Math.round(this.#options.quietMeasurementMs / 1000);
@@ -423,8 +467,27 @@ export class ConversationOrchestrator {
   #question(modelQuestion: string | null): string {
     const safe = modelQuestion ? guardSpoken(modelQuestion) : undefined;
     if (safe) return safe;
-    const next = this.#options.initialContext.questions.find((q) => !isRepeatedQuestion(q.text, this.#options.transcript));
-    return next?.text ?? OPEN_QUESTION;
+    return this.#unaskedQuestion ?? OPEN_QUESTION;
+  }
+
+  /**
+   * The model's question, unless it is one of today's check-in questions: one not asked yet is asked in its fixed words
+   * (so it is asked once, and known to be asked), and one already asked is not asked again (the next one is, or the open
+   * question). It asked "Did you take your morning medications today?" and the call later asked "Did you take your
+   * morning medicines?": she said "I have", then "Yes". Its follow-ups on what she said ("Is the bleeding heavy?") are kept.
+   */
+  #checkinWording(question: string): string {
+    const questions = this.#options.initialContext.questions;
+    const unasked = questions.filter((q) => !askedOnCall(q.text, this.#options.transcript));
+    const about = closestQuestion(question, unasked, 1);
+    if (about) return about.text;
+    if (closestQuestion(question, questions.filter((q) => !unasked.includes(q)), 2)) return unasked[0]?.text ?? OPEN_QUESTION;
+    return question;
+  }
+
+  /** Today's first check-in question not yet asked on this call, in its fixed words or in the model's. */
+  get #unaskedQuestion(): string | undefined {
+    return this.#options.initialContext.questions.find((q) => !askedOnCall(q.text, this.#options.transcript))?.text;
   }
 
   async #loadContext(): Promise<unknown> {
@@ -490,6 +553,55 @@ function isRepeatedQuestion(question: string, transcript: readonly TranscriptTur
   const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   const candidate = normalize(question);
   return transcript.some((turn) => turn.speaker === "agent" && normalize(turn.text).includes(candidate));
+}
+
+/** Words of four letters or more that say little about which question it is ("take" and "morning" too: "take anything for the pain this morning" is not the medicines question). */
+const COMMON_WORDS = new Set([
+  "about", "anything", "been", "chance", "could", "does", "doing", "down", "else", "evening", "feel", "feeling", "felt", "from", "have", "into",
+  "just", "know", "last", "lately", "like", "more", "morning", "much", "night", "notice", "noticed", "please", "really", "recently", "said",
+  "should", "since", "some", "something", "still", "take", "taken", "taking", "tell", "than", "that", "them", "there", "they", "this", "today",
+  "unusual", "usual", "were", "what", "when", "will", "with", "would", "your",
+]);
+
+/** The same thing said another way ("swelling" is "swollen", "meds" are "medicines"), before the first five letters are compared. */
+function sameWord(word: string): string {
+  if (/^(swel|swol)/.test(word)) return "swell";
+  if (/^dizz/.test(word)) return "dizzy";
+  if (word === "meds" || /^(pill|tablet)/.test(word)) return "medic";
+  if (word === "foot") return "feet";
+  return word.slice(0, 5);
+}
+
+/** The telling words of the questions in a sentence or turn ("medicines" and "medication" match). */
+function tellingWords(text: string): Set<string> {
+  return new Set((text.toLowerCase().match(/[a-z]+/g) ?? []).filter((w) => w.length >= 4 && !COMMON_WORDS.has(w)).map(sameWord));
+}
+
+/** The questions an agent turn asks: its sentences that end in a question mark (not the acknowledgment before them). */
+function askedSentences(text: string): string[] {
+  return text.split(/(?<=[.!?])\s+/).filter((s) => s.trim().endsWith("?"));
+}
+
+/** The question among `candidates` that `text` shares the most telling words with: at least `needed`, or all of its own when it has fewer. */
+function closestQuestion<Q extends { text: string }>(text: string, candidates: readonly Q[], needed: number): Q | undefined {
+  const said = tellingWords(text);
+  let best: { q: Q; shared: number } | undefined;
+  for (const q of candidates) {
+    const wanted = tellingWords(q.text);
+    const shared = [...wanted].filter((w) => said.has(w)).length;
+    if (wanted.size > 0 && shared >= Math.min(needed, wanted.size) && shared > (best?.shared ?? 0)) best = { q, shared };
+  }
+  return best?.q;
+}
+
+/**
+ * The agent asked this check-in question on the call: in its fixed words, or a question of the model's sharing two of its
+ * telling words (all of them when it has fewer). A safety net: the model's version of a question not yet asked is replaced
+ * by the fixed words before it is said (#checkinWording).
+ */
+function askedOnCall(question: string, transcript: readonly TranscriptTurn[]): boolean {
+  if (isRepeatedQuestion(question, transcript)) return true;
+  return transcript.some((turn) => turn.speaker === "agent" && askedSentences(turn.text).some((s) => closestQuestion(s, [{ text: question }], 2)));
 }
 
 function summarize(collected: string[], missing: string[], uncertainty: string[]): string {

@@ -27,6 +27,7 @@ import { assertNoWebhookSubscriptions, runRelayInbox } from "./relay/inbox.ts";
 import type { Messenger } from "./relay/messenger.ts";
 import { createRelayClient, type RelayClient, type RelayLog } from "./relay/relay-client.ts";
 import { RelayMessenger } from "./relay/relay-messenger.ts";
+import { runCameraCallback, type CameraCallbackPatient } from "./calls/camera-callback.ts";
 import { CallService } from "./calls/service.ts";
 import { patientIdFor } from "./patient-id.ts";
 import { createDailyScheduler, localDate, zonedInstant, type CancelTimer, type DailyScheduler } from "./scheduler.ts";
@@ -62,6 +63,11 @@ export const MEDS_MORNING_JOB = "meds-morning";
 export const MEDS_EVENING_JOB = "meds-evening";
 export const REFILL_JOB = "refill-check";
 const LINK_POLL_MS = 3_000;
+/**
+ * After the check-in call ends and is recorded, this much longer before the camera check call-back rings: a call
+ * placed 7 s after her call ended was over 2 s later, unanswered (her phone still finishing the first call).
+ */
+const CAMERA_CALLBACK_DELAY_MS = 10_000;
 /** How often the follow-up job runs. */
 export const FOLLOW_UP_POLL_MS = 60_000;
 
@@ -221,6 +227,32 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
     },
   );
 
+  // The camera reading as a call-back (CAMERA_CALLBACK=on): after a call whose goodbye promised it, the agent calls her
+  // again through the Relay Python SDK (apps/camera-check), whose video arrives whole, and Presage reads the recording.
+  const presageApiKey = config.calls.presageApiKey;
+  const cameraCallBack =
+    deps.callRelay && config.calls.cameraCallback && presageApiKey
+      ? async (patient: CameraCallbackPatient) => {
+          await new Promise((resolve) => setTimeout(resolve, CAMERA_CALLBACK_DELAY_MS)); // her phone is done with the first call
+          const outcome = await runCameraCallback(
+            {
+              db,
+              send: async (chatId, text, key) => {
+                await messenger.send(chatId, { text }, key);
+              },
+              minConfidence: config.calls.vitalsMinConfidence,
+              presageApiKey,
+              now: () => dataNow().toISOString(),
+              log: (event, fields) => log(`[camera-check] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`),
+            },
+            patient,
+          );
+          log(`[camera-check] call-back finished: ${outcome}`);
+        }
+      : undefined;
+  if (deps.callRelay && config.calls.cameraCallback) {
+    log(cameraCallBack ? "[agent] camera reading: the camera check call-back (CAMERA_CALLBACK=on)" : "[agent] CAMERA_CALLBACK=on needs PRESAGE_API_KEY; no camera reading on calls");
+  }
   const calls = deps.callRelay
     ? new CallService({
         db,
@@ -233,6 +265,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
         log: (event, fields) => log(`[calls] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`),
         now: () => dataNow().toISOString(),
         wallNow: () => now().toISOString(),
+        ...(cameraCallBack ? { cameraCallBack } : {}),
       })
     : undefined;
 
