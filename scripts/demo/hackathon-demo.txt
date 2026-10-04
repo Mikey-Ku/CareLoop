@@ -1,0 +1,31 @@
+# Offline fallback: synthetic fixtures and explicitly scripted image readings.
+# Start --day 2026-07-28 --sharing all --family sarah with a NEW temporary --db.
+# Text check-in: fixed buttons, calm day, record-backed flag deferred.
+1
+1
+1
+1
+2
+# Morning medicines and memory check use prescription wording.
+/meds
+1
+3
+# Image extraction is simulated; matching and mismatch handling are real.
+/photo fixtures/labels/apixaban-5mg.png --as label:Apixaban,5 mg,Take 1 tablet by mouth twice daily
+/photo fixtures/labels/apixaban-2-5mg.png --as label:Apixaban,2.5 mg,Take 1 tablet by mouth twice daily
+# July date deliberately exercises the apixaban refill window.
+/refills
+3
+# Camera stand-in, never a live call or accuracy claim.
+/reading 72
+/from sarah I'll call you after lunch. Love you!
+/day 2026-07-30
+# Two days later: ankles No, urgent breathing, bleeding No, then improvement.
+1
+1
+3
+1
+/later
+1
+/db
+/quit
