@@ -278,10 +278,12 @@ export class CallService implements CallEventHandler {
       transport.on("trackUnsubscribed", () => { videoOn = false; });
       transport.on("remoteVideo", (enabled) => { videoOn = enabled; });
       // She may talk over the assistant, but a cough, a noise or her first "hello?" must not cut it off mid-word.
-      // The greeting (it says this is an AI) and a fixed safety reply are never interrupted; after them it
-      // takes two real words (isBargeIn).
+      // It takes two real words (isBargeIn). Those also mean a reply Gemini is still planning is out of date
+      // (noteSpeech). The greeting (it says this is an AI) and a fixed safety reply are never interrupted.
       stt.onPartial((text) => {
-        if (tts.isSpeaking && active.conversation?.greeted && active.safetyLevel < 4 && isBargeIn(text)) tts.cancel();
+        if (!isBargeIn(text)) return;
+        active.conversation?.noteSpeech();
+        if (tts.isSpeaking && active.conversation?.greeted && active.safetyLevel < 4) tts.cancel();
       });
       stt.onCommitted((text) => this.#onPatientTranscript(active, text));
       const elapsedSinceRinging = call.ringing_at ? Date.parse(this.#wallNow()) - Date.parse(call.ringing_at) : 0;

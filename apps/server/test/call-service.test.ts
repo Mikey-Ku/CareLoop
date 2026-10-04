@@ -14,7 +14,7 @@ import { openDatabase, upsertPatient, type Db } from "../src/db/index.ts";
 import { loadConfig } from "../src/config.ts";
 import { loadRxNavCache, loadSnapshot } from "../src/finchnode/fixtures.ts";
 import { FakeLlmClient } from "../src/llm/fake.ts";
-import type { CallTurnLlmOutput } from "../src/llm/types.ts";
+import type { CallTurnLlmInput, CallTurnLlmOutput } from "../src/llm/types.ts";
 import { FakeMessenger } from "../src/relay/fake-messenger.ts";
 
 const PATIENT = "harriet";
@@ -267,6 +267,49 @@ describe("her talking over the assistant", () => {
     expect(tts.cancel).not.toHaveBeenCalled();
     endReply();
     await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+  });
+});
+
+describe("a reply Gemini is still planning when she keeps talking", () => {
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  /** Gemini's planning is held until the test releases each call. */
+  const slowGemini = () => {
+    const inputs: CallTurnLlmInput[] = [];
+    const releases: ((output: CallTurnLlmOutput) => void)[] = [];
+    llm.callTurn = (input) => new Promise<CallTurnLlmOutput>((resolve) => { inputs.push(input); releases.push(resolve); });
+    return { inputs, releases };
+  };
+  const asks = (question: string) => modelPlan({ nextAction: "ask_follow_up", nextQuestion: question });
+
+  it("is dropped when she says more, and her next turn answers everything she said", async () => {
+    const service = setup();
+    await start(service);
+    const { inputs, releases } = slowGemini();
+    stt.emit("My ankles are a bit swollen.");
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    stt.emitPartial("and I have also been"); // two real words: she is talking again
+    releases[0]!(asks("When did the swelling start?"));
+    await settle();
+    expect(tts.spoken).toHaveLength(1); // only the greeting
+    stt.emit("and I have also been very tired.");
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases[1]!(asks("How long have you felt tired?"));
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toContain("How long have you felt tired?"));
+    expect(inputs[1]!.transcript.filter((turn) => turn.speaker === "patient").map((turn) => turn.text)).toEqual(["My ankles are a bit swollen.", "and I have also been very tired."]);
+    expect(tts.spoken.join(" ")).not.toContain("swelling start");
+    await service.end("call-1");
+  });
+
+  it("is still spoken when all she made was noise, a cough or a lone word", async () => {
+    const service = setup();
+    await start(service);
+    const { releases } = slowGemini();
+    stt.emit("My ankles are a bit swollen.");
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    for (const noise of ["(coughs)", "hm", "[noise]", "(laughs softly"]) stt.emitPartial(noise);
+    releases[0]!(asks("When did the swelling start?"));
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toContain("When did the swelling start?"));
+    await service.end("call-1");
   });
 });
 

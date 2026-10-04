@@ -45,6 +45,8 @@ export class ConversationOrchestrator {
   #lastQuestion: string | undefined;
   #started = false;
   #greeted = false;
+  /** Moves when she adds to what she said (a newer turn is queued, or she starts speaking again): see #stale. */
+  #turnSeq = 0;
   #completed = false;
   #waitingForMeasurementConsent = false;
   #measurementDeclined = false;
@@ -92,7 +94,8 @@ export class ConversationOrchestrator {
   }
 
   handlePatientTurn(text: string): Promise<void> {
-    this.#queue = this.#queue.then(() => this.#handlePatientTurn(text)).catch(async (error) => {
+    const seq = text.trim() ? ++this.#turnSeq : this.#turnSeq;
+    this.#queue = this.#queue.then(() => this.#handlePatientTurn(text, seq)).catch(async (error) => {
       this.#log("call_turn_failed", { error: summary(error) });
       if (this.#completed) return; // the call is over: nobody to speak to
       try {
@@ -106,12 +109,21 @@ export class ConversationOrchestrator {
     return this.#queue;
   }
 
+  /**
+   * She started speaking again (the call service calls this when a partial transcript has two real words).
+   * Whatever Gemini is still planning for her earlier words is out of date: its reply is dropped, and her
+   * next committed turn answers everything she said.
+   */
+  noteSpeech(): void {
+    this.#turnSeq += 1;
+  }
+
   close(): void {
     this.#completed = true;
     clearTimeout(this.#measurementTimer);
   }
 
-  async #handlePatientTurn(text: string): Promise<void> {
+  async #handlePatientTurn(text: string, seq: number): Promise<void> {
     if (this.#completed || !text.trim()) return;
     // Keep transcription/audit of speech during the quiet window, but don't break the measurement or
     // make Gemini talk over the patient. The complete transcript is reconsidered after the window.
@@ -140,11 +152,21 @@ export class ConversationOrchestrator {
       await this.#speak(`Of course. ${this.#lastQuestion ?? "How are you feeling today?"}`);
       return;
     }
-    await this.#planTurn(this.#phase);
+    await this.#planTurn(this.#phase, seq);
   }
 
-  async #planTurn(interviewPhase: "interview" | "quiet_measurement" | "screening"): Promise<void> {
-    if (this.#completed) return;
+  /**
+   * Turns are queued, so a second committed transcript (a slow speaker pausing mid-sentence) would wait for
+   * the first turn's whole Gemini call and spoken reply, and the reply would answer half of what she said.
+   * A turn is stale once she has added to it since it was queued: it is dropped without a word and without
+   * touching the summary or the last question, and the newer turn runs with everything she said.
+   */
+  #stale(seq: number | undefined): boolean {
+    return seq !== undefined && seq !== this.#turnSeq;
+  }
+
+  async #planTurn(interviewPhase: "interview" | "quiet_measurement" | "screening", seq?: number): Promise<void> {
+    if (this.#completed || this.#stale(seq)) return;
     const llm = this.#options.llm;
     if (!llm?.callTurn) {
       await this.#speak("Thank you for telling me. I have noted what you shared, and a human member of your care team can review it.");
@@ -171,7 +193,7 @@ export class ConversationOrchestrator {
       canMeasure: this.#canMeasure,
       interviewPhase: interviewPhase === "quiet_measurement" ? "screening" : interviewPhase,
     });
-    if (this.#completed) return;
+    if (this.#completed || this.#stale(seq)) return;
     this.#summary = summarize(decision.informationCollected, decision.missingInformation, decision.uncertainty);
     this.#lastQuestion = decision.nextQuestion ?? undefined;
     if (decision.nextAction === "ask_follow_up" && decision.nextQuestion) {

@@ -5,7 +5,7 @@ import { ConversationOrchestrator, type ConversationOrchestratorOptions } from "
 import { crisisReply, urgentReply } from "../src/checkin/copy.ts";
 import { loadSnapshot } from "../src/finchnode/fixtures.ts";
 import { FakeLlmClient } from "../src/llm/fake.ts";
-import type { CallScreeningLlmOutput, CallTurnLlmOutput } from "../src/llm/types.ts";
+import type { CallScreeningLlmOutput, CallTurnLlmInput, CallTurnLlmOutput } from "../src/llm/types.ts";
 import type { TranscriptTurn } from "../src/calls/types.ts";
 
 const plan = (overrides: Partial<CallTurnLlmOutput> = {}): CallTurnLlmOutput => ({
@@ -530,5 +530,81 @@ describe("ConversationOrchestrator: her record is read once per call", () => {
     expect(first).toEqual({ unavailable: true });
     expect(JSON.stringify(second)).toContain("conditions");
     expect(third).toEqual(second);
+  });
+});
+
+describe("ConversationOrchestrator: a reply is dropped when she has added to what she said", () => {
+  /** Gemini's planning is held until the test releases each call; the inputs it was asked with are kept. */
+  function slowGemini() {
+    const inputs: CallTurnLlmInput[] = [];
+    const releases: ((output: CallTurnLlmOutput) => void)[] = [];
+    const llm = new FakeLlmClient();
+    llm.callTurn = (input) => new Promise<CallTurnLlmOutput>((resolve) => { inputs.push(input); releases.push(resolve); });
+    return { llm, inputs, releases };
+  }
+  const asks = (question: string, extra: Partial<CallTurnLlmOutput> = {}) => plan({ nextAction: "ask_follow_up", nextQuestion: question, ...extra });
+  const patientWords = (input: CallTurnLlmInput) => input.transcript.filter((turn) => turn.speaker === "patient").map((turn) => turn.text);
+
+  it("a newer transcript queued while Gemini plans the first: its reply is dropped, nothing of it is kept, and the newer turn answers both", async () => {
+    const { llm, inputs, releases } = slowGemini();
+    const { spoken, say } = buildFlow(llm);
+    const first = say("My ankles are a bit swollen.");
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    const second = say("And I have been very tired lately.");
+    releases[0]!(asks("When did the swelling start?", { informationCollected: ["ankle swelling"] }));
+    await first;
+    expect(spoken).toEqual([]);
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases[1]!(asks("How long have you felt tired?"));
+    await second;
+    expect(spoken).toEqual(["Thank you for telling me. How long have you felt tired?"]);
+    expect(patientWords(inputs[1]!)).toEqual(["My ankles are a bit swollen.", "And I have been very tired lately."]);
+    expect(inputs[1]!.lastQuestionAsked).toBeUndefined(); // the dropped reply's question was not remembered
+    expect(inputs[1]!.conversationSummary).not.toContain("ankle swelling"); // nor what it collected
+  });
+
+  it("she starts speaking again while Gemini plans: that reply is dropped and her next turn answers everything", async () => {
+    const { llm, inputs, releases } = slowGemini();
+    const { flow, spoken, say } = buildFlow(llm);
+    const first = say("My ankles are a bit swollen.");
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    flow.noteSpeech();
+    releases[0]!(asks("When did the swelling start?"));
+    await first;
+    expect(spoken).toEqual([]);
+    const second = say("and my back hurts too");
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases[1]!(asks("Where in your back?"));
+    await second;
+    expect(spoken).toEqual(["Thank you for telling me. Where in your back?"]);
+    expect(patientWords(inputs[1]!)).toEqual(["My ankles are a bit swollen.", "and my back hurts too"]);
+  });
+
+  it("a queued turn made stale before Gemini was asked is skipped, so the newest one is not kept waiting", async () => {
+    const { llm, inputs, releases } = slowGemini();
+    const { flow, spoken, say } = buildFlow(llm);
+    const first = say("My ankles are a bit swollen.");
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    const second = say("It started on Monday.");
+    flow.noteSpeech(); // and she is talking again
+    releases[0]!(asks("When did the swelling start?"));
+    await first;
+    await second;
+    expect(releases).toHaveLength(1); // Gemini was not asked for the second turn
+    const third = say("and it is worse today");
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases[1]!(asks("Is it worse in the evening?"));
+    await third;
+    expect(spoken).toEqual(["Thank you for telling me. Is it worse in the evening?"]);
+    expect(patientWords(inputs[1]!)).toEqual(["My ankles are a bit swollen.", "It started on Monday.", "and it is worse today"]);
+  });
+
+  it("speech before her turn is committed does not drop it: the turn is newer than the speech", async () => {
+    const llm = new FakeLlmClient({ callTurn: () => asks("When did it start?") });
+    const { flow, spoken, say } = buildFlow(llm);
+    flow.noteSpeech();
+    flow.noteSpeech();
+    await say("My ankles are a bit swollen.");
+    expect(spoken).toEqual(["Thank you for telling me. When did it start?"]);
   });
 });
