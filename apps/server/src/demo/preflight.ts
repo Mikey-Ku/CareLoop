@@ -5,7 +5,7 @@ import { FIXTURES_DIR, REPO_ROOT, loadSnapshot, loadRxNavCache } from "../finchn
 
 export type Readiness = "ready" | "degraded" | "missing";
 export type PreflightResult = { status: Readiness; exitCode: number; lines: string[] };
-export type PreflightOptions = { nodeVersion?: string; fixturesDir?: string; engine?: string };
+export type PreflightOptions = { nodeVersion?: string; fixturesDir?: string; engine?: string; packagePath?: string };
 
 /** Presence and local assets only: never authenticates, sends messages, or opens a database. */
 export function checkDemoSetup(env: Record<string, string | undefined>, options: PreflightOptions = {}): PreflightResult {
@@ -16,7 +16,20 @@ export function checkDemoSetup(env: Record<string, string | undefined>, options:
   const optional = (text: string) => { degraded = true; lines.push(`[optional] ${text}`); };
   const ok = (text: string) => lines.push(`[ok] ${text}`);
   const version = options.nodeVersion ?? process.versions.node;
-  const engine = options.engine ?? (JSON.parse(readFileSync(join(REPO_ROOT, "apps/server/package.json"), "utf8")) as { engines: { node: string } }).engines.node;
+  let engine: string;
+  try {
+    if (options.engine !== undefined) engine = options.engine;
+    else {
+      const metadata: unknown = JSON.parse(readFileSync(options.packagePath ?? join(REPO_ROOT, "apps/server/package.json"), "utf8"));
+      if (typeof metadata !== "object" || metadata === null || !("engines" in metadata)) throw new Error("invalid metadata");
+      const engines = metadata.engines;
+      if (typeof engines !== "object" || engines === null || !("node" in engines) || typeof engines.node !== "string") throw new Error("invalid engine");
+      engine = engines.node;
+    }
+  } catch {
+    fail("Server package metadata is missing or invalid; restore apps/server/package.json");
+    return result();
+  }
   if (supportsNode(version, engine)) ok(`Node ${version} meets ${engine}`);
   else fail(`Node must satisfy ${engine}; install a supported Node version before running the demo`);
 
