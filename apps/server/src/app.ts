@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import express from "express";
 import type { ErrorRequestHandler, Express, RequestHandler } from "express";
 import type { Config } from "./config.ts";
@@ -12,7 +13,9 @@ export type AppDeps = {
   calls?: {
     screen(callId: string): Promise<unknown>;
     beginQuietMeasurement(callId: string, permissionGranted: boolean): Promise<unknown>;
-    toolSecret?: string;
+    /** After the quiet minute: the heart rate as a camera estimate and the ladder's line, as fixed copy. */
+    vitalsReadback?(callId: string): Promise<{ status: string; patientResponseText: string }>;
+    toolSecret?: string | undefined;
   };
   /** Where server-side errors are reported. Never receives request bodies or secrets. */
   logError?: (line: string) => void;
@@ -56,7 +59,7 @@ function callToolRouter(calls: NonNullable<AppDeps["calls"]>): express.Router {
   router.use((req, res, next) => {
     const expected = calls.toolSecret;
     const received = req.header("authorization")?.replace(/^Bearer\s+/i, "");
-    if (!expected || received !== expected) {
+    if (!expected || received === undefined || !sameSecret(received, expected)) {
       res.status(401).json({ error: "unauthorized" });
       return;
     }
@@ -69,8 +72,9 @@ function callToolRouter(calls: NonNullable<AppDeps["calls"]>): express.Router {
       return;
     }
     try {
-      const result = await calls.screen(callId) as { patientResponseText?: unknown };
-      res.json({ patientResponseText: typeof result.patientResponseText === "string" ? result.patientResponseText : "A member of your care team will review what you shared." });
+      // Only the fixed words she hears; the level and everything else stay on the server.
+      const result = (await calls.screen(callId)) as { patientResponseText?: unknown };
+      res.json({ patientResponseText: typeof result.patientResponseText === "string" && result.patientResponseText ? result.patientResponseText : "Thank you for telling me." });
     } catch (error) {
       next(error);
     }
@@ -88,7 +92,30 @@ function callToolRouter(calls: NonNullable<AppDeps["calls"]>): express.Router {
       next(error);
     }
   });
+  router.post("/vitals-result", async (req, res, next) => {
+    const callId = typeof req.body?.callId === "string" ? req.body.callId.trim() : "";
+    if (!callId) {
+      res.status(400).json({ error: "callId_required" });
+      return;
+    }
+    if (!calls.vitalsReadback) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    try {
+      const result = await calls.vitalsReadback(callId);
+      res.json({ status: result.status, patientResponseText: result.patientResponseText });
+    } catch (error) {
+      next(error);
+    }
+  });
   return router;
+}
+
+/** Constant-time comparison of the tool secret (hashed first, so lengths never leak through timing). */
+function sameSecret(received: string, expected: string): boolean {
+  const digest = (s: string) => createHash("sha256").update(s, "utf8").digest();
+  return timingSafeEqual(digest(received), digest(expected));
 }
 
 /**

@@ -1,4 +1,4 @@
-import { breathingMetrics, cardioMetrics, MetricType, ProcessingStatus, SmartSpectraSDK } from "@smartspectra/node-sdk";
+import { MetricType, ProcessingStatus, SmartSpectraSDK } from "@smartspectra/node-sdk";
 import { decodeMetrics } from "@smartspectra/node-sdk/messages";
 import { mergeMetricSnapshots, normalizePresageMetrics, resultFromSnapshot } from "./normalize.ts";
 import { emptyVitalsResult, type VitalsError, type VitalsResult, type ValidationEvent } from "./types.ts";
@@ -18,12 +18,10 @@ export type PresageSdkFactory = (options: { apiKey: string; requestedMetrics: nu
 
 const defaultSdkFactory: PresageSdkFactory = (options) => new SmartSpectraSDK(options);
 
-export type PresageMetricProfile = "pulse-breathing" | "all";
+/** Pulse and breathing only: blood pressure and HRV are never requested (docs/BRIEF.md constraints). */
+export type PresageMetricProfile = "pulse-breathing";
 
-const requestedMetricsFor = (profile: PresageMetricProfile): number[] =>
-  profile === "pulse-breathing"
-    ? [MetricType.BREATHING_RATE, MetricType.PULSE_RATE]
-    : [...breathingMetrics, ...cardioMetrics];
+const requestedMetricsFor = (_profile: PresageMetricProfile): number[] => [MetricType.BREATHING_RATE, MetricType.PULSE_RATE];
 
 export type PresageFileOptions = {
   videoPath: string;
@@ -31,7 +29,7 @@ export type PresageFileOptions = {
   timeoutMs?: number;
   /** Defaults to 33 ms so remote model loading can finish before a short clip ends. */
   interframeDelayMs?: number;
-  /** Defaults to the full breathing + cardio bundle. */
+  /** Pulse and breathing (the only profile). */
   metricProfile?: PresageMetricProfile;
   sdkFactory?: PresageSdkFactory;
 };
@@ -62,7 +60,7 @@ export async function runPresageVideo(options: PresageFileOptions): Promise<Vita
   try {
     session = (options.sdkFactory ?? defaultSdkFactory)({
       apiKey,
-      requestedMetrics: requestedMetricsFor(options.metricProfile ?? "all"),
+      requestedMetrics: requestedMetricsFor(options.metricProfile ?? "pulse-breathing"),
     });
     session.on("metrics", (buffer, timestampUs) => {
       try {
@@ -118,6 +116,7 @@ export async function runPresageVideo(options: PresageFileOptions): Promise<Vita
   return resultFromSnapshot("video_file", snapshot, validation, errors, { timestampOriginMs });
 }
 
+/** A heart rate came back (breathing is reported when present, but it isn't required). */
 export function hasUsableVitals(result: VitalsResult): boolean {
-  return result.heartRate !== null && result.breathingRate !== null;
+  return result.heartRate !== null;
 }

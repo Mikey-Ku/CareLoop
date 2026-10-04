@@ -212,7 +212,16 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   );
 
   const calls = deps.callRelay
-    ? new CallService({ db, config, relay: deps.callRelay, loadSnapshot: deps.loadSnapshot, ...(deps.llm ? { llm: deps.llm } : {}), log: (event, fields) => log(`[calls] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`), now: () => now().toISOString() })
+    ? new CallService({
+        db,
+        config,
+        relay: deps.callRelay,
+        loadSnapshot: deps.loadSnapshot,
+        engine,
+        today: () => config.clockDate ?? localDate(now(), timezone),
+        log: (event, fields) => log(`[calls] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`),
+        now: () => now().toISOString(),
+      })
     : undefined;
 
   // 4. WebSocket delivery needs zero webhook subscriptions.
@@ -314,7 +323,16 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   const server = await listen(
     createApp({
       config,
-      ...(calls ? { calls: { screen: (callId) => calls.screen(callId), beginQuietMeasurement: (callId, permissionGranted) => calls.beginQuietMeasurement(callId, permissionGranted), toolSecret: config.calls.elevenLabsToolSecret } } : {}),
+      ...(calls
+        ? {
+            calls: {
+              screen: (callId) => calls.screen(callId),
+              beginQuietMeasurement: (callId, permissionGranted) => calls.beginQuietMeasurement(callId, permissionGranted),
+              vitalsReadback: (callId) => calls.vitalsReadback(callId),
+              toolSecret: config.calls.elevenLabsToolSecret,
+            },
+          }
+        : {}),
     }),
     deps.port ?? config.port,
   );

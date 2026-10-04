@@ -245,7 +245,7 @@ type ContextPacket = {
 };
 ```
 
-For calls, the packet goes to ElevenLabs as dynamic variables through the bridge's `initiationData` (`conversation_initiation_client_data`).
+For calls, only what the check-in uses goes to ElevenLabs as dynamic variables through the bridge's `initiationData` (`conversation_initiation_client_data`): her first name, today's unanswered questions, yesterday's level 1+ topics, up to 3 memories and family names (`docs/CALLS.md`). The rest of the packet stays on the server; the usual range is read only for the heart-rate read-back.
 
 ## Database (SQLite)
 
