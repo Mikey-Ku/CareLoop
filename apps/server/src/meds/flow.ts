@@ -5,6 +5,7 @@ import {
   familyMedsNotConfirmed,
   familyRefillNotice,
   familyRelayWaiting,
+  labelDirectionsDiffer,
   labelMatchReply,
   labelNotOnList,
   labelSaysLine,
@@ -74,7 +75,7 @@ import { looksLikeInstructions } from "../safety/injection.ts";
 import { MAX_REFILL_REMINDERS_PER_DAY, longDay, shortDay, type RefillDue } from "./refills.ts";
 import { addDays } from "../days.ts";
 import { paperChangeFor, unresolvedPaperChanges } from "./paper-notes.ts";
-import { labelInstructions, medicineWords, medsForSlot, memoryCandidates, plainName, strengthWords, type ScheduledMedication } from "./schedule.ts";
+import { labelInstructions, medicineWords, medsForSlot, memoryCandidates, plainName, readSig, strengthWords, type ScheduledMedication } from "./schedule.ts";
 
 /**
  * After a label photo that doesn't match, her visit list gets a question in her words ("A medicine label I
@@ -106,9 +107,10 @@ export function isLabelPhotoQuestion(text: string): boolean {
 // Hospital papers (src/meds/paper-notes.ts): while an R6 discrepancy is unresolved, a medicine her papers say
 // was stopped or changed gets paperChangeNote after its words in the reminder, the memory check and a
 // matching label photo. It stays on her list; nothing tells her to stop it.
-// Label photos: matched with her list by ingredient and strength (src/rules/paper-diff.ts helpers).
-// A mismatch or an unknown medicine goes on her visit list and is a level-2 "medicine check"
-// observation for her doctor; no family alert.
+// Label photos: matched with her list by ingredient and strength (src/rules/paper-diff.ts helpers), then
+// the label's directions against her prescription's (count, times, as needed). A mismatch or an unknown
+// medicine goes on her visit list and is a level-2 "medicine check" observation for her doctor; no
+// family alert.
 //
 // A typed button label is the check-in's when the check-in's own step shows that label ("Not yet" is
 // also a morning-medicines answer); a tap names its message (med_prompts), so it always lands here.
@@ -215,13 +217,21 @@ export function paperFromReading(p: DischargePaperReading): ExtractedPaper {
 export type LabelResult =
   | { outcome: "match"; med: Medication; instructions: string | undefined; from: "label" | "list"; reply: string }
   | { outcome: "strength_differs"; med: Medication; labelStrength: string; reply: string }
+  | { outcome: "directions_differ"; med: Medication; labelWords: string; listWords: string; reply: string }
   | { outcome: "not_on_list"; reply: string }
   | { outcome: "unreadable"; reply: string };
 
+/** Whether two sets of directions say the same count, times of day and "as needed" (SIG_RULES). */
+function sameDirections(a: string, b: string): boolean {
+  const [x, y] = [readSig(a), readSig(b)];
+  return x.count?.n === y.count?.n && x.count?.unit === y.count?.unit && x.asNeeded === y.asNeeded && x.slots.join() === y.slots.join();
+}
+
 /**
- * A photographed label against her active medicines: same ingredient and strength is a match; same
- * ingredient at another strength is a mismatch; no such ingredient is not on her list; low confidence,
- * no name or no strength read is unreadable. Pure.
+ * A photographed label against her active medicines: same ingredient and strength is a match, unless
+ * the label's directions differ from her prescription's; same ingredient at another strength is a
+ * mismatch; no such ingredient is not on her list; low confidence, no name or no strength read is
+ * unreadable. Pure.
  */
 export function checkLabel(label: MedicineLabelReading, active: readonly Medication[]): LabelResult {
   const unreadable: LabelResult = { outcome: "unreadable", reply: labelUnreadable() };
@@ -234,7 +244,10 @@ export function checkLabel(label: MedicineLabelReading, active: readonly Medicat
   const same = matches.find((m) => sameStrength(labelStrength, m.strength) === true);
   if (same) {
     const fromLabel = labelWordsFromPhoto(label.instructions);
-    const instructions = fromLabel ?? labelInstructions(same.sig);
+    const listWords = labelInstructions(same.sig);
+    if (fromLabel && listWords && !sameDirections(fromLabel, listWords))
+      return { outcome: "directions_differ", med: same, labelWords: fromLabel, listWords, reply: labelDirectionsDiffer(plainName(same), fromLabel, listWords) };
+    const instructions = fromLabel ?? listWords;
     const from = fromLabel ? "label" : "list";
     return { outcome: "match", med: same, instructions, from, reply: labelMatchReply(plainName(same), instructions, from) };
   }
@@ -504,14 +517,16 @@ export function createMedsFlow(deps: { db: Db; clock: Clock; hooks: MedsHooks; o
       at: { day: string; checkinId: number | null },
     ): { sends: MedSend[]; outcome: LabelOutcome } {
       const result = checkLabel(label, active);
+      // Directions that differ are stored as a match (medicine and strength are on her list); the visit question below carries them.
+      const outcome: LabelOutcome = result.outcome === "directions_differ" ? "match" : result.outcome;
       const now = clock.now();
       if (!labelCheckFor(db, patient.id, attachmentId)) {
         const labelName = typeof label.medicineName === "string" ? safeName(label.medicineName) : "";
         insertLabelCheck(db, {
           patientId: patient.id,
           attachmentId,
-          outcome: result.outcome,
-          medicationKey: result.outcome === "match" || result.outcome === "strength_differs" ? result.med.key : null,
+          outcome,
+          medicationKey: "med" in result ? result.med.key : null,
           labelMedicine: labelName || null,
           labelStrength: strengthWords(label.strength) ?? null,
           createdAt: now,
@@ -520,6 +535,8 @@ export function createMedsFlow(deps: { db: Db; clock: Clock; hooks: MedsHooks; o
         if (result.outcome === "strength_differs") {
           const list = strengthWords(result.med.strength) ?? "another strength";
           question = `${LABEL_PHOTO_QUESTION} says ${medicineWords(result.med.name)} ${result.labelStrength}, but my medication list has ${list}. Which is right?`;
+        } else if (result.outcome === "directions_differ") {
+          question = `${LABEL_PHOTO_QUESTION} for ${plainName(result.med)} says "${result.labelWords}", but my medication list says "${result.listWords}". Which is right?`;
         } else if (result.outcome === "not_on_list") {
           question = `${LABEL_PHOTO_QUESTION}${labelName ? ` (${labelName})` : ""} isn't on my medication list. Should it be?`;
         }
@@ -539,7 +556,7 @@ export function createMedsFlow(deps: { db: Db; clock: Clock; hooks: MedsHooks; o
       }
       const chatId = patient.relayChatId;
       const reply = result.outcome === "match" ? withPaperNote(result.reply, paperNote(patient.id, result.med)) : result.reply;
-      return { outcome: result.outcome, sends: chatId ? [{ chatId, message: { text: reply }, key: `${patient.id}:photo:${attachmentId}:label` }] : [] };
+      return { outcome, sends: chatId ? [{ chatId, message: { text: reply }, key: `${patient.id}:photo:${attachmentId}:label` }] : [] };
     },
   };
 }

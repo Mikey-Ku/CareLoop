@@ -54,11 +54,17 @@ export function planNudge(db: Db, id: number, dueAt: string): boolean {
   return db.prepare(`UPDATE med_doses SET nudge_due_at = ? WHERE id = ? AND nudge_due_at IS NULL`).run(dueAt, id).changes === 1;
 }
 
-/** Re-reminders due by `now` whose dose is still "not yet". */
+/** How late a re-reminder may still go out (the agent was down). Later, it is dropped: hours on, it could prompt a dose next to the next one. */
+const NUDGE_LATE_MINUTES = 60;
+
+/** Re-reminders due by `now`, at most NUDGE_LATE_MINUTES ago, whose dose is still "not yet". */
 export function dueNudges(db: Db, now: string): DoseRow[] {
+  const oldest = new Date(Date.parse(now) - NUDGE_LATE_MINUTES * 60_000).toISOString();
   return db
-    .prepare(`SELECT ${DOSE_COLUMNS} FROM med_doses WHERE nudge_due_at IS NOT NULL AND nudged_at IS NULL AND nudge_due_at <= ? AND status = 'not_yet' ORDER BY nudge_due_at, id`)
-    .all(now) as DoseRow[];
+    .prepare(
+      `SELECT ${DOSE_COLUMNS} FROM med_doses WHERE nudge_due_at IS NOT NULL AND nudged_at IS NULL AND nudge_due_at <= ? AND nudge_due_at >= ? AND status = 'not_yet' ORDER BY nudge_due_at, id`,
+    )
+    .all(now, oldest) as DoseRow[];
 }
 
 /** The next re-reminder still to come (the simulator's /later). */
