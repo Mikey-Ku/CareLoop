@@ -69,6 +69,7 @@ export type CallServiceOptions = {
   transportFactory?: (relay: Relay, callId: string) => RelayCallTransport;
   sttFactory?: (options: ConstructorParameters<typeof ElevenLabsRealtimeStt>[0]) => ElevenLabsRealtimeStt;
   ttsFactory?: (transport: RelayCallTransport, options: ConstructorParameters<typeof ElevenLabsTts>[1]) => ElevenLabsTts;
+  bridgeFactory?: (transport: RelayCallTransport, options: ConstructorParameters<typeof RelayPresageBridge>[1]) => RelayPresageBridge;
 };
 
 type ActiveCall = {
@@ -270,6 +271,12 @@ export class CallService implements CallEventHandler {
       });
       transport.on("error", (error) => this.#log("call_transport_error", { call_id: call.id, error: summary(error) }));
       transport.on("ended", () => void this.end(call.id));
+      // Whether her camera is on, from the transport's own events (the Presage bridge listens to the same
+      // ones). The camera reading is only offered while it is: an audio-only call is never asked.
+      let videoOn = Boolean(transport.remoteVideoTrack);
+      transport.on("trackSubscribed", () => { videoOn = true; });
+      transport.on("trackUnsubscribed", () => { videoOn = false; });
+      transport.on("remoteVideo", (enabled) => { videoOn = enabled; });
       stt.onPartial((text) => {
         if (text.trim() && tts.isSpeaking) tts.cancel();
       });
@@ -289,7 +296,7 @@ export class CallService implements CallEventHandler {
         clearTimeout(connectTimer);
       }
       active.bridge = calls.presageApiKey
-        ? new RelayPresageBridge(transport, {
+        ? (this.#options.bridgeFactory ?? ((target, options) => new RelayPresageBridge(target, options)))(transport, {
             apiKey: calls.presageApiKey,
             quietDurationMs: calls.quietMeasurementMs,
             minConfidence: calls.vitalsMinConfidence,
@@ -307,7 +314,7 @@ export class CallService implements CallEventHandler {
         llm: this.#options.llm,
         loadSnapshot: this.#options.loadSnapshot,
         getVitals: () => active.bridge?.result() ?? emptyCallVitals(),
-        canMeasure: Boolean(active.bridge),
+        canMeasure: () => Boolean(active.bridge) && videoOn,
         quietMeasurementMs: calls.quietMeasurementMs,
         speak: (text) => tts.speak(text),
         beforeGreeting: async () => {

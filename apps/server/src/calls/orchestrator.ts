@@ -17,7 +17,11 @@ export type ConversationOrchestratorOptions = {
   llm?: LlmClient;
   loadSnapshot: (subject: string) => Promise<HealthRecord>;
   getVitals: () => VitalsResult;
-  canMeasure: boolean;
+  /**
+   * Whether the camera reading is possible right now, asked on every turn: Presage is configured and her
+   * video is on (the call service watches the transport). An audio-only call, or a camera turned off, gets no offer.
+   */
+  canMeasure: () => boolean;
   quietMeasurementMs: number;
   speak: (text: string) => Promise<void>;
   /**
@@ -212,9 +216,9 @@ export class ConversationOrchestrator {
     await this.#options.speak(spoken);
   }
 
-  /** The camera reading is possible, she hasn't said no, and it hasn't been taken: so it can be offered, and never twice. */
+  /** The camera reading is possible now, she hasn't said no, and it hasn't been taken: so it can be offered, and never twice. */
   get #canMeasure(): boolean {
-    return this.#options.canMeasure && !this.#measurementDeclined && !this.#measurementDone;
+    return this.#options.canMeasure() && !this.#measurementDeclined && !this.#measurementDone;
   }
 
   /**

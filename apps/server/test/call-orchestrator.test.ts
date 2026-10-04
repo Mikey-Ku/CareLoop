@@ -37,7 +37,7 @@ describe("ConversationOrchestrator", () => {
       llm,
       loadSnapshot: async (subject) => loadSnapshot(subject),
       getVitals: emptyCallVitals,
-      canMeasure: false,
+      canMeasure: () => false,
       quietMeasurementMs: 30_000,
       speak: async (text) => { spoken.push(text); },
       recordAgentTurn: (text) => transcript.push({ speaker: "agent", text }),
@@ -79,7 +79,7 @@ describe("ConversationOrchestrator", () => {
       llm,
       loadSnapshot: async (subject) => loadSnapshot(subject),
       getVitals: emptyCallVitals,
-      canMeasure: false,
+      canMeasure: () => false,
       quietMeasurementMs: 30_000,
       speak: async (text) => { spoken.push(text); },
       recordAgentTurn: (text) => transcript.push({ speaker: "agent", text }),
@@ -114,7 +114,7 @@ describe("ConversationOrchestrator", () => {
       llm,
       loadSnapshot: async (subject) => loadSnapshot(subject),
       getVitals: emptyCallVitals,
-      canMeasure: true,
+      canMeasure: () => true,
       quietMeasurementMs: 30_000,
       speak: async (text) => { spoken.push(text); },
       recordAgentTurn: (text) => transcript.push({ speaker: "agent", text }),
@@ -152,7 +152,7 @@ describe("ConversationOrchestrator: repeats and the end of the call", () => {
       llm,
       loadSnapshot: async (subject) => loadSnapshot(subject),
       getVitals: emptyCallVitals,
-      canMeasure: false,
+      canMeasure: () => false,
       quietMeasurementMs: 30_000,
       speak: async (text) => { spoken.push(text); },
       recordAgentTurn: (text) => transcript.push({ speaker: "agent", text }),
@@ -222,7 +222,7 @@ function buildFlow(llm: FakeLlmClient, overrides: Partial<ConversationOrchestrat
     llm,
     loadSnapshot: async (subject) => loadSnapshot(subject),
     getVitals: emptyCallVitals,
-    canMeasure: false,
+    canMeasure: () => false,
     quietMeasurementMs: 30_000,
     speak: async (text) => { spoken.push(text); },
     recordAgentTurn: (text) => transcript.push({ speaker: "agent", text }),
@@ -309,7 +309,7 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
 
   it.each(["complete_screening", "end_call"] as const)("%s: asks first, in fixed words, and does not hang up until she answers", async (nextAction) => {
     const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction }) });
-    const { spoken, onComplete, beginQuietMeasurement, say } = buildFlow(llm, { canMeasure: true });
+    const { spoken, onComplete, beginQuietMeasurement, say } = buildFlow(llm, { canMeasure: () => true });
     await say("I have had a bit of a cough.");
     expect(spoken).toEqual([CAMERA_OFFER_AT_END]);
     expect(onComplete).not.toHaveBeenCalled();
@@ -319,7 +319,7 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
 
   it("an answer that is neither yes nor no asks again and still does not hang up", async () => {
     const llm = new FakeLlmClient({ callTurn: () => plan() });
-    const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: true });
+    const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: () => true });
     await say("I have had a bit of a cough.");
     await say("What is it for?");
     expect(spoken).toEqual([CAMERA_OFFER_AT_END, ASK_AGAIN]);
@@ -329,7 +329,7 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
   it("yes: runs the quiet measurement, reads it back, then the fixed goodbye; it is not offered a second time", async () => {
     vi.useFakeTimers();
     const llm = new FakeLlmClient({ callTurn: () => plan() });
-    const { flow, spoken, onComplete, beginQuietMeasurement, say } = buildFlow(llm, { canMeasure: true });
+    const { flow, spoken, onComplete, beginQuietMeasurement, say } = buildFlow(llm, { canMeasure: () => true });
     await say("I have had a bit of a cough.");
     await say("Yes, please.");
     expect(beginQuietMeasurement).toHaveBeenCalledOnce();
@@ -345,7 +345,7 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
 
   it("no: says the decline line, takes no measurement, and the next turn that ends the call says the fixed goodbye", async () => {
     const llm = new FakeLlmClient({ callTurn: () => plan() });
-    const { spoken, onComplete, beginQuietMeasurement, say } = buildFlow(llm, { canMeasure: true });
+    const { spoken, onComplete, beginQuietMeasurement, say } = buildFlow(llm, { canMeasure: () => true });
     await say("I have had a bit of a cough.");
     await say("No thanks.");
     expect(beginQuietMeasurement).not.toHaveBeenCalled();
@@ -354,9 +354,23 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
     expect(turnInputs(llm).map((input) => input.canMeasure)).toEqual([true, false]);
   });
 
+  it("asks whether the reading is possible afresh on every turn: a camera turned off before the goodbye gets no offer", async () => {
+    let videoOn = true;
+    const llm = new FakeLlmClient({ callTurn: (input) => (input.canMeasure ? plan({ nextAction: "ask_follow_up", nextQuestion: "When did it start?" }) : plan()) });
+    const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: () => videoOn });
+    await say("My ankles are a bit swollen.");
+    expect(spoken).toEqual(["Thank you for telling me. When did it start?"]);
+    videoOn = false;
+    await say("Since Monday.");
+    expect(spoken.at(-1)).toBe(callClosing("Harriet"));
+    expect(offers(spoken)).toBe(0);
+    expect(onComplete).toHaveBeenCalledOnce();
+    expect(turnInputs(llm).map((input) => input.canMeasure)).toEqual([true, false]);
+  });
+
   it("is not offered when the camera reading is not possible", async () => {
     const llm = new FakeLlmClient({ callTurn: () => plan() });
-    const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: false });
+    const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: () => false });
     await say("I have had a bit of a cough.");
     expect(spoken).toEqual([callClosing("Harriet")]);
     expect(onComplete).toHaveBeenCalledOnce();
@@ -364,7 +378,7 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
 
   it("is not offered when she already said no to Gemini's own request for it", async () => {
     const llm = new FakeLlmClient({ callTurn: (input) => (input.canMeasure ? plan({ nextAction: "request_measurement_permission", nextQuestion: "Would you like a quiet camera estimate?" }) : plan()) });
-    const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: true });
+    const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: () => true });
     await say("I have had a bit of a cough.");
     await say("No.");
     expect(spoken).toEqual(["Thank you for telling me. Would you like a quiet camera estimate?", DECLINE, callClosing("Harriet")]);
@@ -375,7 +389,7 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
   it("is not offered when the reading was already taken at Gemini's own request", async () => {
     vi.useFakeTimers();
     const llm = new FakeLlmClient({ callTurn: (input) => (input.interviewPhase === "screening" ? plan() : plan({ nextAction: "request_measurement_permission", nextQuestion: "Would you like a quiet camera estimate?" })) });
-    const { flow, spoken, onComplete, say } = buildFlow(llm, { canMeasure: true });
+    const { flow, spoken, onComplete, say } = buildFlow(llm, { canMeasure: () => true });
     await say("I have had a bit of a cough.");
     await say("Yes.");
     await vi.advanceTimersByTimeAsync(30_500);
@@ -387,7 +401,7 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
 
   it("is never offered in an emergency: she hears the fixed reply and the call ends", async () => {
     const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction: "emergency" }) });
-    const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: true });
+    const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: () => true });
     await say("I feel a bit odd today.");
     expect(spoken).toEqual([urgentReply("Harriet")]);
     expect(onComplete).toHaveBeenCalledOnce();
