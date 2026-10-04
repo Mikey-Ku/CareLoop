@@ -12,6 +12,7 @@ import {
   redFlagAdvice,
   smallTalkFallback,
   typedReplyUnavailable,
+  urgentReply,
   withLead,
   withTypingHint,
 } from "../src/checkin/copy.ts";
@@ -536,14 +537,25 @@ describe("small talk (nothing pending)", () => {
     expect(llm?.calls).toEqual([]);
   });
 
-  it("while a paper read-back waits for her, free text is left alone", async () => {
+  const paper: ExtractedPaper = { kind: "discharge", date: "2026-08-30", medications: [{ name: "aspirin", strength: "81 mg", change: "stopped" }], synthetic: true };
+
+  it("while a paper read-back waits for her, free text is read as plain chat", async () => {
     setup({ smallTalk: () => chat("Hello.") });
-    const paper: ExtractedPaper = { kind: "discharge", date: "2026-08-30", medications: [{ name: "aspirin", strength: "81 mg", change: "stopped" }], synthetic: true };
     await engine.startPaperCheck(P, paper, "att_1");
-    expect(await say("what is this?")).toEqual([]);
-    expect(llm?.calls).toEqual([]);
+    expect(brief(await say("what is this?"))).toEqual([msg(ME, "Hello.")]);
     // Her tap on the read-back still works.
     expect((await say(PAPER_CONFIRM_BUTTONS[1]!))[0]?.text).toMatch(/Thank you for checking/);
+  });
+
+  it("a read-back sent after the check-in's question: typed text is still read, so the model's urgent reading gets 911 now", async () => {
+    setup({ classifyMessage: () => ({ kind: "urgent_symptom", confidence: "high", complaints: [], memories: [] }) });
+    await atBreathing();
+    now = `${DAY1}T09:05:00.000Z`;
+    await engine.startPaperCheck(P, paper, "att_1");
+    now = `${DAY1}T09:06:00.000Z`;
+    const sent = await say("My heart is pounding and I think I'm about to pass out");
+    expect(sent.map((m) => m.chatId)).toEqual([ME, FAMILY]);
+    expect(sent[0]!.text).toBe(urgentReply("Harriet", ["Sarah"]));
   });
 
   it("a replayed message id never calls the LLM again", async () => {

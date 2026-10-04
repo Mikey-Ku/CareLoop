@@ -233,7 +233,7 @@ import {
 // reminder (med_prompts), the paper check, the sharing menu, or a family member's words passed on
 // (src/relay/family-inbound.ts; a label typed after them counts too). A check-in whose latest prompt is older than
 // another waiting prompt doesn't take it: a follow-up gets it as before, "I have a question" makes it her
-// medicine question (fixed reply, visit_questions), a paper check leaves it alone, and anything else reads
+// medicine question (fixed reply, visit_questions), and anything else (the paper check too) reads
 // it as plain chat with nothing pending (then the check-in's step again). On a tie the check-in keeps it.
 // A waiting_prompts row waits for one typed message and closes once one is planned. Taps (replyTo) still
 // go to their own message, labels to whoever shows them, and the safety screen still runs first.
@@ -1664,7 +1664,6 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (c && newest && newest.kind !== "checkin") {
       // Something was sent after anything the check-in asked: her words are not the check-in's.
       if (newest.kind === "follow_up") return planTyped(patient, msg, { at: "follow_up", f: newest.f }, typed);
-      if (newest.kind === "paper") return { sends: [] }; // left alone, as with no check-in
       // Plain chat with nothing pending, then the check-in's step again so she can carry on (not after a safety reply).
       const planned = planTyped(patient, msg, { at: "none" }, typed);
       if ("needs" in planned) return planned;
@@ -1674,8 +1673,8 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     }
 
     if (!c) {
-      // Nothing pending: a late tap (one of our labels) or a paper check waiting for her is left alone.
-      if (isButtonLabel(msg.text) || pendingReadback(db, patient.id) || pendingPaperFollowUp(db, patient.id)) return { sends: [] };
+      // Nothing pending: a late tap (one of our labels) is left alone.
+      if (isButtonLabel(msg.text)) return { sends: [] };
       // An open follow-up takes typed text unless something newer waits (then it is plain chat).
       const f = newest ? (newest.kind === "follow_up" ? newest.f : undefined) : openFollowUp(db, patient.id);
       return planTyped(patient, msg, f ? { at: "follow_up", f } : { at: "none" }, typed);
