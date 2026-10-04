@@ -1,7 +1,8 @@
 import { crisisReply, urgentReply } from "../checkin/copy.ts";
+import { guardSpoken } from "../context/guard.ts";
 import type { CallCheckinContext } from "../checkin/engine-types.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
-import type { CallScreeningLlmOutput, LlmClient } from "../llm/types.ts";
+import type { CallScreeningLlmOutput, CallTurnLlmOutput, LlmClient } from "../llm/types.ts";
 import type { VitalsResult } from "../vitals/types.ts";
 import { CAMERA_OFFER_AT_END, callClosing, callFirstMessage, quietMeasurementPrompt } from "./copy.ts";
 import { emergencyDecision } from "./emergency.ts";
@@ -35,6 +36,12 @@ export type ConversationOrchestratorOptions = {
   onComplete: (screening?: CallScreeningLlmOutput) => void;
   log?: (event: string, fields?: Record<string, unknown>) => void;
 };
+
+/** Said in place of the model's acknowledgment when it may not be said (src/context/guard.ts guardSpoken). */
+const FALLBACK_ACKNOWLEDGMENT = "Thank you for telling me.";
+/** Asked when the model's question may not be said and no unanswered check-in question is left. */
+const OPEN_QUESTION = "Is there anything else you would like to tell me about how you are feeling?";
+const CAMERA_QUESTION = "Would you be comfortable taking a quiet camera measurement?";
 
 /** Stateful, one-question-at-a-time conversation planner for direct STT/TTS calls. */
 export class ConversationOrchestrator {
@@ -99,7 +106,9 @@ export class ConversationOrchestrator {
     const seq = text.trim() ? ++this.#turnSeq : this.#turnSeq;
     this.#queue = this.#queue.then(() => this.#handlePatientTurn(text, seq)).catch(async (error) => {
       this.#log("call_turn_failed", { error: summary(error) });
-      if (this.#completed) return; // the call is over: nobody to speak to
+      // The call is over (nobody to speak to), or she has said more since (the newer turn answers, and an apology
+      // for the old one would talk over it).
+      if (this.#completed || this.#stale(seq)) return;
       try {
         await this.#speak("I am sorry, I did not catch that clearly. Please tell me once more.");
       } catch (speechError) {
@@ -198,19 +207,24 @@ export class ConversationOrchestrator {
     });
     if (this.#completed || this.#stale(seq)) return;
     this.#summary = summarize(decision.informationCollected, decision.missingInformation, decision.uncertainty);
-    this.#lastQuestion = decision.nextQuestion ?? undefined;
+    // What the model wrote is said only if it passes the output guard (no dosing, instructions, diagnosis,
+    // reassurance, 911 or 988); a sentence that does not is replaced by a fixed one.
+    const acknowledgment = guardSpoken(decision.acknowledgment) ?? FALLBACK_ACKNOWLEDGMENT;
     if (decision.nextAction === "ask_follow_up" && decision.nextQuestion) {
-      if (isRepeatedQuestion(decision.nextQuestion, this.#options.transcript)) {
+      const question = this.#question(decision.nextQuestion);
+      this.#lastQuestion = question;
+      if (isRepeatedQuestion(question, this.#options.transcript)) {
         await this.#speak("Thank you. I have that information, so I will ask about the next detail instead. What changed most recently?");
         return;
       }
-      await this.#speak(`${decision.acknowledgment} ${decision.nextQuestion}`);
+      await this.#speak(`${acknowledgment} ${question}`);
       return;
     }
     if ((decision.nextAction === "request_measurement_permission" || decision.nextAction === "start_quiet_measurement") && this.#canMeasure) {
       this.#waitingForMeasurementConsent = true;
-      const question = decision.nextQuestion ?? "Would you be comfortable taking a quiet camera measurement?";
-      await this.#speak(`${decision.acknowledgment} ${question}`);
+      const question = (decision.nextQuestion && guardSpoken(decision.nextQuestion)) || CAMERA_QUESTION;
+      this.#lastQuestion = question;
+      await this.#speak(`${acknowledgment} ${question}`);
       return;
     }
     if (decision.nextAction === "complete_screening" && this.#canMeasure) {
@@ -226,13 +240,22 @@ export class ConversationOrchestrator {
       // The screening is stored with the call and runs while the goodbye is spoken; none of its words, and
       // none of the model's, are ever said. The goodbye or the emergency words are ours (src/calls/copy.ts).
       const screening = this.#finalScreening();
-      await this.#speak(decision.nextAction === "emergency" ? this.#emergencyWords() : callClosing(this.#options.firstName, this.#options.initialContext.familyNames));
+      await this.#speak(this.#farewell(decision.nextAction));
       this.#completed = true;
       this.#options.onComplete(await screening);
       return;
     }
-    const spoken = decision.patientResponseText.trim();
-    if (spoken) await this.#speak(spoken);
+    this.#lastQuestion = undefined;
+    const reply = decision.patientResponseText.trim();
+    if (!reply) return;
+    const spoken = guardSpoken(reply);
+    if (spoken) {
+      await this.#speak(spoken);
+      return;
+    }
+    const question = this.#question(null);
+    this.#lastQuestion = question;
+    await this.#speak(`${FALLBACK_ACKNOWLEDGMENT} ${question}`);
   }
 
   async #afterMeasurement(): Promise<void> {
@@ -258,14 +281,28 @@ export class ConversationOrchestrator {
   }
 
   /**
-   * What she hears when Gemini declares an emergency: the text check-in's fixed replies, 988 for a crisis
-   * (the fixed screen over her turns decides, never the model) and 911 otherwise. Nobody has been told yet,
-   * so they are asked for with an empty family list and claim no alert. (Without the list they would say "I've
-   * let your family know".) The ladder after the call decides who is alerted.
+   * What she hears as the call ends. Gemini's "emergency" alone does not make her hear 911 or 988: those words
+   * are said only when the fixed screen over her turns hits too (the call service runs it on every turn and
+   * speaks the same replies itself, so this is the rare second look). 988 for a crisis, 911 otherwise, with an
+   * empty family list so they claim no alert: nobody has been told yet. Without a hit the call ends with the
+   * goodbye, and the ladder after the call, where the model's reading can raise the level, decides who is
+   * told, in fixed words as well. (Without the empty list the replies say "I've let your family know".)
    */
-  #emergencyWords(): string {
-    const crisis = (emergencyDecision(this.#options.transcript)?.level ?? 0) >= 5;
-    return crisis ? crisisReply(this.#options.firstName, []) : urgentReply(this.#options.firstName, []);
+  #farewell(action: CallTurnLlmOutput["nextAction"]): string {
+    if (action === "emergency") {
+      const rule = emergencyDecision(this.#options.transcript);
+      if (rule) return rule.level >= 5 ? crisisReply(this.#options.firstName, []) : urgentReply(this.#options.firstName, []);
+      this.#log("call_model_emergency_unconfirmed");
+    }
+    return callClosing(this.#options.firstName, this.#options.initialContext.familyNames);
+  }
+
+  /** The question to ask: the model's if it passes the guard, else the next unanswered check-in question not yet asked, else an open one. */
+  #question(modelQuestion: string | null): string {
+    const safe = modelQuestion ? guardSpoken(modelQuestion) : undefined;
+    if (safe) return safe;
+    const next = this.#options.initialContext.questions.find((q) => !isRepeatedQuestion(q.text, this.#options.transcript));
+    return next?.text ?? OPEN_QUESTION;
   }
 
   async #loadContext(): Promise<unknown> {

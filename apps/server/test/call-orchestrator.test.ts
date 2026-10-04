@@ -282,14 +282,25 @@ describe("ConversationOrchestrator: the end of the call is fixed words", () => {
     expect(onComplete).toHaveBeenCalledWith(undefined);
   });
 
-  it("emergency: she hears the text check-in's fixed 911 reply, never the model's words", async () => {
+  it("emergency, and the fixed screen agrees: she hears the text check-in's fixed 911 reply, never the model's words", async () => {
     const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction: "emergency", patientResponseText: "Please lie down and rest, and keep an eye on it." }), screenCall: () => screening });
     const { spoken, onComplete, say } = buildFlow(llm, { initialContext: { firstName: "Harriet", questions: [], yesterday: [], memories: [], familyNames: ["Sarah"] } });
-    await say("I feel a bit odd today.");
+    await say("I have chest pain right now.");
     expect(spoken).toEqual(["Harriet, if this is happening now, please call 911 right away. After that, call your doctor."]);
     expect(spoken).toEqual([urgentReply("Harriet", [])]);
     expect(spoken[0]).not.toMatch(/I've let|family|Sarah|lie down|keep an eye/); // nobody has been told yet: no claim that anyone was
     expect(onComplete).toHaveBeenCalledWith(screening);
+  });
+
+  it("emergency declared by Gemini alone: no 911, no 988; the fixed goodbye, the screening kept, and it is logged", async () => {
+    const events: string[] = [];
+    const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction: "emergency", patientResponseText: "Please call 911 now." }), screenCall: () => screening });
+    const { spoken, onComplete, say } = buildFlow(llm, { log: (event) => events.push(event), initialContext: { firstName: "Harriet", questions: [], yesterday: [], memories: [], familyNames: ["Sarah"] } });
+    await say("I feel a bit odd today.");
+    expect(spoken).toEqual([callClosing("Harriet", ["Sarah"])]);
+    expect(spoken[0]).not.toMatch(/911|988/);
+    expect(onComplete).toHaveBeenCalledWith(screening); // what the model read is still stored, for the ladder after the call
+    expect(events).toContain("call_model_emergency_unconfirmed");
   });
 
   it("emergency after a crisis phrase: the fixed 988 reply, chosen by the fixed screen and not by the model", async () => {
@@ -444,8 +455,16 @@ describe("ConversationOrchestrator: the camera reading is offered before the goo
   it("is never offered in an emergency: she hears the fixed reply and the call ends", async () => {
     const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction: "emergency" }) });
     const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: () => true });
-    await say("I feel a bit odd today.");
+    await say("I have chest pain right now.");
     expect(spoken).toEqual([urgentReply("Harriet", [])]);
+    expect(onComplete).toHaveBeenCalledOnce();
+  });
+
+  it("nor after an emergency only Gemini declared: the goodbye, without the offer", async () => {
+    const llm = new FakeLlmClient({ callTurn: () => plan({ nextAction: "emergency" }) });
+    const { spoken, onComplete, say } = buildFlow(llm, { canMeasure: () => true });
+    await say("I feel a bit odd today.");
+    expect(spoken).toEqual([callClosing("Harriet")]);
     expect(onComplete).toHaveBeenCalledOnce();
   });
 });
@@ -580,9 +599,10 @@ describe("ConversationOrchestrator: a reply is dropped when she has added to wha
   function slowGemini() {
     const inputs: CallTurnLlmInput[] = [];
     const releases: ((output: CallTurnLlmOutput) => void)[] = [];
+    const rejects: ((error: Error) => void)[] = [];
     const llm = new FakeLlmClient();
-    llm.callTurn = (input) => new Promise<CallTurnLlmOutput>((resolve) => { inputs.push(input); releases.push(resolve); });
-    return { llm, inputs, releases };
+    llm.callTurn = (input) => new Promise<CallTurnLlmOutput>((resolve, reject) => { inputs.push(input); releases.push(resolve); rejects.push(reject); });
+    return { llm, inputs, releases, rejects };
   }
   const asks = (question: string, extra: Partial<CallTurnLlmOutput> = {}) => plan({ nextAction: "ask_follow_up", nextQuestion: question, ...extra });
   const patientWords = (input: CallTurnLlmInput) => input.transcript.filter((turn) => turn.speaker === "patient").map((turn) => turn.text);
@@ -641,6 +661,50 @@ describe("ConversationOrchestrator: a reply is dropped when she has added to wha
     expect(patientWords(inputs[1]!)).toEqual(["My ankles are a bit swollen.", "It started on Monday.", "and it is worse today"]);
   });
 
+  const APOLOGY = "I am sorry, I did not catch that clearly. Please tell me once more.";
+
+  it("a Gemini call that fails after she started speaking again does not apologise: her next turn answers", async () => {
+    const { llm, releases, rejects } = slowGemini();
+    const { flow, spoken, say } = buildFlow(llm);
+    const first = say("My ankles are a bit swollen.");
+    await vi.waitFor(() => expect(rejects).toHaveLength(1));
+    flow.noteSpeech();
+    rejects[0]!(new Error("Gemini timed out"));
+    await first;
+    expect(spoken).toEqual([]);
+    const second = say("and my back hurts too");
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases[1]!(asks("Where in your back?"));
+    await second;
+    expect(spoken).toEqual(["Thank you for telling me. Where in your back?"]);
+  });
+
+  it("a Gemini call that fails while a newer transcript is queued does not apologise for the old one", async () => {
+    const { llm, releases, rejects } = slowGemini();
+    const { spoken, say } = buildFlow(llm);
+    const first = say("My ankles are a bit swollen.");
+    await vi.waitFor(() => expect(rejects).toHaveLength(1));
+    const second = say("It started on Monday.");
+    rejects[0]!(new Error("Gemini timed out"));
+    await first;
+    expect(spoken).toEqual([]);
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases[1]!(asks("Is it worse in the evening?"));
+    await second;
+    expect(spoken).toEqual(["Thank you for telling me. Is it worse in the evening?"]);
+  });
+
+  it("a Gemini call that fails with nothing newer still apologises, once", async () => {
+    const { llm, rejects } = slowGemini();
+    const { spoken, onComplete, say } = buildFlow(llm);
+    const first = say("My ankles are a bit swollen.");
+    await vi.waitFor(() => expect(rejects).toHaveLength(1));
+    rejects[0]!(new Error("Gemini timed out"));
+    await first;
+    expect(spoken).toEqual([APOLOGY]);
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
   it("speech before her turn is committed does not drop it: the turn is newer than the speech", async () => {
     const llm = new FakeLlmClient({ callTurn: () => asks("When did it start?") });
     const { flow, spoken, say } = buildFlow(llm);
@@ -648,5 +712,79 @@ describe("ConversationOrchestrator: a reply is dropped when she has added to wha
     flow.noteSpeech();
     await say("My ankles are a bit swollen.");
     expect(spoken).toEqual(["Thank you for telling me. When did it start?"]);
+  });
+});
+
+describe("ConversationOrchestrator: what the model writes is checked before it is said", () => {
+  const OPEN = "Is there anything else you would like to tell me about how you are feeling?";
+  const BREATHING = "How was your breathing last night when you lay down?";
+  const asks = (question: string, extra: Partial<CallTurnLlmOutput> = {}) => plan({ nextAction: "ask_follow_up", nextQuestion: question, ...extra });
+  const withQuestions = (...questions: string[]) => ({ firstName: "Harriet", questions: questions.map((text, i) => ({ id: `q${i}`, text })), yesterday: [], memories: [], familyNames: [] });
+
+  it("says a clean acknowledgment and question as written", async () => {
+    const llm = new FakeLlmClient({ callTurn: () => asks("When did the swelling start?", { acknowledgment: "I am sorry the swelling is bothering you." }) });
+    const { spoken, say } = buildFlow(llm);
+    await say("My ankles are swollen.");
+    expect(spoken).toEqual(["I am sorry the swelling is bothering you. When did the swelling start?"]);
+  });
+
+  it.each([
+    "That is nothing to worry about.",
+    "You should take your pills with food.",
+    "It sounds like heart failure.",
+    "If it gets worse, call 911.",
+    "It would be wise to contact your clinician today.",
+    "That could be a sign of fluid in your lungs.",
+  ])("an acknowledgment that gives advice, reassurance or a diagnosis is replaced: %s", async (acknowledgment) => {
+    const llm = new FakeLlmClient({ callTurn: () => asks("When did the swelling start?", { acknowledgment }) });
+    const { spoken, say } = buildFlow(llm);
+    await say("My ankles are swollen.");
+    expect(spoken).toEqual(["Thank you for telling me. When did the swelling start?"]);
+  });
+
+  it("a question that gives advice is replaced by the next unanswered check-in question, and 'what did you ask?' says that one", async () => {
+    const llm = new FakeLlmClient({ callTurn: () => asks("Have you thought about talking to your doctor about the swelling?") });
+    const { spoken, say } = buildFlow(llm, { initialContext: withQuestions(BREATHING) });
+    await say("My ankles are swollen.");
+    expect(spoken).toEqual([`Thank you for telling me. ${BREATHING}`]);
+    await say("Sorry, what did you ask?");
+    expect(spoken.at(-1)).toBe(`Of course. ${BREATHING}`);
+    expect(spoken.join(" ")).not.toMatch(/doctor/);
+  });
+
+  it("with no unanswered question left, or one already asked, it asks the open question", async () => {
+    const llm = new FakeLlmClient({ callTurn: () => asks("You should call your nurse. Do you agree?") });
+    const none = buildFlow(llm);
+    await none.say("My ankles are swollen.");
+    expect(none.spoken).toEqual([`Thank you for telling me. ${OPEN}`]);
+
+    const asked = buildFlow(llm, { initialContext: withQuestions(BREATHING) });
+    asked.transcript.push({ speaker: "agent", text: BREATHING });
+    await asked.say("My ankles are swollen.");
+    expect(asked.spoken).toEqual([`Thank you for telling me. ${OPEN}`]);
+  });
+
+  it("a reply that gives reassurance is not said: a thank-you and a question instead; a clean one is said as written", async () => {
+    const reassuring = new FakeLlmClient({ callTurn: () => plan({ nextAction: "start_quiet_measurement", patientResponseText: "Don't worry, it's nothing serious. Let's keep going." }) });
+    const a = buildFlow(reassuring, { initialContext: withQuestions(BREATHING) });
+    await a.say("My ankles are swollen.");
+    expect(a.spoken).toEqual([`Thank you for telling me. ${BREATHING}`]);
+
+    const clean = new FakeLlmClient({ callTurn: () => plan({ nextAction: "start_quiet_measurement", patientResponseText: "Let's keep going. Tell me a little more." }) });
+    const b = buildFlow(clean);
+    await b.say("My ankles are swollen.");
+    expect(b.spoken).toEqual(["Let's keep going. Tell me a little more."]);
+  });
+
+  it("the camera request: the model's question must pass too, else the fixed one is asked", async () => {
+    const unsafe = new FakeLlmClient({ callTurn: () => plan({ nextAction: "request_measurement_permission", nextQuestion: "May I check your heart rate to see whether you have atrial fibrillation? It is probably an infection." }) });
+    const a = buildFlow(unsafe, { canMeasure: () => true });
+    await a.say("My heart feels fluttery.");
+    expect(a.spoken).toEqual(["Thank you for telling me. Would you be comfortable taking a quiet camera measurement?"]);
+
+    const clean = new FakeLlmClient({ callTurn: () => plan({ nextAction: "request_measurement_permission", nextQuestion: "Would you like to try a quiet camera measurement now?" }) });
+    const b = buildFlow(clean, { canMeasure: () => true });
+    await b.say("My heart feels fluttery.");
+    expect(b.spoken).toEqual(["Thank you for telling me. Would you like to try a quiet camera measurement now?"]);
   });
 });
