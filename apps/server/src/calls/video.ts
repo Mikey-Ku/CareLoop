@@ -68,6 +68,8 @@ export class RelayPresageBridge {
   readonly #loopDelay = monitorEventLoopDelay({ resolution: 20 });
   #restartTask: Promise<void> | undefined;
   #inputStarted = false;
+  /** The frame size this SmartSpectra session has been fed. A different size inside one session aborts the whole process in its tracker (OpenCV), so the session is restarted first. */
+  #sessionSize: string | undefined;
   #stopped = false;
   #speechActive = false;
   /** Telemetry for the quiet window, logged every few seconds and when it is cut short: counts and average colour, never pixels. */
@@ -233,6 +235,7 @@ export class RelayPresageBridge {
       this.#session.start();
       this.#log("call_presage_restarted", { stop_ms: stopMs, start_ms: Math.round(performance.now() - t1) });
       this.#inputStarted = false;
+      this.#sessionSize = undefined;
     }).catch((error) => {
       this.#errors.push({ code: "presage_restart", message: error instanceof Error ? error.message : String(error) });
       this.#interruptMeasurement("presage_restart");
@@ -269,7 +272,7 @@ export class RelayPresageBridge {
    * The video paused for longer than SmartSpectra tolerates, or sendFrame threw: it refuses every frame until
    * it is restarted. Restart it and re-base the pulse warm-up; the window stays open and counting.
    */
-  #recover(reason: "video_gap" | "sdk_error", fields: Record<string, unknown>, nowMs: number): void {
+  #recover(reason: "video_gap" | "sdk_error" | "frame_size_changed", fields: Record<string, unknown>, nowMs: number): void {
     if (this.quiet.status !== "measuring") return;
     if (this.#restarts >= MAX_WINDOW_RESTARTS) {
       this.#interruptMeasurement("video_gap_repeated", { trigger: reason, ...fields });
@@ -377,6 +380,12 @@ export class RelayPresageBridge {
         this.#log("call_video_frame_rejected", { reason: "unsupported_format", format: frame.type });
         continue;
       }
+      const size = `${frame.width}x${frame.height}`;
+      if (this.#sessionSize !== undefined && size !== this.#sessionSize) {
+        // The phone changed resolution mid-window (it often starts at 720p and steps up). Never hand that to the same session.
+        this.#recover("frame_size_changed", { from: this.#sessionSize, to: size }, nowMs);
+        continue;
+      }
       let result: FrameSendResult;
       try {
         result = this.#adapter.send({
@@ -404,6 +413,7 @@ export class RelayPresageBridge {
         continue;
       }
       this.#inputStarted = true;
+      this.#sessionSize = size;
       if (this.#lastFrameWallMs === undefined) {
         clearTimeout(this.#firstFrameTimer);
         if (this.#restarts === 0) this.#log("call_video_first_frame", { begin_to_first_frame_ms: nowMs - this.#beganMs });
