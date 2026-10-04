@@ -22,11 +22,24 @@ export function quietMeasurementPrompt(durationSeconds = 30): string {
 
 export const QUIET_MINUTE_PROMPT = quietMeasurementPrompt();
 
+/** Gemini would end the call and the camera reading is possible: offered once, in these words, before the goodbye. She answers yes or no. */
+export const CAMERA_OFFER_AT_END = "Before we finish, would you like to try a quiet camera measurement? You can say yes or no.";
+
 /** The goodbye: points her to her family, by name when we know them. */
 export function callClosing(name: string, familyNames: readonly string[] = []): string {
   const names = familyNames.map((n) => n.trim()).filter(Boolean);
   const who = names.length > 0 ? andList(names) : "someone you're close to";
   return `Thank you for talking with me, ${name}. Maybe give ${who} a call today. Take care.`;
+}
+
+/**
+ * Her speech can no longer be heard (the transcription connection was lost and would not come back): said once,
+ * then the call ends. Like the goodbye it points her to her family, by name when we know them.
+ */
+export function cantHearYou(name: string, familyNames: readonly string[] = []): string {
+  const names = familyNames.map((n) => n.trim()).filter(Boolean);
+  const who = names.length > 0 ? andList(names) : "someone you're close to";
+  return `I'm sorry, ${name}. I can't hear you well right now. Please give ${who} a call, and we can talk again soon. Take care.`;
 }
 
 /** The voice's fixed answer to a medicine question; her question is added to her list for the next visit after the call. */
@@ -138,9 +151,12 @@ export function callCopySamples(name = "Harriet"): { level: number; text: string
   const samples: { level: number; text: string }[] = [
     { level: 0, text: callFirstMessage(name) },
     { level: 0, text: QUIET_MINUTE_PROMPT },
+    { level: 0, text: CAMERA_OFFER_AT_END },
     { level: 0, text: MEDICINE_QUESTION_REPLY },
     { level: 0, text: callClosing(name, ["Sarah"]) },
     { level: 0, text: callClosing(name) },
+    { level: 0, text: cantHearYou(name, ["Sarah"]) },
+    { level: 0, text: cantHearYou(name) },
     { level: 0, text: wrongCallerDecline() },
     { level: 0, text: heartRateReadback({ heartRate: 72, breathingRate: 14 }, { compareHeartRate: true, heartRate: { low: 65, high: 91, readings: 10 } }) },
     { level: 0, text: heartRateReadback({ heartRate: 120 }, { compareHeartRate: true, heartRate: { low: 65, high: 91, readings: 10 } }) },

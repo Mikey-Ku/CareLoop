@@ -1,13 +1,21 @@
 import type { Call, CallWebhookEvent } from "@relaymessenger/sdk";
 import type { RelayCallTransport } from "@relaymessenger/sdk/calls";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { CallService } from "../src/calls/service.ts";
+import type { ElevenLabsRealtimeStt, ElevenLabsTts } from "../src/calls/audio.ts";
+import { CAMERA_OFFER_AT_END, callClosing, cantHearYou } from "../src/calls/copy.ts";
+import { emptyCallVitals } from "../src/calls/screening.ts";
+import { CallService, type CallEngine } from "../src/calls/service.ts";
+import { createCheckinEngine } from "../src/checkin/engine.ts";
+import { crisisReply, urgentReply } from "../src/checkin/copy.ts";
 import { callTranscript, getCallSession } from "../src/db/calls.ts";
+import { getCheckinPatient } from "../src/db/checkins.ts";
+import { linkFamilyMember, syncFamilyMembers } from "../src/db/family.ts";
 import { openDatabase, upsertPatient, type Db } from "../src/db/index.ts";
 import { loadConfig } from "../src/config.ts";
-import { loadSnapshot } from "../src/finchnode/fixtures.ts";
+import { loadRxNavCache, loadSnapshot } from "../src/finchnode/fixtures.ts";
 import { FakeLlmClient } from "../src/llm/fake.ts";
-import type { CallTurnLlmOutput } from "../src/llm/types.ts";
+import type { CallTurnLlmInput, CallTurnLlmOutput } from "../src/llm/types.ts";
+import { FakeMessenger } from "../src/relay/fake-messenger.ts";
 
 const PATIENT = "harriet";
 const DATE = "2026-10-04";
@@ -32,9 +40,12 @@ const created = (call: Call) => ({ event_type: "call.created", event_id: `event-
 
 class FakeTransport {
   readonly listeners = new Map<string, ((...args: any[]) => void)[]>();
-  readonly writeAudio = vi.fn(async () => {});
+  readonly writeAudio = vi.fn(async (_frame: { samples: Int16Array; sampleRate: number; channelCount: number }) => {});
   readonly clearAudio = vi.fn();
   readonly waitForPlayout = vi.fn(async () => {});
+  readonly waitForPeerAudio = vi.fn(async (_timeoutMs: number) => {});
+  /** Her video track once it has reached the call; the tests set it, or emit the events. */
+  remoteVideoTrack: object | undefined = undefined;
   readonly connect = vi.fn(async () => {});
   readonly close = vi.fn(() => this.emit("close"));
   readonly end = vi.fn(() => this.emit("ended"));
@@ -49,14 +60,29 @@ class FakeTransport {
   }
 }
 
+/** The Presage bridge as the service uses it, without a real session. */
+class FakeBridge {
+  readonly quiet = { interrupt: vi.fn(), status: "waiting_for_permission", durationMs: 30_000, remainingMs: () => 0 };
+  readonly start = vi.fn();
+  readonly stop = vi.fn(async () => emptyCallVitals());
+  readonly result = vi.fn(() => emptyCallVitals());
+  readonly beginQuietMeasurement = vi.fn();
+}
+
 class FakeStt {
   committed: ((text: string) => void | Promise<void>) | undefined;
+  partial: ((text: string) => void | Promise<void>) | undefined;
+  closed: ((reason: string) => void) | undefined;
   readonly connect = vi.fn(async () => {});
   readonly send = vi.fn();
   readonly close = vi.fn();
   onCommitted(handler: (text: string) => void | Promise<void>): this { this.committed = handler; return this; }
-  onPartial(): this { return this; }
+  onPartial(handler: (text: string) => void | Promise<void>): this { this.partial = handler; return this; }
+  onClose(handler: (reason: string) => void): this { this.closed = handler; return this; }
   emit(text: string): void { void this.committed?.(text); }
+  emitPartial(text: string): void { void this.partial?.(text); }
+  /** Her session ended on its own (not through close()): what the real adapter reports to onClose. */
+  emitClose(reason = "closed"): void { this.closed?.(reason); }
 }
 
 class FakeTts {
@@ -71,27 +97,48 @@ let db: Db;
 let transport: FakeTransport;
 let stt: FakeStt;
 let tts: FakeTts;
+let bridge: FakeBridge;
 let llm: FakeLlmClient;
+/** What the service handed the voice and the transcriber when the last call was answered. */
+let ttsOptions: ConstructorParameters<typeof ElevenLabsTts>[1] | undefined;
+let sttOptions: ConstructorParameters<typeof ElevenLabsRealtimeStt>[0] | undefined;
+/** The transcribers the service gets, in order: `stt` first, then whatever a test queues for a reconnect. */
+let sttsToHandOut: (FakeStt | Error)[];
+let sttsHandedOut: FakeStt[];
+let logs: { event: string; [field: string]: unknown }[];
 let relay: { calls: { end: ReturnType<typeof vi.fn> }; chats: { messages: { send: ReturnType<typeof vi.fn> } } };
 
-function setup(options: { wallNow?: () => string; callTurn?: (input: Parameters<NonNullable<FakeLlmClient["callTurn"]>>[0]) => CallTurnLlmOutput | Error } = {}) {
+function setup(options: { wallNow?: () => string; callTurn?: (input: Parameters<NonNullable<FakeLlmClient["callTurn"]>>[0]) => CallTurnLlmOutput | Error; env?: Record<string, string>; engine?: CallEngine } = {}) {
   transport = new FakeTransport();
   stt = new FakeStt();
+  sttsToHandOut = [stt];
+  sttsHandedOut = [];
+  logs = [];
   tts = new FakeTts();
+  bridge = new FakeBridge();
   relay = { calls: { end: vi.fn(async () => ({})) }, chats: { messages: { send: vi.fn(async () => ({})) } } };
   llm = new FakeLlmClient({ callTurn: options.callTurn });
   const service = new CallService({
     db,
-    config: loadConfig({ ELEVENLABS_API_KEY: "test-key", ELEVENLABS_VOICE_ID: "voice-test", PATIENT_TIMEZONE: "America/Detroit" }),
+    config: loadConfig({ ELEVENLABS_API_KEY: "test-key", ELEVENLABS_VOICE_ID: "voice-test", PATIENT_TIMEZONE: "America/Detroit", ...options.env }),
     relay: relay as never,
     loadSnapshot: async (subject) => loadSnapshot(subject),
     llm,
+    ...(options.engine ? { engine: options.engine } : {}),
     today: () => DATE,
     now: () => NOW,
     wallNow: options.wallNow ?? (() => NOW),
     transportFactory: () => transport as unknown as RelayCallTransport,
-    sttFactory: () => stt as never,
-    ttsFactory: () => tts as never,
+    sttFactory: (options) => {
+      sttOptions = options;
+      const next = sttsToHandOut.shift() ?? new FakeStt();
+      if (next instanceof Error) throw next; // a factory that fails
+      sttsHandedOut.push(next);
+      return next as never;
+    },
+    log: (event, fields) => { logs.push({ event, ...fields }); },
+    ttsFactory: (_transport, options) => ((ttsOptions = options), tts as never),
+    bridgeFactory: () => bridge as never,
   });
   return service;
 }
@@ -171,5 +218,452 @@ describe("direct STT/Gemini/TTS Relay call", () => {
     expect(tts.close).toHaveBeenCalledOnce();
     expect(transport.close).toHaveBeenCalledOnce();
     expect(db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND (name LIKE '%audio%' OR name LIKE '%video%')`).all()).toEqual([]);
+  });
+});
+
+const modelPlan = (overrides: Partial<CallTurnLlmOutput> = {}): CallTurnLlmOutput => ({
+  acknowledgment: "Thank you for telling me.",
+  patientResponseText: "I appreciate you sharing that.",
+  nextQuestion: null,
+  nextAction: "complete_screening",
+  informationCollected: [],
+  missingInformation: [],
+  evidence: [],
+  uncertainty: [],
+  ...overrides,
+});
+
+describe("her transcription is lost under a live call", () => {
+  const events = () => logs.map((entry) => entry.event);
+
+  it("reconnects once with the same settings and handlers, and the call carries on", async () => {
+    const service = setup({ callTurn: () => modelPlan({ nextAction: "ask_follow_up", nextQuestion: "When did the swelling start?" }) });
+    const second = new FakeStt();
+    sttsToHandOut.push(second);
+    await start(service);
+    stt.emitClose("closed"); // the first session ended on its own
+    await vi.waitFor(() => expect(events()).toContain("call_stt_reconnected"));
+    expect(sttsHandedOut).toEqual([stt, second]);
+    expect(second.connect).toHaveBeenCalledOnce();
+    expect(stt.close).toHaveBeenCalled(); // the lost one is let go
+    transport.emit("audio", { samples: Int16Array.from([100, 300]), sampleRate: 48_000, channelCount: 1 });
+    expect(second.send).toHaveBeenCalledOnce(); // her audio goes to the new session
+    expect(stt.send).not.toHaveBeenCalled();
+    second.emit("My ankles are a bit swollen."); // and what it hears is handled as before
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toContain("When did the swelling start?"));
+    expect(transport.end).not.toHaveBeenCalled();
+    await service.end("call-1");
+    expect(second.close).toHaveBeenCalled();
+  });
+
+  it("says one fixed sentence and ends the call when it cannot reconnect", async () => {
+    const service = setup();
+    const second = new FakeStt();
+    second.connect.mockRejectedValueOnce(new Error("ElevenLabs STT connection timed out"));
+    sttsToHandOut.push(second);
+    await start(service);
+    stt.emitClose("quota_exceeded");
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(tts.spoken.at(-1)).toBe(cantHearYou("Harriet", []));
+    expect(events()).toContain("call_stt_lost");
+    expect(events()).not.toContain("call_stt_reconnected");
+    expect(logs.find((entry) => entry.event === "call_stt_lost")).toMatchObject({ reason: "quota_exceeded" });
+    expect(second.close).toHaveBeenCalled(); // the session that never came up is cleaned up
+    expect(callTranscript(db, "call-1").at(-1)).toMatchObject({ speaker: "agent", text: cantHearYou("Harriet", []) });
+  });
+
+  it("a transcriber that cannot even be created counts as a failed reconnect, and nothing is left unhandled", async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      const service = setup();
+      sttsToHandOut.push(new Error("the factory failed"));
+      await start(service);
+      stt.emitClose();
+      await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+      expect(tts.spoken.at(-1)).toBe(cantHearYou("Harriet", []));
+      expect(logs.find((entry) => entry.event === "call_stt_lost")).toMatchObject({ error: "Error: the factory failed" });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+  });
+
+  it("reconnects only once per call: a second loss says the sentence and ends it", async () => {
+    const service = setup();
+    const second = new FakeStt();
+    sttsToHandOut.push(second);
+    await start(service);
+    stt.emitClose();
+    await vi.waitFor(() => expect(events()).toContain("call_stt_reconnected"));
+    second.emitClose("session_time_limit_exceeded");
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(tts.spoken.at(-1)).toBe(cantHearYou("Harriet", []));
+    expect(sttsHandedOut).toHaveLength(2); // no third attempt
+  });
+
+  it("does nothing once the call is over, or after an emergency reply, which ends the call itself", async () => {
+    const over = setup();
+    await start(over);
+    await over.end("call-1");
+    stt.emitClose();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sttsHandedOut).toEqual([stt]);
+    expect(events()).not.toContain("call_stt_lost");
+
+    const emergency = setup();
+    await start(emergency, relayCall("harriet", "call-2"));
+    const speakCalls = tts.speak.mock.calls.length;
+    stt.emit("I have chest pain right now");
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(urgentReply("Harriet", [])));
+    stt.emitClose();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sttsHandedOut).toEqual([stt]);
+    expect(tts.speak.mock.calls.length).toBe(speakCalls + 1); // only the emergency reply
+  });
+});
+
+describe("her talking over the assistant", () => {
+  /** The next thing the assistant says takes a few seconds to play, as real speech does. */
+  const playsForAWhile = () => {
+    let end!: () => void;
+    tts.speak.mockImplementationOnce(async (text) => {
+      tts.spoken.push(text);
+      tts.isSpeaking = true;
+      await new Promise<void>((resolve) => { end = resolve; });
+      tts.isSpeaking = false;
+    });
+    return () => end();
+  };
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  it("cannot cut off the greeting; after it a cough or one word does not either, two real words do", async () => {
+    const service = setup();
+    const endGreeting = playsForAWhile();
+    await service.handle(created(relayCall("harriet")));
+    await vi.waitFor(() => expect(tts.spoken).toHaveLength(1));
+    stt.emitPartial("Hello, can you hear me");
+    expect(tts.cancel).not.toHaveBeenCalled(); // the AI disclosure plays to the end
+    endGreeting();
+    await settle();
+    tts.isSpeaking = true; // the assistant is speaking again
+    for (const partial of ["(coughs)", "Hello?", "(coughs) hello", "[noise]", ""]) stt.emitPartial(partial);
+    expect(tts.cancel).not.toHaveBeenCalled();
+    stt.emitPartial("wait a moment");
+    expect(tts.cancel).toHaveBeenCalledOnce();
+    await service.end("call-1");
+  });
+
+  it("does nothing while the assistant is silent", async () => {
+    const service = setup();
+    await start(service);
+    await settle();
+    stt.emitPartial("wait a moment please");
+    expect(tts.cancel).not.toHaveBeenCalled();
+    await service.end("call-1");
+  });
+
+  it("cannot cut off a fixed safety reply either", async () => {
+    const service = setup();
+    await start(service);
+    await settle();
+    const endReply = playsForAWhile();
+    stt.emit("I have chest pain right now");
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(urgentReply("Harriet", [])));
+    tts.cancel.mockClear(); // the service itself stops what was playing before the reply
+    stt.emitPartial("yes it hurts a lot and my arm too");
+    expect(tts.cancel).not.toHaveBeenCalled();
+    endReply();
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+  });
+});
+
+describe("a reply Gemini is still planning when she keeps talking", () => {
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  /** Gemini's planning is held until the test releases each call. */
+  const slowGemini = () => {
+    const inputs: CallTurnLlmInput[] = [];
+    const releases: ((output: CallTurnLlmOutput) => void)[] = [];
+    llm.callTurn = (input) => new Promise<CallTurnLlmOutput>((resolve) => { inputs.push(input); releases.push(resolve); });
+    return { inputs, releases };
+  };
+  const asks = (question: string) => modelPlan({ nextAction: "ask_follow_up", nextQuestion: question });
+
+  it("is dropped when she says more, and her next turn answers everything she said", async () => {
+    const service = setup();
+    await start(service);
+    const { inputs, releases } = slowGemini();
+    stt.emit("My ankles are a bit swollen.");
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    stt.emitPartial("and I have also been"); // two real words: she is talking again
+    releases[0]!(asks("When did the swelling start?"));
+    await settle();
+    expect(tts.spoken).toHaveLength(1); // only the greeting
+    stt.emit("and I have also been very tired.");
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases[1]!(asks("How long have you felt tired?"));
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toContain("How long have you felt tired?"));
+    expect(inputs[1]!.transcript.filter((turn) => turn.speaker === "patient").map((turn) => turn.text)).toEqual(["My ankles are a bit swollen.", "and I have also been very tired."]);
+    expect(tts.spoken.join(" ")).not.toContain("swelling start");
+    await service.end("call-1");
+  });
+
+  it("is still spoken when all she made was noise, a cough or a lone word", async () => {
+    const service = setup();
+    await start(service);
+    const { releases } = slowGemini();
+    stt.emit("My ankles are a bit swollen.");
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    for (const noise of ["(coughs)", "hm", "[noise]", "(laughs softly"]) stt.emitPartial(noise);
+    releases[0]!(asks("When did the swelling start?"));
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toContain("When did the swelling start?"));
+    await service.end("call-1");
+  });
+});
+
+describe("her audio goes to the transcriber", () => {
+  it("at Relay's own 48 kHz, only downmixed to mono", async () => {
+    const service = setup();
+    await start(service);
+    transport.emit("audio", { samples: Int16Array.from([100, 300, -100, 100]), sampleRate: 48_000, channelCount: 2 });
+    expect([...stt.send.mock.calls[0]![0]]).toEqual([200, 0]);
+    await service.end("call-1");
+  });
+});
+
+describe("the camera reading is offered only while her video is on", () => {
+  const withCamera = { PRESAGE_API_KEY: "presage-test-key" }; // a bridge exists, as on the demo machine
+  const endsTheCall = () => modelPlan();
+  const turn = "My ankles are a bit swollen.";
+
+  it("an audio-only call is never offered it", async () => {
+    const service = setup({ callTurn: endsTheCall, env: withCamera });
+    await start(service);
+    stt.emit(turn);
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(tts.spoken.at(-1)).toBe(callClosing("Harriet", []));
+    expect(tts.spoken).not.toContain(CAMERA_OFFER_AT_END);
+  });
+
+  it("a call without Presage is never offered it, video or not", async () => {
+    const service = setup({ callTurn: endsTheCall });
+    await start(service);
+    transport.emit("remoteVideo", true);
+    stt.emit(turn);
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(tts.spoken).not.toContain(CAMERA_OFFER_AT_END);
+  });
+
+  it.each([
+    ["her video track is there when the call starts", () => { transport.remoteVideoTrack = {}; }, () => {}],
+    ["her video track arrives", () => {}, () => transport.emit("trackSubscribed", {})],
+    ["her camera is turned on", () => {}, () => transport.emit("remoteVideo", true)],
+  ])("with her video on (%s) she is offered it before the goodbye", async (_how, before, after) => {
+    const service = setup({ callTurn: endsTheCall, env: withCamera });
+    before();
+    await start(service);
+    after();
+    stt.emit(turn);
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(CAMERA_OFFER_AT_END));
+    expect(transport.end).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["turns her camera off", () => transport.emit("remoteVideo", false)],
+    ["loses her video track", () => transport.emit("trackUnsubscribed", {})],
+  ])("a call where she %s before the goodbye gets no offer", async (_how, cameraOff) => {
+    let turns = 0;
+    const service = setup({ callTurn: () => (turns += 1) === 1 ? modelPlan({ nextAction: "ask_follow_up", nextQuestion: "When did the swelling start?" }) : modelPlan(), env: withCamera });
+    await start(service);
+    transport.emit("remoteVideo", true);
+    stt.emit(turn);
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toContain("When did the swelling start?"));
+    cameraOff();
+    stt.emit("Since Monday.");
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(tts.spoken.at(-1)).toBe(callClosing("Harriet", []));
+    expect(tts.spoken).not.toContain(CAMERA_OFFER_AT_END);
+  });
+});
+
+describe("her chat is linked from the call", () => {
+  const unlinked = (relayChatId: string | null = null) =>
+    upsertPatient(db, { id: PATIENT, finchnodePatientId: "patient-demo-polypharmacy", preferredName: "Harriet", relayHandle: "harriet", relayChatId });
+  const chatOf = () => getCheckinPatient(db, PATIENT)?.relayChatId;
+  const realEngine = () => {
+    const messenger = new FakeMessenger({ now: () => NOW });
+    const engine = createCheckinEngine({ db, messenger, clock: { now: () => NOW }, loadSnapshot: async (subject) => loadSnapshot(subject), llm: new FakeLlmClient() }, { rxnav: loadRxNavCache() });
+    return { messenger, engine };
+  };
+
+  it("when she called before she ever typed, the call's chat becomes her chat", async () => {
+    unlinked();
+    expect(chatOf()).toBeNull();
+    const service = setup();
+    await start(service);
+    expect(chatOf()).toBe("chat-harriet");
+    await service.end("call-1");
+  });
+
+  it("leaves a chat she already has alone", async () => {
+    unlinked("chat-earlier");
+    const service = setup();
+    await start(service);
+    expect(chatOf()).toBe("chat-earlier");
+    await service.end("call-1");
+  });
+
+  it("never links a stranger's chat as hers", async () => {
+    unlinked();
+    const service = setup();
+    await service.handle(created(relayCall("stranger", "call-stranger")));
+    await vi.waitFor(() => expect(relay.calls.end).toHaveBeenCalledWith("call-stranger"));
+    expect(chatOf()).toBeNull();
+  });
+
+  it("so the post-call message can reach her", async () => {
+    unlinked();
+    const { messenger, engine } = realEngine();
+    const service = setup({ engine });
+    await start(service);
+    stt.emit("My knee aches a bit today.");
+    await vi.waitFor(() => expect(callTranscript(db, "call-1").some((turn) => turn.speaker === "patient")).toBe(true));
+    await service.end("call-1");
+    expect(messenger.inChat("chat-harriet").map((message) => message.text)).toEqual([expect.stringMatching(/^Here's what I noted from our call/)]);
+  });
+
+  it("and an emergency on the call reaches her chat as well as her family", async () => {
+    unlinked();
+    syncFamilyMembers(db, PATIENT, ["sarah"]);
+    linkFamilyMember(db, "sarah", "chat-sarah", "Sarah", NOW);
+    const { messenger, engine } = realEngine();
+    const service = setup({ engine });
+    await start(service);
+    stt.emit("I have chest pain right now");
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    await service.end("call-1");
+    expect(messenger.inChat("chat-harriet").map((message) => message.text)).toContain(urgentReply("Harriet", ["Sarah"]));
+    expect(messenger.inChat("chat-sarah")).toHaveLength(1);
+  });
+});
+
+describe("the start of the call", () => {
+  const firstCall = (mock: { mock: { invocationCallOrder: number[] } }) => mock.mock.invocationCallOrder[0]!;
+
+  it("waits for her audio, writes 300 ms of silence and lets it play, and only then greets", async () => {
+    const service = setup();
+    await start(service);
+    expect(transport.waitForPeerAudio).toHaveBeenCalledWith(2000);
+    const frame = transport.writeAudio.mock.calls[0]![0];
+    expect(frame).toMatchObject({ sampleRate: 48_000, channelCount: 1 });
+    expect(frame.samples).toHaveLength(14_400);
+    expect(frame.samples.every((sample) => sample === 0)).toBe(true);
+    expect(firstCall(transport.waitForPeerAudio)).toBeLessThan(firstCall(transport.writeAudio));
+    expect(firstCall(transport.writeAudio)).toBeLessThan(firstCall(transport.waitForPlayout));
+    expect(firstCall(transport.waitForPlayout)).toBeLessThan(firstCall(tts.speak)); // speak() clears what is queued, so the silence must have played
+    expect(tts.spoken[0]).toMatch(/Hi Harriet, I'm an AI check-in assistant/i);
+    await service.end("call-1");
+  });
+
+  it("greets anyway when her audio never arrives", async () => {
+    const service = setup();
+    transport.waitForPeerAudio.mockRejectedValueOnce(new Error("Timed out waiting for the person's audio"));
+    await start(service);
+    expect(tts.spoken[0]).toMatch(/Hi Harriet, I'm an AI check-in assistant/i);
+    await service.end("call-1");
+  });
+
+  it("says nothing when the call ends while it waits for her audio", async () => {
+    const service = setup();
+    let giveUp!: (error: Error) => void;
+    transport.waitForPeerAudio.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { giveUp = reject; }));
+    await service.handle(created(relayCall("harriet")));
+    await vi.waitFor(() => expect(transport.waitForPeerAudio).toHaveBeenCalled());
+    await service.end("call-1");
+    giveUp(new Error("Relay Call ended before the person's audio arrived."));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(tts.speak).not.toHaveBeenCalled();
+  });
+});
+
+describe("the voice and the transcriber are set up from the configuration", () => {
+  it("the voice gets the soft limiter gain: 1.6 unless ELEVENLABS_TTS_GAIN says otherwise", async () => {
+    await start(setup());
+    expect(ttsOptions?.gain).toBe(1.6);
+    await start(setup({ env: { ELEVENLABS_TTS_GAIN: "2.2" } }), relayCall("harriet", "call-2"));
+    expect(ttsOptions?.gain).toBe(2.2);
+  });
+
+  it("the transcriber gets the speech wait (0.7 s) and her language (en), unless the settings say otherwise", async () => {
+    await start(setup());
+    expect(sttOptions).toMatchObject({ vadSilenceSecs: 0.7, languageCode: "en" });
+    await start(setup({ env: { ELEVENLABS_STT_VAD_SILENCE_SECS: "1.1", ELEVENLABS_STT_LANGUAGE: "" } }), relayCall("harriet", "call-2"));
+    expect(sttOptions?.vadSilenceSecs).toBe(1.1);
+    expect(sttOptions).not.toHaveProperty("languageCode"); // empty: auto-detect
+  });
+});
+
+describe("what a call says at its end and in an emergency is fixed copy", () => {
+  it("Gemini ending the call: she hears the fixed goodbye, not its words", async () => {
+    const service = setup({ callTurn: () => modelPlan({ patientResponseText: "It would be wise to contact your clinician today. Do you have any other symptoms?" }) });
+    await start(service);
+    stt.emit("I have had a bit of a cough.");
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(tts.spoken.at(-1)).toBe(callClosing("Harriet", []));
+    expect(tts.spoken.slice(1).join(" ")).not.toMatch(/clinician|\?/); // after the greeting, which asks how she is
+  });
+
+  it.each([
+    ["an urgent symptom", "I have chest pain right now", urgentReply("Harriet", [])],
+    ["a crisis", "I don't want to live anymore", crisisReply("Harriet", [])],
+  ])("%s the fixed screen catches: exactly the text check-in's reply, and Gemini is never asked", async (_kind, words, reply) => {
+    const service = setup();
+    await start(service);
+    stt.emit(words);
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+    expect(tts.spoken.at(-1)).toBe(reply);
+    expect(llm.calls.some((call) => call.method === "callTurn")).toBe(false);
+  });
+
+  it("a Gemini turn still being planned when an emergency arrives never speaks over the fixed reply", async () => {
+    const service = setup();
+    await start(service);
+    let release!: (output: CallTurnLlmOutput) => void;
+    llm.callTurn = () => new Promise<CallTurnLlmOutput>((resolve) => { release = resolve; });
+    stt.emit("My ankles are a little swollen today.");
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    // The fixed reply takes a few seconds to play, as real speech does; the call ends only after it.
+    let finishReply!: () => void;
+    tts.speak.mockImplementationOnce(async (text) => {
+      tts.spoken.push(text);
+      await new Promise<void>((resolve) => { finishReply = resolve; });
+    });
+    stt.emit("Now I have chest pain right now");
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(urgentReply("Harriet", [])));
+    release(modelPlan({ nextAction: "ask_follow_up", nextQuestion: "When did the swelling start?" }));
+    await new Promise((resolve) => setImmediate(resolve)); // let the late turn finish
+    expect(tts.spoken.at(-1)).toBe(urgentReply("Harriet", []));
+    expect(tts.spoken.join(" ")).not.toContain("swelling start");
+    finishReply();
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+  });
+
+  it("the call still ends when the voice fails on the emergency reply, and nothing is left unhandled", async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      const service = setup();
+      await start(service);
+      tts.speak.mockRejectedValueOnce(new Error("ElevenLabs TTS returned HTTP 500"));
+      stt.emit("I have chest pain right now");
+      await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce());
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
   });
 });

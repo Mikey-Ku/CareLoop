@@ -12,7 +12,15 @@ const require = createRequire(import.meta.url);
 
 export type AudioLogger = (event: string, fields?: Record<string, unknown>) => void;
 
-/** Converts Relay's interleaved PCM16 frame to mono 16 kHz for Scribe realtime. */
+/** What Scribe realtime is given (audio_format pcm_48000): Relay's own rate, so her speech is only downmixed, never resampled. */
+const STT_SAMPLE_RATE = 48_000;
+
+/**
+ * Converts Relay's interleaved PCM16 frame to mono PCM16 at 48 kHz for Scribe realtime. A 48 kHz frame, which
+ * is what the transport delivers, is only downmixed (the old 16 kHz path interpolated without an anti-alias
+ * filter and misheard quiet words, "list in April" for "Lisinopril"). A frame at another rate is resampled by
+ * linear interpolation, as a fallback.
+ */
 export function relayAudioToStt(frame: { samples: Int16Array; sampleRate: number; channelCount: number }): Int16Array {
   if (!Number.isInteger(frame.sampleRate) || frame.sampleRate <= 0) throw new Error("invalid Relay audio sample rate");
   if (!Number.isInteger(frame.channelCount) || frame.channelCount < 1 || frame.channelCount > 2) throw new Error("unsupported Relay audio channel count");
@@ -32,10 +40,10 @@ export function relayAudioToStt(frame: { samples: Int16Array; sampleRate: number
     }
     mono[i] = count === 0 ? 0 : total / count;
   }
-  if (frame.sampleRate === 16_000) return floatToPcm16(mono);
-  const outputLength = Math.max(1, Math.round(mono.length * 16_000 / frame.sampleRate));
+  if (frame.sampleRate === STT_SAMPLE_RATE) return floatToPcm16(mono);
+  const outputLength = Math.max(1, Math.round(mono.length * STT_SAMPLE_RATE / frame.sampleRate));
   const output = new Float32Array(outputLength);
-  const ratio = frame.sampleRate / 16_000;
+  const ratio = frame.sampleRate / STT_SAMPLE_RATE;
   for (let i = 0; i < outputLength; i += 1) {
     const source = i * ratio;
     const left = Math.floor(source);
@@ -52,25 +60,49 @@ function floatToPcm16(values: Float32Array): Int16Array {
   return output;
 }
 
+/**
+ * Whether a partial transcript is her really talking over the assistant: at least two words once sound tags
+ * such as "(coughs)" or "[noise]" are taken out (an unfinished tag counts as a tag). A cough, a breath, noise
+ * or a lone "hello?" must not cut the assistant off mid-word.
+ */
+export function isBargeIn(partial: string): boolean {
+  const words = partial.replace(/[([][^)\]]*(?:[)\]]|$)/g, " ").split(/\s+/).filter((word) => /[\p{L}\p{N}]/u.test(word));
+  return words.length >= 2;
+}
+
 export type RealtimeSttOptions = {
   apiKey: string;
   modelId?: string;
   languageCode?: string;
+  /** ELEVENLABS_STT_VAD_SILENCE_SECS: how long she must pause before her turn is committed. Default 0.7. */
+  vadSilenceSecs?: number;
   log?: AudioLogger;
   webSocket?: WsConstructor;
 };
 
 export type SttTranscriptHandler = (text: string) => void | Promise<void>;
+/** Told once when a live session ends without our own close(): the event's message_type, or "closed". Never its content. */
+export type SttCloseHandler = (reason: string) => void;
+
+/** Scribe events that end the session (the socket closes right after), by message_type. */
+const FATAL_STT_EVENT = /error|exceeded|rate_limited|unaccepted|throttled|overflow/;
 
 /** ElevenLabs realtime STT adapter. Audio and transcripts stay in memory. */
 export class ElevenLabsRealtimeStt {
   readonly #options: RealtimeSttOptions;
   readonly #log: AudioLogger;
   #socket: WsLike | undefined;
+  /** close() was called: our own doing, never reported to onClose. */
   #closed = false;
+  /** Scribe sent session_started: from here on the session is live and takes audio. */
+  #ready = false;
+  /** A live session ended without our close(): onClose was told, once. */
+  #lost = false;
   #connected: Promise<void> | undefined;
+  #finishConnect: ((error?: Error) => void) | undefined;
   #onPartial: SttTranscriptHandler | undefined;
   #onCommitted: SttTranscriptHandler | undefined;
+  #onClose: SttCloseHandler | undefined;
   #lastCommittedEventId: string | number | undefined;
 
   constructor(options: RealtimeSttOptions) {
@@ -88,6 +120,15 @@ export class ElevenLabsRealtimeStt {
     return this;
   }
 
+  /**
+   * Called once when a live session ends without our own close(): the socket closed, or Scribe sent a fatal
+   * event. Without it the call would go deaf: send() drops audio once the socket is gone.
+   */
+  onClose(handler: SttCloseHandler): this {
+    this.#onClose = handler;
+    return this;
+  }
+
   connect(): Promise<void> {
     this.#connected ??= this.#open();
     return this.#connected;
@@ -97,9 +138,9 @@ export class ElevenLabsRealtimeStt {
     const WebSocketImpl = this.#options.webSocket ?? (require("ws") as WsConstructor);
     const query = new URLSearchParams({
       model_id: this.#options.modelId ?? "scribe_v2_realtime",
-      audio_format: "pcm_16000",
+      audio_format: `pcm_${STT_SAMPLE_RATE}`,
       commit_strategy: "vad",
-      vad_silence_threshold_secs: "0.85",
+      vad_silence_threshold_secs: String(this.#options.vadSilenceSecs ?? 0.7),
       ...(this.#options.languageCode ? { language_code: this.#options.languageCode } : {}),
     });
     const socket = new WebSocketImpl(`wss://api.elevenlabs.io/v1/speech-to-text/realtime?${query.toString()}`, { headers: { "xi-api-key": this.#options.apiKey } });
@@ -112,18 +153,28 @@ export class ElevenLabsRealtimeStt {
         settled = true;
         clearTimeout(timer);
         if (error) reject(error);
-        else resolve();
+        else {
+          this.#ready = true;
+          resolve();
+        }
       };
-      socket.on("open", () => finish());
-      socket.on("error", (error) => finish(error instanceof Error ? error : new Error("ElevenLabs STT WebSocket error")));
-      socket.on("close", () => finish(new Error("ElevenLabs STT WebSocket closed before connecting")));
+      this.#finishConnect = finish;
+      // The socket opening is not enough: the session is live when Scribe says session_started (see #message).
+      socket.on("error", (error) => {
+        if (this.#ready) this.#lose("socket_error");
+        else finish(error instanceof Error ? error : new Error("ElevenLabs STT WebSocket error"));
+      });
+      socket.on("close", (code) => {
+        this.#log("elevenlabs_stt_closed", { code: typeof code === "number" ? code : undefined });
+        if (this.#ready) this.#lose("closed");
+        else finish(new Error("ElevenLabs STT WebSocket closed before it was ready"));
+      });
+      socket.on("message", (data) => void this.#message(data));
     });
-    socket.on("message", (data) => void this.#message(data));
-    socket.on("close", (code) => this.#log("elevenlabs_stt_closed", { code: typeof code === "number" ? code : undefined }));
   }
 
   send(samples: Int16Array): void {
-    if (this.#closed || !this.#socket || this.#socket.readyState !== 1 || samples.byteLength === 0) return;
+    if (this.#closed || this.#lost || !this.#ready || !this.#socket || this.#socket.readyState !== 1 || samples.byteLength === 0) return;
     const audio = Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength).toString("base64");
     this.#socket.send(JSON.stringify({ message_type: "input_audio_chunk", audio_base_64: audio }));
   }
@@ -134,6 +185,20 @@ export class ElevenLabsRealtimeStt {
     this.#socket = undefined;
   }
 
+  /** A live session ended without our close(): the socket closed, or Scribe reported a fatal event. Tells onClose, once. */
+  #lose(reason: string): void {
+    if (this.#closed || this.#lost) return;
+    this.#lost = true;
+    const socket = this.#socket;
+    this.#socket = undefined;
+    try {
+      socket?.close(1000, "session lost");
+    } catch {
+      // already closing
+    }
+    this.#onClose?.(reason);
+  }
+
   async #message(data: unknown): Promise<void> {
     const text = typeof data === "string" ? data : data instanceof ArrayBuffer ? new TextDecoder().decode(data) : Buffer.isBuffer(data) ? data.toString("utf8") : data instanceof Uint8Array ? Buffer.from(data).toString("utf8") : "";
     if (!text) return;
@@ -142,6 +207,10 @@ export class ElevenLabsRealtimeStt {
       event = JSON.parse(text) as { message_type?: unknown; text?: unknown; event_id?: unknown };
     } catch {
       this.#log("elevenlabs_stt_invalid_event");
+      return;
+    }
+    if (event.message_type === "session_started") {
+      this.#finishConnect?.();
       return;
     }
     if (event.message_type === "partial_transcript" && typeof event.text === "string") {
@@ -156,8 +225,26 @@ export class ElevenLabsRealtimeStt {
       await this.#onCommitted?.(committed);
       return;
     }
-    if (event.message_type === "rate_limited" || event.message_type === "error") this.#log("elevenlabs_stt_error", { message_type: event.message_type });
+    const type = typeof event.message_type === "string" ? event.message_type.slice(0, 60) : "";
+    if (FATAL_STT_EVENT.test(type)) {
+      this.#log("elevenlabs_stt_error", { message_type: type }); // the type only: never what the event says
+      if (this.#ready) this.#lose(type);
+      else this.#finishConnect?.(new Error(`ElevenLabs STT reported ${type}`));
+    }
   }
+}
+
+/**
+ * A soft limiter for the voice: y = tanh(g * x) / tanh(g) on samples scaled to [-1, 1]. Quiet speech is
+ * raised (about 4.7 dB at g = 1.6) and loud peaks are rounded off instead of clipped, so the result never
+ * leaves the int16 range. A gain of 1 (or less) returns the samples untouched.
+ */
+export function softLimit(samples: Int16Array, gain: number): Int16Array {
+  if (!(gain > 1)) return samples;
+  const scale = 32_768 / Math.tanh(gain);
+  const output = new Int16Array(samples.length);
+  for (let i = 0; i < samples.length; i += 1) output[i] = Math.max(-32_768, Math.min(32_767, Math.round(Math.tanh((gain * (samples[i] ?? 0)) / 32_768) * scale)));
+  return output;
 }
 
 export type ElevenLabsTtsOptions = {
@@ -165,6 +252,8 @@ export type ElevenLabsTtsOptions = {
   voiceId: string;
   modelId?: string;
   outputFormat?: string;
+  /** ELEVENLABS_TTS_GAIN: the soft limiter's gain on the voice (softLimit). Absent or 1: untouched. */
+  gain?: number;
   log?: AudioLogger;
   fetch?: typeof fetch;
 };
@@ -225,13 +314,14 @@ export class ElevenLabsTts {
       try {
         while (!controller.signal.aborted) {
           const next = await reader.read();
-          if (next.done) break;
+          // She may have interrupted while read() was pending: a chunk that arrives after cancel() is not played.
+          if (next.done || controller.signal.aborted) break;
           const bytes = concatBytes(remainder, next.value);
           const usableLength = bytes.byteLength - (bytes.byteLength % 2);
           remainder = bytes.slice(usableLength);
           if (usableLength === 0) continue;
           const samples = new Int16Array(bytes.buffer, bytes.byteOffset, usableLength / 2);
-          await this.#transport.writeAudio({ samples, sampleRate: 48_000, channelCount: 1 });
+          await this.#transport.writeAudio({ samples: softLimit(samples, this.#options.gain ?? 1), sampleRate: 48_000, channelCount: 1 });
         }
         if (!controller.signal.aborted) await this.#transport.waitForPlayout();
       } finally {

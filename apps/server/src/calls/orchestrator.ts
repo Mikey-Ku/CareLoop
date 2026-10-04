@@ -1,8 +1,10 @@
+import { crisisReply, urgentReply } from "../checkin/copy.ts";
 import type { CallCheckinContext } from "../checkin/engine-types.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import type { CallScreeningLlmOutput, LlmClient } from "../llm/types.ts";
 import type { VitalsResult } from "../vitals/types.ts";
-import { callFirstMessage, quietMeasurementPrompt } from "./copy.ts";
+import { CAMERA_OFFER_AT_END, callClosing, callFirstMessage, quietMeasurementPrompt } from "./copy.ts";
+import { emergencyDecision } from "./emergency.ts";
 import type { TranscriptTurn } from "./types.ts";
 
 export type ConversationOrchestratorOptions = {
@@ -15,9 +17,19 @@ export type ConversationOrchestratorOptions = {
   llm?: LlmClient;
   loadSnapshot: (subject: string) => Promise<HealthRecord>;
   getVitals: () => VitalsResult;
-  canMeasure: boolean;
+  /**
+   * Whether the camera reading is possible right now, asked on every turn: Presage is configured and her
+   * video is on (the call service watches the transport). An audio-only call, or a camera turned off, gets no offer.
+   */
+  canMeasure: () => boolean;
   quietMeasurementMs: number;
   speak: (text: string) => Promise<void>;
+  /**
+   * Awaited before the greeting, the first utterance of the call only (the call service waits for her
+   * audio to arrive and writes a short silence). The greeting is spoken even if this rejects, and not at
+   * all if the call has ended meanwhile.
+   */
+  beforeGreeting?: () => Promise<void>;
   recordAgentTurn: (text: string) => void;
   beginQuietMeasurement: () => void;
   onComplete: (screening?: CallScreeningLlmOutput) => void;
@@ -32,10 +44,19 @@ export class ConversationOrchestrator {
   #summary = "";
   #lastQuestion: string | undefined;
   #started = false;
+  #greeted = false;
+  /** Moves when she adds to what she said (a newer turn is queued, or she starts speaking again): see #stale. */
+  #turnSeq = 0;
   #completed = false;
   #waitingForMeasurementConsent = false;
+  /** She was asked "yes or no" once more after an answer that was neither; a second one is taken as no. */
+  #consentReasked = false;
   #measurementDeclined = false;
+  /** She said yes and the quiet reading was started: it is never offered or asked for again. */
+  #measurementDone = false;
   #measurementTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Her FinchNode record, read on the first turn that needs it (see #loadContext). */
+  #record: Promise<HealthRecord> | undefined;
   #phase: "interview" | "quiet_measurement" | "screening" = "interview";
 
   constructor(options: ConversationOrchestratorOptions) {
@@ -46,15 +67,37 @@ export class ConversationOrchestrator {
   start(): void {
     if (this.#started) return;
     this.#started = true;
-    void this.#speak(callFirstMessage(this.#options.firstName)).catch((error) => {
+    void this.#greet().catch((error) => {
       this.#log("call_greeting_failed", { error: summary(error) });
       this.#completed = true;
       this.#options.onComplete();
     });
   }
 
+  /** The greeting, which says this is an AI, has been spoken (or failed, or was dropped): until then the call service lets nothing cut it off. */
+  get greeted(): boolean {
+    return this.#greeted;
+  }
+
+  async #greet(): Promise<void> {
+    try {
+      if (this.#options.beforeGreeting) {
+        try {
+          await this.#options.beforeGreeting();
+        } catch (error) {
+          this.#log("call_greeting_lead_in_failed", { error: summary(error) }); // a missing lead-in never costs her the greeting
+        }
+        if (this.#completed) return; // the call ended while we waited: nobody to greet
+      }
+      await this.#speak(callFirstMessage(this.#options.firstName));
+    } finally {
+      this.#greeted = true;
+    }
+  }
+
   handlePatientTurn(text: string): Promise<void> {
-    this.#queue = this.#queue.then(() => this.#handlePatientTurn(text)).catch(async (error) => {
+    const seq = text.trim() ? ++this.#turnSeq : this.#turnSeq;
+    this.#queue = this.#queue.then(() => this.#handlePatientTurn(text, seq)).catch(async (error) => {
       this.#log("call_turn_failed", { error: summary(error) });
       if (this.#completed) return; // the call is over: nobody to speak to
       try {
@@ -68,12 +111,21 @@ export class ConversationOrchestrator {
     return this.#queue;
   }
 
+  /**
+   * She started speaking again (the call service calls this when a partial transcript has two real words).
+   * Whatever Gemini is still planning for her earlier words is out of date: its reply is dropped, and her
+   * next committed turn answers everything she said.
+   */
+  noteSpeech(): void {
+    this.#turnSeq += 1;
+  }
+
   close(): void {
     this.#completed = true;
     clearTimeout(this.#measurementTimer);
   }
 
-  async #handlePatientTurn(text: string): Promise<void> {
+  async #handlePatientTurn(text: string, seq: number): Promise<void> {
     if (this.#completed || !text.trim()) return;
     // Keep transcription/audit of speech during the quiet window, but don't break the measurement or
     // make Gemini talk over the patient. The complete transcript is reconsidered after the window.
@@ -82,30 +134,42 @@ export class ConversationOrchestrator {
       this.#waitingForMeasurementConsent = false;
       if (affirmative(text)) {
         this.#phase = "quiet_measurement";
+        this.#measurementDone = true;
         await this.#speak(quietMeasurementPrompt(Math.round(this.#options.quietMeasurementMs / 1000)));
         this.#options.beginQuietMeasurement();
         this.#measurementTimer = setTimeout(() => void this.#afterMeasurement(), this.#options.quietMeasurementMs + 500);
         this.#measurementTimer.unref?.();
         return;
       }
-      if (negative(text)) {
-        this.#measurementDeclined = true;
-        await this.#speak("Of course. We can skip the camera measurement.");
-      } else {
+      if (!negative(text) && !this.#consentReasked) {
+        this.#consentReasked = true;
         this.#waitingForMeasurementConsent = true;
         await this.#speak("Would you like to try the quiet camera measurement? You can say yes or no.");
         return;
       }
+      // A no, or a second answer that is not a yes: there is no reading.
+      this.#measurementDeclined = true;
+      await this.#speak("Of course. We can skip the camera measurement.");
     }
     if (asksToRepeat(text)) {
       await this.#speak(`Of course. ${this.#lastQuestion ?? "How are you feeling today?"}`);
       return;
     }
-    await this.#planTurn(this.#phase);
+    await this.#planTurn(this.#phase, seq);
   }
 
-  async #planTurn(interviewPhase: "interview" | "quiet_measurement" | "screening"): Promise<void> {
-    if (this.#completed) return;
+  /**
+   * Turns are queued, so a second committed transcript (a slow speaker pausing mid-sentence) would wait for
+   * the first turn's whole Gemini call and spoken reply, and the reply would answer half of what she said.
+   * A turn is stale once she has added to it since it was queued: it is dropped without a word and without
+   * touching the summary or the last question, and the newer turn runs with everything she said.
+   */
+  #stale(seq: number | undefined): boolean {
+    return seq !== undefined && seq !== this.#turnSeq;
+  }
+
+  async #planTurn(interviewPhase: "interview" | "quiet_measurement" | "screening", seq?: number): Promise<void> {
+    if (this.#completed || this.#stale(seq)) return;
     const llm = this.#options.llm;
     if (!llm?.callTurn) {
       await this.#speak("Thank you for telling me. I have noted what you shared, and a human member of your care team can review it.");
@@ -129,10 +193,10 @@ export class ConversationOrchestrator {
       currentVitals: this.#options.getVitals(),
       finchContext,
       recentMemories: [...this.#options.initialContext.memories],
-      canMeasure: this.#options.canMeasure && !this.#measurementDeclined,
+      canMeasure: this.#canMeasure,
       interviewPhase: interviewPhase === "quiet_measurement" ? "screening" : interviewPhase,
     });
-    if (this.#completed) return;
+    if (this.#completed || this.#stale(seq)) return;
     this.#summary = summarize(decision.informationCollected, decision.missingInformation, decision.uncertainty);
     this.#lastQuestion = decision.nextQuestion ?? undefined;
     if (decision.nextAction === "ask_follow_up" && decision.nextQuestion) {
@@ -143,18 +207,28 @@ export class ConversationOrchestrator {
       await this.#speak(`${decision.acknowledgment} ${decision.nextQuestion}`);
       return;
     }
-    if ((decision.nextAction === "request_measurement_permission" || decision.nextAction === "start_quiet_measurement") && this.#options.canMeasure && !this.#measurementDeclined) {
+    if ((decision.nextAction === "request_measurement_permission" || decision.nextAction === "start_quiet_measurement") && this.#canMeasure) {
       this.#waitingForMeasurementConsent = true;
       const question = decision.nextQuestion ?? "Would you be comfortable taking a quiet camera measurement?";
       await this.#speak(`${decision.acknowledgment} ${question}`);
       return;
     }
+    if (decision.nextAction === "complete_screening" && this.#canMeasure) {
+      // Gemini has what it needs, but the reading only happens if she is asked, and Gemini asks only
+      // sometimes. So the offer is ours: once, in fixed words, before the goodbye. Her answer takes the
+      // consent path above; after the reading or her no, the next turn that ends the call says goodbye.
+      // Not for end_call: she said she has to go, and gets the goodbye without another question.
+      this.#waitingForMeasurementConsent = true;
+      await this.#speak(CAMERA_OFFER_AT_END);
+      return;
+    }
     if (decision.nextAction === "complete_screening" || decision.nextAction === "emergency" || decision.nextAction === "end_call") {
-      const screening = await this.#finalScreening();
-      const spoken = screening?.patientResponseText ?? decision.patientResponseText;
-      if (spoken.trim()) await this.#speak(spoken);
+      // The screening is stored with the call and runs while the goodbye is spoken; none of its words, and
+      // none of the model's, are ever said. The goodbye or the emergency words are ours (src/calls/copy.ts).
+      const screening = this.#finalScreening();
+      await this.#speak(decision.nextAction === "emergency" ? this.#emergencyWords() : callClosing(this.#options.firstName, this.#options.initialContext.familyNames));
       this.#completed = true;
-      this.#options.onComplete(screening);
+      this.#options.onComplete(await screening);
       return;
     }
     const spoken = decision.patientResponseText.trim();
@@ -178,9 +252,29 @@ export class ConversationOrchestrator {
     await this.#options.speak(spoken);
   }
 
+  /** The camera reading is possible now, she hasn't said no, and it hasn't been taken: so it can be offered, and never twice. */
+  get #canMeasure(): boolean {
+    return this.#options.canMeasure() && !this.#measurementDeclined && !this.#measurementDone;
+  }
+
+  /**
+   * What she hears when Gemini declares an emergency: the text check-in's fixed replies, 988 for a crisis
+   * (the fixed screen over her turns decides, never the model) and 911 otherwise. Nobody has been told yet,
+   * so they are asked for with an empty family list and claim no alert. (Without the list they would say "I've
+   * let your family know".) The ladder after the call decides who is alerted.
+   */
+  #emergencyWords(): string {
+    const crisis = (emergencyDecision(this.#options.transcript)?.level ?? 0) >= 5;
+    return crisis ? crisisReply(this.#options.firstName, []) : urgentReply(this.#options.firstName, []);
+  }
+
   async #loadContext(): Promise<unknown> {
+    // Her record is read once per call: a call lasts minutes, and fetching it again on every turn cost
+    // 0.1 to 0.3 s each. A failed read is not kept, so the next turn tries again.
+    let loading: Promise<HealthRecord> | undefined;
     try {
-      const record = await this.#options.loadSnapshot(this.#options.subject);
+      loading = this.#record ??= this.#options.loadSnapshot(this.#options.subject);
+      const record = await loading;
       return {
         dataAsOf: record.meta.dataAsOf,
         syncStatus: record.meta.syncStatus,
@@ -190,6 +284,7 @@ export class ConversationOrchestrator {
         vitals: record.data.vitals.slice(0, 30).map(({ name, value, unit, date, referenceRange }) => ({ name, value, unit, date, referenceRange })),
       };
     } catch (error) {
+      if (loading && this.#record === loading) this.#record = undefined;
       this.#log("call_finch_context_failed", { error: summary(error) });
       return { unavailable: true };
     }
@@ -215,7 +310,7 @@ export class ConversationOrchestrator {
 }
 
 function affirmative(text: string): boolean {
-  return /^(yes|yeah|yep|sure|okay|ok|that's fine|i agree|go ahead)\b/i.test(text.trim());
+  return /^(yes|yeah|yep|yup|sure|okay|ok|alright|all right|sounds good|let's do it|why not|that's fine|i agree|go ahead)\b/i.test(text.trim());
 }
 
 /** "Sorry, what did you ask?", "pardon", "can you say that again": the whole utterance, not a sentence that merely starts so. */
@@ -224,7 +319,7 @@ function asksToRepeat(text: string): boolean {
 }
 
 function negative(text: string): boolean {
-  return /^(no|nope|not now|i'd rather not|don't|do not)\b/i.test(text.trim());
+  return /^(no|nope|nah|not now|not today|not really|maybe later|skip|i'd rather not|i would rather not|i do not|i don't|don't|do not)\b/i.test(text.trim());
 }
 
 function isRepeatedQuestion(question: string, transcript: readonly TranscriptTurn[]): boolean {
