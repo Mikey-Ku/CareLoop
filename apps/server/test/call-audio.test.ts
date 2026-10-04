@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ElevenLabsRealtimeStt, ElevenLabsTts, isBargeIn, relayAudioToStt, softLimit } from "../src/calls/audio.ts";
+import { ElevenLabsRealtimeStt, ElevenLabsTts, TTS_FRAME_SAMPLES, isBargeIn, relayAudioToStt, softLimit } from "../src/calls/audio.ts";
 
 class FakeWebSocket {
   static latest: FakeWebSocket | undefined;
@@ -95,6 +95,54 @@ describe("call audio adapters", () => {
     const failed = new ElevenLabsTts(relay as never, { apiKey: "test", voiceId: "voice-id", fetch: vi.fn(async () => new Response(null, { status: 401 })) });
     await expect(failed.speak("hello")).rejects.toThrow(/HTTP 401/);
     expect(failed.isSpeaking).toBe(false);
+  });
+
+  it("hands the transport whole 20 ms frames, because it pads every write to whole 10 ms slices with silence", async () => {
+    // ElevenLabs delivered a greeting as about 370 pieces of 4 to 14 ms. Written one by one, each piece gained a gap of
+    // silence; re-framed, only the final write may be partial.
+    const written: Int16Array[] = [];
+    const relay = { writeAudio: vi.fn(async (frame: { samples: Int16Array }) => { written.push(Int16Array.from(frame.samples)); }), clearAudio: vi.fn(), waitForPlayout: vi.fn(async () => {}) };
+    const pieceSizes = [215, 672, 672, 1, 480, 479, 700, 33, 960, 960, 1500, 7]; // in samples, none a whole frame
+    const all = Int16Array.from({ length: pieceSizes.reduce((a, b) => a + b, 0) }, (_, i) => (i % 2000) - 1000);
+    let offset = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const size of pieceSizes) {
+          controller.enqueue(new Uint8Array(all.slice(offset, offset + size).buffer));
+          offset += size;
+        }
+        controller.close();
+      },
+    });
+    const tts = new ElevenLabsTts(relay as never, { apiKey: "test", voiceId: "voice-id", fetch: vi.fn(async () => new Response(body)) });
+    await tts.speak("A fixed greeting.");
+    expect(written.length).toBeGreaterThan(1);
+    for (const frame of written.slice(0, -1)) expect(frame.length % TTS_FRAME_SAMPLES).toBe(0);
+    expect(written.slice(0, -1).every((frame) => frame.length >= TTS_FRAME_SAMPLES)).toBe(true);
+    const last = written.at(-1)!;
+    expect(last.length).toBeLessThan(TTS_FRAME_SAMPLES * 2); // only the tail is partial
+    expect(Int16Array.from(written.flatMap((frame) => [...frame]))).toEqual(all); // every sample, in order, none added
+    expect(relay.waitForPlayout).toHaveBeenCalledOnce();
+  });
+
+  it("does not write the partial tail of an utterance that was cancelled", async () => {
+    const relay = { writeAudio: vi.fn(async (_frame: { samples: Int16Array }) => {}), clearAudio: vi.fn(), waitForPlayout: vi.fn(async () => {}) };
+    let release!: () => void;
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(new Uint8Array(new Int16Array(500).buffer)); // less than one frame: held back
+        await new Promise<void>((resolve) => { release = resolve; });
+        controller.close();
+      },
+    });
+    const tts = new ElevenLabsTts(relay as never, { apiKey: "test", voiceId: "voice-id", fetch: vi.fn(async () => new Response(body)) });
+    const speaking = tts.speak("This is interrupted.");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    tts.cancel();
+    release();
+    await speaking;
+    expect(relay.writeAudio).not.toHaveBeenCalled();
+    expect(relay.waitForPlayout).not.toHaveBeenCalled();
   });
 
   it("writes nothing after it was cancelled, even for a chunk whose read was still pending", async () => {

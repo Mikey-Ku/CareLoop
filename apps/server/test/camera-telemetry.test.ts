@@ -5,7 +5,7 @@ import { RelayPresageBridge, sampleAverageColor } from "../src/calls/video.ts";
 vi.mock("@smartspectra/node-sdk/messages", () => ({ decodeMetrics: (bytes: Uint8Array) => JSON.parse(Buffer.from(bytes).toString()) }));
 
 // What the quiet window logs so a bad reading can be told apart: a black or odd frame, a frozen feed, no face.
-function fixture() {
+function fixture(options: { maxFrameGapMs?: number } = {}) {
   const handlers = new Map<string, (...args: any[]) => void>();
   const sessionHandlers = new Map<string, (...args: any[]) => void>();
   const logs: { event: string; fields: Record<string, unknown> | undefined }[] = [];
@@ -17,7 +17,7 @@ function fixture() {
     sendFrame: () => true,
   };
   const bridge = new RelayPresageBridge({ on: (name: string, fn: (...args: any[]) => void) => handlers.set(name, fn) } as never, {
-    apiKey: "test", now: () => now, sessionFactory: () => session as never, log: (event, fields) => logs.push({ event, fields }),
+    apiKey: "test", now: () => now, sessionFactory: () => session as never, log: (event, fields) => logs.push({ event, fields }), ...options,
   });
   let consumer!: { push: (event: unknown) => void; end: () => void };
   const track = { _subscribe: (value: typeof consumer) => { consumer = value; return vi.fn(); } };
@@ -66,6 +66,19 @@ describe("the quiet window's telemetry", () => {
     expect(f.eventsOf("call_quiet_measurement_interrupted")).toEqual([
       expect.objectContaining({ reason: "video_gap", gap_ms: 1_500, frames: 2, max_gap_ms: 100, width: 4, height: 4, mean_rgba: [10, 120, 200, 255] }),
     ]);
+    await f.bridge.stop();
+  });
+
+  it("rides out a pause up to VITALS_MAX_FRAME_GAP_MS (a phone's first frames come in a burst, then a pause of about 2 s), and cuts a longer one short", async () => {
+    const f = fixture({ maxFrameGapMs: 3_000 });
+    for (let i = 0; i < 6; i += 1) { f.frame(1_000_000 + i * 15_000, i * 15); await f.flush(); }
+    f.frame(3_300_000, 2_400); await f.flush(); // the 2.3 s pause seen live
+    expect(f.bridge.quiet.status).toBe("measuring");
+    f.frame(3_400_000, 2_500); await f.flush();
+    expect(f.eventsOf("call_quiet_measurement_interrupted")).toEqual([]);
+    f.frame(7_000_000, 6_100); await f.flush(); // 3.6 s: too long
+    expect(f.bridge.quiet.status).toBe("interrupted");
+    expect(f.eventsOf("call_quiet_measurement_interrupted")).toEqual([expect.objectContaining({ reason: "video_gap", gap_ms: 3_600 })]);
     await f.bridge.stop();
   });
 

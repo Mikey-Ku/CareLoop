@@ -315,6 +315,7 @@ export class CallService implements CallEventHandler {
             apiKey: calls.presageApiKey,
             quietDurationMs: calls.quietMeasurementMs,
             minConfidence: calls.vitalsMinConfidence,
+            maxFrameGapMs: calls.maxFrameGapMs,
             log: (event, fields) => this.#log(event, { call_id: call.id, ...fields }),
           })
         : undefined;

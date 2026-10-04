@@ -33,6 +33,7 @@ Do "Try it on your phone" in the [README](../README.md#try-it-on-your-phone-abou
 | `PRESAGE_API_KEY` | Pulse and breathing estimates from Relay video frames | Optional; without it the call skips the camera reading |
 | `CALL_QUIET_MEASUREMENT_MS` | Length of the quiet reading, 30000 to 45000 | Optional |
 | `CALL_MAX_MINUTES`, `VITALS_MIN_CONFIDENCE` | Server ends the call after N minutes (default 4); lowest camera confidence used (default 1) | Optional |
+| `VITALS_MAX_FRAME_GAP_MS` | Longest pause in her video a camera reading rides out, 1000 to 10000 (default 3000) | Optional |
 | `SPECTRUM_PROJECT_ID`, `SPECTRUM_PROJECT_SECRET` plus `care-contacts.json` | Photon (iMessage) care summaries to the doctor and the emergency contact. Off unless set; not part of the MVP | Optional |
 | `FINCHNODE_BASE_URL`, `FINCHNODE_API_KEY` | The FinchNode demo API needs no key | Leave as is |
 | `CLOCK_DATE`, `FOLLOW_UP_DELAY_MINUTES`, `MEDS_NUDGE_MINUTES`, `CHECKIN_TIME`, `MISSED_CHECKIN_TIME`, `MEDS_MORNING_TIME`, `MEDS_EVENING_TIME`, `REFILL_REMIND_DAYS`, `PATIENT_TIMEZONE`, `DATABASE_PATH`, `PORT` | Demo knobs (see "Run the agent"). Easiest to set inline on the command line | Optional |
@@ -149,7 +150,7 @@ Before each: agent running with a fresh `CLOCK_DATE` (or fresh database), `FOLLO
 
 **S12. The video call**
 1. Agent running with `ELEVENLABS_VOICE_ID` set (no tunnel or ElevenLabs agent needed; see `docs/CALLS.md`). Harriet video calls the agent.
-2. Say "my ankles are a bit puffy". When it offers the quiet camera measurement ("Before we finish, would you like to try a quiet camera measurement?"), say yes and hold still with the phone propped up while it counts down ("Twenty seconds left", "Ten seconds left"). On a call with the camera off it tells you how to turn it on instead: tap the video button, then say ready. Another time say no: "Of course. We can skip the camera measurement." and then the goodbye.
+2. Say "my ankles are a bit puffy". When it offers the quiet camera measurement ("Before we finish, would you like to try a quiet camera measurement?"), say yes and hold still with the phone propped up while it counts down ("Twenty seconds left", "Ten seconds left"). On a call with the camera off it tells you how to turn it on instead: tap the video button, then say ready. If the reading fails (cover the camera) it offers one more try; say yes to run it again. Another time say no: "Of course. We can skip the camera measurement." and then the goodbye.
 3. Ask "Should I stop my aspirin?"
 - Expect: answered within 10 seconds; first sentence says it is an AI; asks today's questions; quiet prompt; heart rate as a camera estimate with no usual-range words; a medicine question gets a pointer to her doctor or pharmacist, never advice (this is Gemini's wording on a call, so check it); the same fixed goodbye naming Sarah, with no advice and no question (never Gemini's own closing); ends by about 3 minutes (cut at 4). Then one "Here's what I noted from our call: ..." message with [That's right] [Something's wrong].
 4. Second call: say "I have chest pain". Expect the 911 reply and Sarah alerted during the call.

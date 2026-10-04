@@ -247,6 +247,14 @@ export function softLimit(samples: Int16Array, gain: number): Int16Array {
   return output;
 }
 
+/**
+ * The voice goes to the transport in whole frames of this size: 20 ms of 48 kHz mono, two whole 10 ms
+ * slices. The transport cuts every write into 10 ms slices and pads the last one with silence, and the
+ * network hands us the voice in pieces of 4 to 14 ms, so writing each piece as it came put a gap of
+ * silence after every piece: a stretched, buzzing voice, worst where the pieces were smallest.
+ */
+export const TTS_FRAME_SAMPLES = 960;
+
 export type ElevenLabsTtsOptions = {
   apiKey: string;
   voiceId: string;
@@ -311,6 +319,8 @@ export class ElevenLabsTts {
       const cancelReader = () => void reader.cancel().catch(() => {});
       controller.signal.addEventListener("abort", cancelReader, { once: true });
       let remainder = new Uint8Array(0);
+      let carry = new Int16Array(0); // the part of a frame still to be completed by the next piece
+      const gain = this.#options.gain ?? 1;
       try {
         while (!controller.signal.aborted) {
           const next = await reader.read();
@@ -321,8 +331,14 @@ export class ElevenLabsTts {
           remainder = bytes.slice(usableLength);
           if (usableLength === 0) continue;
           const samples = new Int16Array(bytes.buffer, bytes.byteOffset, usableLength / 2);
-          await this.#transport.writeAudio({ samples: softLimit(samples, this.#options.gain ?? 1), sampleRate: 48_000, channelCount: 1 });
+          const joined = carry.length === 0 ? samples : joinSamples(carry, samples);
+          const whole = joined.length - (joined.length % TTS_FRAME_SAMPLES);
+          carry = joined.slice(whole);
+          if (whole === 0) continue;
+          await this.#transport.writeAudio({ samples: softLimit(joined.subarray(0, whole), gain), sampleRate: 48_000, channelCount: 1 });
         }
+        // The last few milliseconds: the transport pads this one write, once, at the very end of the utterance.
+        if (!controller.signal.aborted && carry.length > 0) await this.#transport.writeAudio({ samples: softLimit(carry, gain), sampleRate: 48_000, channelCount: 1 });
         if (!controller.signal.aborted) await this.#transport.waitForPlayout();
       } finally {
         controller.signal.removeEventListener("abort", cancelReader);
@@ -343,6 +359,13 @@ export class ElevenLabsTts {
     this.#speaking = false;
     this.#log("elevenlabs_tts_closed");
   }
+}
+
+function joinSamples(a: Int16Array, b: Int16Array): Int16Array {
+  const out = new Int16Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
 }
 
 function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {

@@ -4,7 +4,7 @@ import type { CallCheckinContext } from "../checkin/engine-types.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import type { CallScreeningLlmOutput, CallTurnLlmOutput, LlmClient } from "../llm/types.ts";
 import type { VitalsResult } from "../vitals/types.ts";
-import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, QUIET_COUNTDOWN_SECONDS, callClosing, callFirstMessage, quietCountdown, quietMeasurementPrompt } from "./copy.ts";
+import { CAMERA_GUIDANCE, CAMERA_OFFER_AT_END, CAMERA_STILL_OFF, QUIET_COUNTDOWN_SECONDS, QUIET_RETRY_OFFER, callClosing, callFirstMessage, quietCountdown, quietMeasurementPrompt } from "./copy.ts";
 import { emergencyDecision } from "./emergency.ts";
 import type { TranscriptTurn } from "./types.ts";
 
@@ -47,6 +47,8 @@ export type ConversationOrchestratorOptions = {
   log?: (event: string, fields?: Record<string, unknown>) => void;
 };
 
+/** The same few words committed again within this long are one answer, not two. */
+const REPEATED_TURN_MS = 3_000;
 /** Said in place of the model's acknowledgment when it may not be said (src/context/guard.ts guardSpoken). */
 const FALLBACK_ACKNOWLEDGMENT = "Thank you for telling me.";
 /** Asked when the model's question may not be said and no unanswered check-in question is left. */
@@ -64,6 +66,7 @@ export class ConversationOrchestrator {
   #greeted = false;
   /** Moves when she adds to what she said (a newer turn is queued, or she starts speaking again): see #stale. */
   #turnSeq = 0;
+  #lastTurn = { key: "", at: 0 };
   #completed = false;
   #waitingForMeasurementConsent = false;
   /** She was told how to turn her camera on and her answer is awaited; the reading starts on her "ready". */
@@ -72,6 +75,9 @@ export class ConversationOrchestrator {
   #cameraStillOffAsked = false;
   /** She was asked "yes or no" once more after an answer that was neither; a second one is taken as no. */
   #consentReasked = false;
+  /** A reading with nothing usable is offered once more, once. */
+  #retryOffered = false;
+  #waitingForRetry = false;
   #measurementDeclined = false;
   /** She said yes and the quiet reading was started: it is never offered or asked for again. */
   #measurementDone = false;
@@ -118,6 +124,7 @@ export class ConversationOrchestrator {
   }
 
   handlePatientTurn(text: string): Promise<void> {
+    if (this.#isRepeat(text)) return this.#queue; // not a new answer: the turn in progress stays current
     const seq = text.trim() ? ++this.#turnSeq : this.#turnSeq;
     this.#queue = this.#queue.then(() => this.#handlePatientTurn(text, seq)).catch(async (error) => {
       this.#log("call_turn_failed", { error: summary(error) });
@@ -133,6 +140,15 @@ export class ConversationOrchestrator {
       }
     });
     return this.#queue;
+  }
+
+  /** The speech-to-text can commit one short answer twice ("No." "No."); the second would read as an answer to whatever is asked next. */
+  #isRepeat(text: string): boolean {
+    const key = text.toLowerCase().replace(/[^a-z0-9' ]+/g, " ").trim().replace(/\s+/g, " ");
+    const now = Date.now();
+    const repeat = key !== "" && key.split(" ").length <= 3 && key === this.#lastTurn.key && now - this.#lastTurn.at < REPEATED_TURN_MS;
+    if (!repeat) this.#lastTurn = { key, at: now };
+    return repeat;
   }
 
   /**
@@ -170,6 +186,14 @@ export class ConversationOrchestrator {
       }
       // A no, or a camera that never came on: there is no reading.
       this.#measurementDeclined = true;
+      await this.#speak("Of course. We can skip the camera measurement.");
+    }
+    if (this.#waitingForRetry) {
+      this.#waitingForRetry = false;
+      if (!negative(text) && (affirmative(text) || /\btry again\b/i.test(text)) && this.#options.canMeasure()) {
+        await this.#startMeasurement(); // her camera is still on and she said yes
+        return;
+      }
       await this.#speak("Of course. We can skip the camera measurement.");
     }
     if (this.#waitingForMeasurementConsent) {
@@ -298,7 +322,14 @@ export class ConversationOrchestrator {
     if (this.#completed) return;
     this.#phase = "screening";
     const vitals = this.#options.getVitals();
-    await this.#speak(vitals.heartRate === null && vitals.breathingRate === null
+    const noReading = vitals.heartRate === null && vitals.breathingRate === null;
+    if (noReading && !this.#retryOffered && this.#options.canMeasure()) {
+      this.#retryOffered = true;
+      this.#waitingForRetry = true;
+      await this.#speak(QUIET_RETRY_OFFER);
+      return;
+    }
+    await this.#speak(noReading
       ? "I couldn't get a clear camera reading this time. That's okay."
       : `The camera estimate is about ${vitals.heartRate === null ? "" : `${Math.round(vitals.heartRate)} beats a minute for your heart rate`}${vitals.heartRate !== null && vitals.breathingRate !== null ? " and " : ""}${vitals.breathingRate === null ? "" : `${Math.round(vitals.breathingRate)} breaths a minute for your breathing`}. This is an estimate, not a medical test.`);
     await this.#planTurn("screening");

@@ -15,6 +15,8 @@ export type RelayPresageBridgeOptions = {
   quietDurationMs?: number;
   /** VITALS_MIN_CONFIDENCE (0 to 100). */
   minConfidence?: number;
+  /** VITALS_MAX_FRAME_GAP_MS: a longer pause in the video cuts the quiet reading short (default 1000). */
+  maxFrameGapMs?: number;
   sessionFactory?: (options: { apiKey: string; requestedMetrics: number[] }) => PresageCustomSession;
   now?: () => number;
   log?: RelayVideoLogger;
@@ -51,6 +53,7 @@ export class RelayPresageBridge {
   #started = false;
   #stopTask: Promise<VitalsResult> | undefined;
   #lastFrameWallMs: number | undefined;
+  readonly #maxFrameGapMs: number;
   #restartTask: Promise<void> | undefined;
   #inputStarted = false;
   #stopped = false;
@@ -66,6 +69,7 @@ export class RelayPresageBridge {
     this.#options = options;
     this.#log = options.log ?? (() => {});
     this.#now = options.now ?? (() => Date.now());
+    this.#maxFrameGapMs = options.maxFrameGapMs ?? 1_000;
     this.quiet = new QuietMeasurement(options.quietDurationMs ?? 30_000);
     this.#session = (options.sessionFactory ?? ((input) => new SmartSpectraSDK(input)))({ apiKey: options.apiKey, requestedMetrics: [...REQUESTED_METRICS] });
     this.#adapter = createRelayVideoFrameAdapter(this.#session);
@@ -180,7 +184,7 @@ export class RelayPresageBridge {
   }
 
   #interruptIfStalled(): void {
-    if (this.#lastFrameWallMs !== undefined && this.quiet.status === "measuring" && this.#now() - this.#lastFrameWallMs > 1_000) this.#interruptMeasurement();
+    if (this.#lastFrameWallMs !== undefined && this.quiet.status === "measuring" && this.#now() - this.#lastFrameWallMs > this.#maxFrameGapMs) this.#interruptMeasurement();
   }
 
   #interruptMeasurement(): void {
@@ -234,8 +238,8 @@ export class RelayPresageBridge {
       const nowMs = this.#now();
       const timestampUs = clock.next(event.timestampUs, nowMs);
       // A stalled camera must not count as a continuous quiet capture window.
-      if (this.#lastFrameWallMs !== undefined && (nowMs - this.#lastFrameWallMs > 1_000
-        || (this.#measurementEndUs !== undefined && timestampUs - this.#measurementEndUs > 1_000_000))) {
+      if (this.#lastFrameWallMs !== undefined && (nowMs - this.#lastFrameWallMs > this.#maxFrameGapMs
+        || (this.#measurementEndUs !== undefined && timestampUs - this.#measurementEndUs > this.#maxFrameGapMs * 1000))) {
         this.#log("call_quiet_measurement_interrupted", {
           reason: "video_gap",
           gap_ms: this.#lastFrameWallMs === undefined ? null : nowMs - this.#lastFrameWallMs,
@@ -263,7 +267,7 @@ export class RelayPresageBridge {
         continue;
       }
       this.#inputStarted = true;
-      this.#noteFrame(nowMs, frame);
+      this.#noteFrame(nowMs, frame, this.#now() - nowMs);
       this.#lastFrameWallMs = nowMs;
       this.#timestampOriginMs ??= nowMs - result.timestampUs / 1000;
       this.#measurementStartUs ??= result.timestampUs;
@@ -273,10 +277,11 @@ export class RelayPresageBridge {
   }
 
   /** Counts the frame and logs the window's cadence every 3 s: frames per second, the longest gap, size, average colour. */
-  #noteFrame(nowMs: number, frame: { data: Uint8Array; width: number; height: number }): void {
-    const t = (this.#telemetry ??= { startedMs: nowMs, lastLogMs: nowMs, prevMs: undefined, frames: 0, windowFrames: 0, maxGapMs: 0, width: frame.width, height: frame.height, color: [0, 0, 0, 0] });
+  #noteFrame(nowMs: number, frame: { data: Uint8Array; width: number; height: number }, sendMs: number): void {
+    const t = (this.#telemetry ??= { startedMs: nowMs, lastLogMs: nowMs, prevMs: undefined, frames: 0, windowFrames: 0, maxGapMs: 0, maxSendMs: 0, width: frame.width, height: frame.height, color: [0, 0, 0, 0] });
     if (t.prevMs !== undefined) t.maxGapMs = Math.max(t.maxGapMs, nowMs - t.prevMs);
     t.prevMs = nowMs;
+    t.maxSendMs = Math.max(t.maxSendMs, sendMs);
     t.frames += 1;
     t.windowFrames += 1;
     t.width = frame.width;
@@ -296,6 +301,7 @@ export class RelayPresageBridge {
       since_start_ms: nowMs - t.startedMs,
       frames: t.frames,
       max_gap_ms: t.maxGapMs,
+      max_send_ms: t.maxSendMs, // time inside sendFrame: a stall we caused, not the camera
       width: t.width,
       height: t.height,
       mean_rgba: t.color,
@@ -320,6 +326,7 @@ type FrameTelemetry = {
   frames: number;
   windowFrames: number;
   maxGapMs: number;
+  maxSendMs: number;
   width: number;
   height: number;
   color: [number, number, number, number];
