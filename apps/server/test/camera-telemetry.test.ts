@@ -25,16 +25,41 @@ function fixture(options: { maxFrameGapMs?: number } = {}, transportExtra: Recor
   bridge.start();
   handlers.get("trackSubscribed")!(track);
   bridge.beginQuietMeasurement(true);
-  const frame = (t: number, wall: number, rgba: [number, number, number, number] = [10, 120, 200, 255]) => {
+  const frame = (t: number, wall: number, rgba: [number, number, number, number] = [10, 120, 200, 255], side = 4) => {
     now = 1_791_094_000_000 + wall;
-    const data = new Uint8Array(4 * 4 * 4);
+    const data = new Uint8Array(side * side * 4);
     for (let i = 0; i < data.length; i += 4) data.set(rgba, i);
-    consumer.push({ frame: { type: VideoBufferType.RGBA, data, width: 4, height: 4 }, timestampUs: t });
+    consumer.push({ frame: { type: VideoBufferType.RGBA, data, width: side, height: side }, timestampUs: t });
   };
   const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
   const eventsOf = (name: string) => logs.filter((l) => l.event === name).map((l) => l.fields!);
   return { bridge, session, transport, end: () => consumer.end(), frame, flush, logs, eventsOf, sessionHandlers, handlers, setNow: (wall: number) => { now = 1_791_094_000_000 + wall; } };
 }
+
+describe("a change of frame size inside a reading", () => {
+  it("restarts SmartSpectra before the new size reaches it (a size change inside one session aborts the process natively)", async () => {
+    const f = fixture();
+    const fed: { size: string; starts: number }[] = [];
+    (f.session as { sendFrame: unknown }).sendFrame = (_buffer: unknown, width: number, height: number) => {
+      fed.push({ size: `${width}x${height}`, starts: f.session.start.mock.calls.length });
+      return true;
+    };
+    f.frame(1_000_000, 0); await f.flush();
+    f.frame(1_033_000, 33); await f.flush();
+    f.frame(1_066_000, 66, undefined, 6); await f.flush(); // the phone steps up its resolution
+    for (let i = 0; i < 3; i += 1) await f.flush(); // the restart settles
+    f.frame(1_100_000, 100, undefined, 6); await f.flush();
+    expect(f.eventsOf("call_quiet_measurement_restarted")).toEqual([expect.objectContaining({ reason: "frame_size_changed", from: "4x4", to: "6x6" })]);
+    expect(f.session.stopAsync).toHaveBeenCalled();
+    // Every size SmartSpectra saw came in its own session: 4x4 before the restart, 6x6 only after it.
+    const sizesPerSession = new Map<number, Set<string>>();
+    for (const { size, starts } of fed) sizesPerSession.set(starts, (sizesPerSession.get(starts) ?? new Set()).add(size));
+    for (const sizes of sizesPerSession.values()) expect(sizes.size).toBe(1);
+    expect(fed.map((x) => x.size)).toEqual(["4x4", "4x4", "6x6"]);
+    expect(f.bridge.quiet.status).toBe("measuring");
+    await f.bridge.stop();
+  });
+});
 
 describe("sampleAverageColor", () => {
   it("averages a solid frame, tells a black frame from a normal one, and survives short data", () => {
