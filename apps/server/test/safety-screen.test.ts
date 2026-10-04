@@ -274,3 +274,39 @@ describe("phrases added after the first content eval", () => {
     expect(screenMessage(text)).toBeUndefined();
   });
 });
+
+describe("phrases added for a blood thinner, an ACE inhibitor and a fall risk", () => {
+  it.each([
+    "I had black stools this morning",
+    "my stool was black and sticky",
+    "dark tarry stools since Sunday",
+    "there was blood in my stool",
+    "I noticed blood in my urine today",
+    "bloody stools again",
+    "my urine looks like red urine",
+    "I hit my head on the cupboard",
+    "bumped my head getting out of bed",
+    "I think I have a head injury",
+    "my tongue is swelling up",
+    "my lips are swollen this morning",
+    "my throat is closing up",
+    "I lost my vision in my left eye",
+    "I'm numb on one side of my face",
+  ])("urgent: %s", (text) => {
+    expect(kindOf(text)).toBe("urgent_symptom");
+  });
+
+  it.each([
+    "no black stool",
+    "I haven't had blood in my urine",
+    "I didn't hit my head",
+    "no red urine, thank goodness",
+    "the black stool in the kitchen is wobbly",
+    "I could hit my head against the wall",
+    "my sister had a head injury years ago",
+    "my head hurts a little",
+    "I like dark chocolate",
+  ])("not urgent: %s", (text) => {
+    expect(kindOf(text)).toBeUndefined();
+  });
+});

@@ -186,7 +186,7 @@ Live bug: she tapped "I have a question" on the medicines reminder, typed her qu
 
 ### Message kinds and reactions
 
-Every typed message goes through a fixed phrase screen first (`src/safety/screen.ts`, crisis and urgent symptom), then the LLM sorts it into one kind; fixed rules react. A screen hit always wins; the LLM may raise a message to crisis or urgent, never lower it. The phrase lists are a demo starting point (see FEEDBACK.md). Live check after a test conversation on 2026-10-03 found the old flow looped her when she tried to explain, ignored a typed "Yes", and went straight back to routine after a red flag.
+Every typed message goes through a fixed phrase screen first (`src/safety/screen.ts`, crisis and urgent symptom), then the LLM sorts it into one kind; fixed rules react. A screen hit always wins; the LLM may raise a message to crisis or urgent, never lower it. The phrase lists are a demo starting point (see FEEDBACK.md). On 2026-10-04 black or bloody stool, blood in urine, a knock to the head, swelling of the tongue, lips or throat, sudden loss of vision and numbness on one side were added for her blood thinner and ACE inhibitor; they count as urgent, the cautious reading, until a clinician reviews them. Live check after a test conversation on 2026-10-03 found the old flow looped her when she tried to explain, ignored a typed "Yes", and went straight back to routine after a red flag.
 
 | Kind | Reaction |
 | --- | --- |

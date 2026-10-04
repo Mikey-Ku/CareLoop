@@ -1,34 +1,41 @@
-# Mhacks_2026
+# Check-in Companion
 
-A daily check-in companion for older adults living alone with several chronic conditions, built on FinchNode, Relay Messenger, Gemini, ElevenLabs speech APIs, and Presage.
-
-**Status:** in progress (MHacks 2026)
+An AI caregiving companion for older adults who live alone: an easy daily check-in by chat or video call, and a summary that gives their doctor the context behind the numbers. Built for MHacks 2026 on FinchNode, Relay Messenger, Gemini, ElevenLabs and Presage. **All data is synthetic.** The demo patient is Harriet, 78 (atrial fibrillation, heart failure, kidney disease, 14 medicines), read from FinchNode's synthetic record.
 
 ## What it does
 
-Each morning a Relay agent starts a short, friendly chat with at most three questions picked from the senior's FinchNode health record. She can choose a video call to describe symptoms conversationally: Relay carries the call, ElevenLabs transcribes and speaks, Gemini contextualizes the committed transcript with structured FinchNode records, and Presage can provide consented pulse and breathing estimates from video. Photos of hospital papers are checked against her medication list, and each family member follows along in their own Relay chat with the agent.
+1. **Video check-in call.** Harriet calls the agent in Relay. It says it is an AI, asks how she is and the questions she has not answered, then offers a quiet 30-second camera reading of pulse and breathing (Presage), said back as an estimate. ElevenLabs hears and speaks; Gemini words the questions; fixed rules decide anything medical.
+2. **Text check-in.** Each morning, at most three questions picked from her record, answered by tap or in her own words. A severity ladder sets the reaction, in fixed words: her doctor, her family, 911 or 988. Never dosing advice or a diagnosis.
+3. **Medication helper.** Reminders read from her record; a photo of a label is checked against her list (a mismatch sends her to her pharmacist, never "take this instead"); refill reminders.
+4. **Doctor report.** One week as a two-page clinical summary: symptoms in her words, flags with their evidence, medicines, labs.
+5. **Family updates.** Each family member follows along in their own Relay chat, within her sharing settings. Urgent alerts go out at once, and their replies reach her.
 
-All data in this project is synthetic.
+**Safety by design.** Rules decide every medical flag; the model only words things. Emergencies and self-harm get fixed replies (911, 988) from a phrase screen that runs before any model. Whatever the model writes for the voice is checked first, and it never gives dosing advice, a diagnosis or reassurance. A person is always pointed to.
 
 ## Setup
 
-Use Node 24 LTS for the demo (Node 24.19.0 verified), or Node 22.22.3 or newer in the Node 22 line. The package requires at least 22.22.3; Vitest does not support Node 23 or 25. The server runs its `.ts` files directly through Node's built-in type stripping, with no build step.
+Node 24 LTS is what the demo was rehearsed on (Node 22.22.3 or newer also works; Node 25 runs but Vitest warns). The server runs its `.ts` files directly through Node's type stripping, with no build step.
 
 ```sh
 cd apps/server
 npm ci
-cp ../../.env.example ../../.env   # optional for run 1
+cp ../../.env.example ../../.env    # the .env lives at the repo root
 ```
 
-See [the three-minute demo](docs/DEMO.md) and [QA gates](docs/QA.md) before presenting. Offline fixture rehearsals need no `.env` or API keys.
+| Tool | What it does here | You need | Check |
+| --- | --- | --- | --- |
+| FinchNode | Harriet's synthetic health record, read-only | nothing: the demo API is open | `npm run packet -- patient-demo-polypharmacy --live` |
+| Relay Messenger | Chat, video call and photos with the agent | `RELAY_AGENT_TOKEN`, `PATIENT_RELAY_HANDLE`, and `FAMILY_RELAY_HANDLES` for family | `npm run relay:check` |
+| Gemini | Understands typed and spoken words, words the questions | `GEMINI_API_KEY` (without it, buttons only) | `npm run llm:check` |
+| ElevenLabs | Hears and speaks on the call | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | `npm run demo:check`, then a call |
+| Presage | Pulse and breathing estimate from the call's video | `PRESAGE_API_KEY` (optional) | a video call with the camera on |
+| Photon (optional) | Texts care summaries to the doctor and emergency contact over iMessage | `SPECTRUM_PROJECT_ID`, `SPECTRUM_PROJECT_SECRET` | `npm run care:send -- --dry-run` |
 
-For the complete voice demo, configure `RELAY_AGENT_TOKEN`, `PATIENT_RELAY_HANDLE`, `GEMINI_API_KEY`, `ELEVENLABS_API_KEY`, and `ELEVENLABS_VOICE_ID`. `PRESAGE_API_KEY` enables camera estimates; `FAMILY_RELAY_HANDLES` enables family delivery. From `apps/server`, `npm run demo:check` checks configuration and synthetic fixtures without network requests or exposing keys. Exit `0` means configured, `2` means optional capabilities missing, and `1` means required setup missing. Presence, including placeholder values, does not prove authentication.
+`npm run demo:check` reads the config and the synthetic fixtures without any network request and never prints a key. Exit `0` means configured, `2` means an optional part is missing, `1` means something required is. It shows presence, not that a key works: `relay:check` and `llm:check` call the providers (`llm:check` uses a little quota). `content:eval` runs 145 messages through Gemini and overwrites `docs/content-eval.md`. Phone calls, the camera and family delivery need a live rehearsal with a synthetic patient on a phone.
 
-Verify providers separately: `relay:check` reads provider settings and chats, may migrate the local database, and prints handles; `llm:check` sends synthetic text and labels to Gemini. `content:eval` consumes quota and overwrites `docs/content-eval.md`. Phone calls, camera readings and family delivery require a live synthetic rehearsal.
+**No keys? Run the recorded demo:** `npm run simulate -- --reset --day 2026-07-28 --sharing all --family sarah --script ../../scripts/demo/hackathon-demo.txt` (from `apps/server`). It needs no `.env`. See [the three-minute demo](docs/DEMO.md) and [QA gates](docs/QA.md) before presenting.
 
-The `.env` file lives at the repo root. Run 1 needs no keys: the FinchNode demo API is open and every other value has a default.
-
-For the Relay agent, set `PATIENT_RELAY_HANDLE` and `FAMILY_RELAY_HANDLES` in `.env`, then have the senior and each family member send the agent a message from their own Relay app. A Relay chat holds at most one person, so there is no family group: each family member gets updates in their own chat with the agent, starting once they have messaged it. `npm run relay:check` shows who has.
+For the Relay agent, each person messages the agent once from their own Relay app so it can reach them: the senior (`PATIENT_RELAY_HANDLE`) and each family member (`FAMILY_RELAY_HANDLES`). A Relay chat holds one person, so there is no family group: each family member gets updates in their own chat with the agent. `npm run relay:check` shows who has.
 
 ## Try it on your phone (about 10 minutes)
 
@@ -74,7 +81,7 @@ All commands run in `apps/server`.
 | `npm run packet -- patient-demo-polypharmacy` | Prints Harriet's context packet built from the recorded fixtures. Add `--live` to read the FinchNode demo API instead. |
 | `npm run care:send -- [--day YYYY-MM-DD] [--dry-run] [--templates]` | Texts a day's care summaries to the doctor and the emergency contact over Photon (once per day; `--dry-run` only prints them; `--templates` skips Gemini). |
 | `npm run record-fixtures` | Re-records the fixtures in `fixtures/` from the FinchNode demo API. |
-| `npm run dev` | Starts the server on `PORT` (default 3000): `GET /health`, and the doctor report at `GET /report/<patientId>[?day=YYYY-MM-DD]` from `DATABASE_PATH`. `/webhooks/relay` answers 501. |
+| `npm run dev` | Starts the server on `PORT` (default 3000): `GET /health`, and the doctor report at `GET /report/<patientId>[?day=YYYY-MM-DD]` from `DATABASE_PATH`. |
 | `npm run report -- [--day YYYY-MM-DD] [--db path] [--out file.html]` | Writes the doctor report for the 7 days ending on `--day` (default her latest check-in) and prints its path (default `data/report-<day>.html`). See "Doctor report". |
 | `npm run relay:check` | Checks your Relay setup: token, no webhook subscriptions, who has messaged the agent. |
 | `npm run agent` | Runs the Relay agent (WebSocket, daily scheduler, free text through Gemini). `--checkin-now` sends today's check-in right away. |
