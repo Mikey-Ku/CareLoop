@@ -1,11 +1,12 @@
-import { VideoBufferType, VideoStream, type RelayAudioFrame, type RelayCallTransport, type RemoteVideoTrack } from "@relaymessenger/sdk/calls";
+import { VideoBufferType, VideoStream, type RelayAudioFrame, type RelayCallTransport, type RemoteVideoTrack, type VideoFrameEvent } from "@relaymessenger/sdk/calls";
 import { MetricType, ProcessingStatus, SmartSpectraSDK } from "@smartspectra/node-sdk";
 import { decodeMetrics } from "@smartspectra/node-sdk/messages";
-import { createRelayVideoFrameAdapter, type FrameSink } from "../vitals/relay-frame-adapter.ts";
+import { createFrameTimestampAnchor } from "../vitals/frame-clock.ts";
+import { createRelayVideoFrameAdapter } from "../vitals/relay-frame-adapter.ts";
 import { mergeMetricSnapshots, normalizePresageMetrics, resultFromSnapshot, type MetricSnapshot } from "../vitals/normalize.ts";
 import type { PresageSession } from "../vitals/presage-file.ts";
 import type { ValidationEvent, VitalsError, VitalsResult } from "../vitals/types.ts";
-import { QuietMeasurement } from "./quiet-measurement.ts";
+import { PULSE_WARM_UP_MS, QuietMeasurement } from "./quiet-measurement.ts";
 
 export type RelayVideoLogger = (event: string, fields?: Record<string, unknown>) => void;
 
@@ -42,6 +43,16 @@ export class RelayPresageBridge {
   readonly #errors: VitalsError[] = [];
   #snapshot: MetricSnapshot = {};
   #streamTask: Promise<void> | undefined;
+  #reader: ReadableStreamDefaultReader<VideoFrameEvent> | undefined;
+  #measurementStartUs: number | undefined;
+  #measurementEndUs: number | undefined;
+  #timestampOriginMs: number | undefined;
+  readonly #adapter: ReturnType<typeof createRelayVideoFrameAdapter>;
+  #started = false;
+  #stopTask: Promise<VitalsResult> | undefined;
+  #lastFrameWallMs: number | undefined;
+  #restartTask: Promise<void> | undefined;
+  #inputStarted = false;
   #stopped = false;
   #speechActive = false;
 
@@ -52,9 +63,25 @@ export class RelayPresageBridge {
     this.#now = options.now ?? (() => Date.now());
     this.quiet = new QuietMeasurement(options.quietDurationMs ?? 30_000);
     this.#session = (options.sessionFactory ?? ((input) => new SmartSpectraSDK(input)))({ apiKey: options.apiKey, requestedMetrics: [...REQUESTED_METRICS] });
+    this.#adapter = createRelayVideoFrameAdapter(this.#session);
     this.#session.on("metrics", (buffer, timestampUs) => {
+      if (this.#measurementStartUs === undefined || timestampUs < this.#measurementStartUs) return;
       try {
-        this.#snapshot = mergeMetricSnapshots(this.#snapshot, normalizePresageMetrics(decodeMetrics(buffer), timestampUs));
+        const next = normalizePresageMetrics(decodeMetrics(buffer), timestampUs);
+        const startUs = this.#measurementStartUs;
+        const inWindow = (timestamp: number | undefined, warmUpMs: number) => timestamp !== undefined
+          && timestamp >= startUs + warmUpMs * 1000
+          && (this.#measurementEndUs === undefined || timestamp <= this.#measurementEndUs);
+        this.#snapshot = mergeMetricSnapshots(this.#snapshot, {
+          ...(inWindow(next.heartRateTimestampUs, PULSE_WARM_UP_MS) ? {
+            heartRate: next.heartRate, heartRateConfidence: next.heartRateConfidence,
+            heartRateStable: next.heartRateStable === true, heartRateTimestampUs: next.heartRateTimestampUs,
+          } : {}),
+          ...(inWindow(next.breathingRateTimestampUs, 30_000) ? {
+            breathingRate: next.breathingRate, breathingRateConfidence: next.breathingRateConfidence,
+            breathingRateStable: next.breathingRateStable === true, breathingRateTimestampUs: next.breathingRateTimestampUs,
+          } : {}),
+        });
       } catch (error) {
         this.#errors.push({ code: "metrics_decode", message: error instanceof Error ? error.message : String(error) });
       }
@@ -69,31 +96,54 @@ export class RelayPresageBridge {
   }
 
   start(): void {
+    if (this.#started || this.#stopped) return;
+    this.#started = true;
     this.#session.useCustomInput();
     this.#session.start();
     this.#transport.on("audio", (frame) => this.#updateSpeech(frame));
     this.#transport.on("trackSubscribed", (track) => this.#subscribe(track));
-    this.#transport.on("trackUnsubscribed", () => this.#log("call_video_unsubscribed"));
+    this.#transport.on("trackUnsubscribed", () => {
+      this.#log("call_video_unsubscribed");
+      this.#interruptMeasurement();
+      void this.#disconnectVideo();
+    });
     this.#transport.on("remoteVideo", (enabled) => this.#log("call_remote_video", { enabled }));
     const existing = this.#transport.remoteVideoTrack;
     if (existing) this.#subscribe(existing);
   }
 
   beginQuietMeasurement(permissionGranted: boolean): void {
+    this.#snapshot = {};
+    this.#measurementStartUs = undefined;
+    this.#measurementEndUs = undefined;
+    this.#lastFrameWallMs = undefined;
     this.quiet.requestPermission(permissionGranted);
+    if (permissionGranted && this.#inputStarted) this.#restartProcessing();
     if (permissionGranted) this.#log("call_quiet_measurement_started", { duration_ms: this.quiet.durationMs });
   }
 
   result(): VitalsResult {
-    const raw = resultFromSnapshot("relay_video", this.#snapshot, this.#validation, this.#errors, { timestampOriginMs: this.#now() });
+    if (!this.#stopped) this.#interruptIfStalled();
+    const raw = resultFromSnapshot("relay_video", this.#snapshot, this.#validation, this.#errors, { timestampOriginMs: this.#timestampOriginMs });
     return this.quiet.finish(raw, this.#options.minConfidence);
   }
 
-  async stop(): Promise<VitalsResult> {
+  stop(): Promise<VitalsResult> {
+    this.#stopTask ??= this.#stop();
+    return this.#stopTask;
+  }
+
+  async #stop(): Promise<VitalsResult> {
+    this.#interruptIfStalled();
     this.#stopped = true;
-    await this.#streamTask;
+    await this.#disconnectVideo();
+    await this.#restartTask;
     try {
       await this.#session.stopAsync();
+    } catch (error) {
+      this.#errors.push({ code: "presage_destroy", message: error instanceof Error ? error.message : String(error) });
+    }
+    try {
       await this.#session.destroy();
     } catch (error) {
       this.#errors.push({ code: "presage_destroy", message: error instanceof Error ? error.message : String(error) });
@@ -101,39 +151,105 @@ export class RelayPresageBridge {
     return this.result();
   }
 
+  #restartProcessing(): void {
+    const previous = this.#restartTask ?? Promise.resolve();
+    const task = previous.then(async () => {
+      await this.#session.stopAsync();
+      if (this.#stopped) return;
+      this.#session.start();
+      this.#inputStarted = false;
+    }).catch((error) => {
+      this.#errors.push({ code: "presage_restart", message: error instanceof Error ? error.message : String(error) });
+      this.#interruptMeasurement();
+    });
+    this.#restartTask = task;
+    void task.then(() => { if (this.#restartTask === task) this.#restartTask = undefined; });
+  }
+
+  #interruptIfStalled(): void {
+    if (this.#lastFrameWallMs !== undefined && this.quiet.status === "measuring" && this.#now() - this.#lastFrameWallMs > 1_000) this.#interruptMeasurement();
+  }
+
+  #interruptMeasurement(): void {
+    if (this.quiet.status !== "measuring") return;
+    this.quiet.interrupt();
+    this.#snapshot = {};
+    this.#measurementStartUs = undefined;
+    this.#measurementEndUs = undefined;
+    this.#lastFrameWallMs = undefined;
+  }
+
   #subscribe(track: RemoteVideoTrack): void {
-    if (this.#streamTask) return;
+    if (this.#stopped) return;
+    if (this.#reader) {
+      this.#interruptMeasurement();
+      void this.#reader.cancel().catch(() => {});
+    }
     this.#log("call_video_subscribed", { width: "unknown", format: "RGBA" });
     const stream = new VideoStream(track, { capacity: 2, format: VideoBufferType.RGBA });
     // sendFrame throws on a bad frame; caught now, since an unhandled rejection would end the agent.
-    this.#streamTask = this.#pump(stream).catch((error) => {
+    const reader = stream.getReader();
+    this.#reader = reader;
+    this.#streamTask = this.#pump(reader).catch((error) => {
+      if (this.#reader === reader) this.#interruptMeasurement();
       this.#errors.push({ code: "video_stream", message: error instanceof Error ? error.message : String(error) });
+    }).finally(async () => {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+      if (this.#reader === reader) {
+        if (!this.#stopped) this.#interruptMeasurement();
+        this.#reader = undefined;
+      }
     });
   }
 
-  async #pump(stream: VideoStream): Promise<void> {
-    const sink: FrameSink = this.#session;
-    const adapter = createRelayVideoFrameAdapter(sink);
-    for await (const event of stream) {
-      if (this.#stopped) break;
+  async #disconnectVideo(): Promise<void> {
+    const reader = this.#reader;
+    const task = this.#streamTask;
+    this.#reader = undefined;
+    await reader?.cancel().catch(() => {});
+    await task;
+  }
+
+  async #pump(reader: ReadableStreamDefaultReader<VideoFrameEvent>): Promise<void> {
+    const clock = createFrameTimestampAnchor();
+    while (!this.#stopped) {
+      const next = await reader.read();
+      if (next.done || this.#stopped || this.#reader !== reader) break;
+      const event = next.value;
+      if (this.quiet.status !== "measuring" || this.#restartTask) continue;
+      const nowMs = this.#now();
+      const timestampUs = clock.next(event.timestampUs, nowMs);
+      // A stalled camera must not count as a continuous quiet capture window.
+      if (this.#lastFrameWallMs !== undefined && (nowMs - this.#lastFrameWallMs > 1_000
+        || (this.#measurementEndUs !== undefined && timestampUs - this.#measurementEndUs > 1_000_000))) {
+        this.#interruptMeasurement();
+        this.#log("call_quiet_measurement_interrupted", { reason: "video_gap" });
+        continue;
+      }
       const frame = event.frame;
       if (frame.type !== VideoBufferType.RGBA) {
         this.#log("call_video_frame_rejected", { reason: "unsupported_format", format: frame.type });
         continue;
       }
-      const result = adapter.send({
+      const result = this.#adapter.send({
         buffer: frame.data,
         width: frame.width,
         height: frame.height,
         stride: frame.width * 4,
         pixelFormat: "RGBA",
-        timestampUs: event.timestampUs,
+        timestampUs,
       });
       if (!result.accepted) {
         this.#log("call_video_frame_rejected", { reason: result.reason, detail: result.detail });
         continue;
       }
-      this.quiet.recordFrame(result.timestampUs, this.#speechActive, this.#now());
+      this.#inputStarted = true;
+      this.#lastFrameWallMs = nowMs;
+      this.#timestampOriginMs ??= nowMs - result.timestampUs / 1000;
+      this.#measurementStartUs ??= result.timestampUs;
+      this.quiet.recordFrame(result.timestampUs, this.#speechActive, nowMs);
+      this.#measurementEndUs = result.timestampUs;
     }
   }
 

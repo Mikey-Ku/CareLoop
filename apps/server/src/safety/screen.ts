@@ -41,6 +41,11 @@ type PhraseRule = {
   ignoreNegation?: boolean;
 };
 
+/** "black stool" is her body, not the kitchen stool ("the black stool"). */
+const FURNITURE = ["the", "that", "this", "bar", "kitchen", "piano", "step"];
+/** A knock to the head long ago, or the idiom, is not news ("hit my head against the wall"). */
+const PAST_OR_IDIOM = ["against the wall", "against a wall", "years ago", "year ago", "last year", "a long time ago"];
+
 /** Words that make what follows something else than her ("the leaves fell down", "it blacked out"). */
 const NOT_HER = ["the", "a", "an", "my", "his", "her", "our", "their", "its", "it", "that", "this", "they", "some", "everything"];
 
@@ -162,6 +167,47 @@ const URGENT_RULES: readonly PhraseRule[] = [
   { phrase: "no puedo respirar", ignoreNegation: true },
   { phrase: "me caí" },
   { phrase: "me cai" },
+  // Added for what a blood thinner, an ACE inhibitor and a fall risk make urgent (standard apixaban and
+  // lisinopril advice, 2026-10-04): bleeding that shows in stool or urine, a knock to the head, swelling of the
+  // tongue, lips or throat, losing sight or feeling on one side. Treated as urgent, the cautious reading,
+  // until a clinician has reviewed the list (docs/DESIGN.md "Message kinds and reactions").
+  { phrase: "black stool", unlessBefore: FURNITURE },
+  { phrase: "black stools" },
+  { phrase: "black tarry stool" },
+  { phrase: "tarry stool" },
+  { phrase: "tarry stools" },
+  { phrase: "black poop" },
+  { phrase: "stool was black" },
+  { phrase: "stool is black" },
+  { phrase: "stools were black" },
+  { phrase: "stools are black" },
+  { phrase: "blood in my stool" },
+  { phrase: "blood in my stools" },
+  { phrase: "bloody stool" },
+  { phrase: "bloody stools" },
+  { phrase: "blood in my urine" },
+  { phrase: "bloody urine" },
+  { phrase: "red urine" },
+  { phrase: "hit my head", unlessAfter: PAST_OR_IDIOM },
+  { phrase: "bumped my head", unlessAfter: PAST_OR_IDIOM },
+  { phrase: "banged my head", unlessAfter: PAST_OR_IDIOM },
+  { phrase: "knocked my head", unlessAfter: PAST_OR_IDIOM },
+  { phrase: "head injury", unlessAfter: PAST_OR_IDIOM },
+  { phrase: "tongue is swelling" },
+  { phrase: "tongue swelling" },
+  { phrase: "swollen tongue" },
+  { phrase: "tongue is swollen" },
+  { phrase: "lips are swelling" },
+  { phrase: "lips are swollen" },
+  { phrase: "swollen lips" },
+  { phrase: "throat is swelling" },
+  { phrase: "throat is swollen" },
+  { phrase: "throat swelling" },
+  { phrase: "throat is closing" },
+  { phrase: "lost my vision" },
+  { phrase: "went blind" },
+  { phrase: "numb on one side" },
+  { phrase: "numbness on one side" },
 ];
 
 /** Crisis phrases, as matched (see the rules above). A demo starting point for the team to review, not clinical criteria. */
@@ -269,7 +315,11 @@ export function tokenize(text: string): Token[] {
   for (let i = 0; i < raw.length; i += 1) {
     const here = raw[i]!;
     const next = raw[i + 1];
-    const pair = next && next.clause === here.clause ? PAIR_FOLDS[`${here.word} ${next.word}`] : undefined;
+    const after = raw[i + 2];
+    // Preserve the affirmative "not only" construction before folding auxiliary
+    // negations ("has not", "had not", "do not") into a single word.
+    const notOnly = next?.word === "not" && after?.word === "only" && next.clause === here.clause && after.clause === here.clause;
+    const pair = next && next.clause === here.clause && !notOnly ? PAIR_FOLDS[`${here.word} ${next.word}`] : undefined;
     if (pair) {
       for (const word of pair) out.push({ word, clause: here.clause });
       i += 1;
@@ -335,8 +385,14 @@ function isNegated(tokens: Token[], start: number, rule: CompiledRule): boolean 
   if (rule.ignoreNegation) return false;
   // A phrase that starts with its own subject ("I fell") can't be negated from before it: "no I fell" is an answer, then the news.
   if (SUBJECTS.has(rule.words[0]!)) return false;
-  for (const word of wordsBefore(tokens, start, NEGATION_WINDOW)) {
+  const before = wordsBefore(tokens, start, NEGATION_WINDOW);
+  for (let offset = 0; offset < before.length; offset += 1) {
+    const word = before[offset]!;
     if (SUBJECTS.has(word)) return false;
+    // "Not only chest pain" affirms the symptom; it does not deny it. Only skip
+    // this exact same-clause pair, so another negation still cancels the hit.
+    const next = tokens[start - offset];
+    if (word === "not" && next?.word === "only" && next.clause === tokens[start]!.clause) continue;
     if (NEGATION_SET.has(word)) return true;
   }
   return false;

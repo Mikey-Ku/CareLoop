@@ -20,7 +20,8 @@
     "content:eval": "node --env-file-if-exists=../../.env src/cli/content-eval.ts",
     "vitals:video": "node --env-file-if-exists=../../.env src/cli/vitals-video.ts",
     "report": "node --env-file-if-exists=../../.env src/cli/report.ts",
-    "record-fixtures": "node --env-file-if-exists=../../.env ../../scripts/record-fixtures.ts"
+    "record-fixtures": "node --env-file-if-exists=../../.env ../../scripts/record-fixtures.ts",
+    "demo:check": "node --env-file-if-exists=../../.env src/cli/demo-check.ts"
   },
   "dependencies": {
     "@evan/opus": "1.0.3",

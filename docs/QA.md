@@ -222,3 +222,11 @@ Paste one block per finding under a "QA findings" heading in `FEEDBACK.md`. Neve
 - The safety phrase lists, the red-flag cadence (every 2 days, 3 days after a worry) and rules R3 and R4 wording are demo values, not clinically reviewed. The content eval has not been run on a held-out set. Answer mapping is 84% against a 90% target.
 
 **Cut list (from `docs/DEFINITION_OF_DONE.md`, cut in this order if time runs short):** SMS or iMessage for family; weekly family summary and family replies; FHIR export of the report; heart rate on the Relay call; "Do you remember how many?"; refill reminders. Never cut: the text check-in with the safety screen, the voice part of the call, the morning medication reminder, the doctor report.
+
+## Latest synthetic verification (October 4, 2026)
+
+Live FinchNode read matched age 78, all 14 active medicines, and R1–R5 outcomes/details at the September 1 answer-key date. Relay authentication and zero-webhook delivery settings passed; Gemini answered all synthetic provider checks and read four label fixtures; ElevenLabs credentials and configured voice returned HTTP 200. Family recipients remain unconfigured. These checks do not prove live phone delivery, camera accuracy, or recovery.
+
+The 145-message content catalogue produced 144/145 correct kinds, 40/41 correct button mappings and 16/17 history topics, with no unanswered requests. All 37 safety cases were caught by the model, 36 by the deterministic screen; this is catalogue evidence, not held-out or clinical validation. Two misses remain: a reassuring breathing answer that mentions pillows mapped to Fine, and a step-count history question mapped to chat. Earlier 84% results above describe the prior run.
+
+A clean tracked copy using Node 24.19 installed dependencies in 4 seconds using the local package cache, then completed two fallback rehearsals and the seven-day report scenario. Five report field groups matched database/fixture data: identity, check-in counts/dates, prescription directions, label mismatch and symptom wording/severity. Teammate onboarding time, printed two-page layout, phone viewing, live voice/video/family tests, backup recording, and clinically reviewed safety policy remain open.

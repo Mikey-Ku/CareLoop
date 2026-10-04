@@ -304,6 +304,53 @@ describe("her transcription is lost under a live call", () => {
     expect(sttsHandedOut).toHaveLength(2); // no third attempt
   });
 
+  it("an emergency heard while the reconnect is pending: its reply is the last word, and 'I can't hear you' is never said", async () => {
+    const service = setup();
+    const second = new FakeStt();
+    let failReconnect!: (error: Error) => void;
+    second.connect.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { failReconnect = reject; }));
+    sttsToHandOut.push(second);
+    await start(service);
+    let finishEmergencyReply!: () => void;
+    tts.speak.mockImplementationOnce(async (text: string) => {
+      tts.spoken.push(text);
+      await new Promise<void>((resolve) => { finishEmergencyReply = resolve; }); // the reply takes a while to play, as it does
+    });
+    stt.emitClose("closed"); // the reconnect starts and stays pending
+    await vi.waitFor(() => expect(sttsHandedOut).toHaveLength(2));
+    stt.emit("I have chest pain right now"); // the lost session still delivers her last words
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(urgentReply("Harriet", [])));
+    failReconnect(new Error("ElevenLabs STT connection timed out")); // and the reconnect fails while that reply is playing
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(tts.spoken).not.toContain(cantHearYou("Harriet", []));
+    expect(tts.spoken.at(-1)).toBe(urgentReply("Harriet", []));
+    expect(events()).not.toContain("call_stt_lost");
+    expect(transport.end).not.toHaveBeenCalled(); // the reply is still being said
+    finishEmergencyReply();
+    await vi.waitFor(() => expect(transport.end).toHaveBeenCalledOnce()); // the emergency path ends the call after its reply
+  });
+
+  it("an emergency heard while 'I can't hear you' is being said: the call is not ended under the emergency reply", async () => {
+    const service = setup();
+    const second = new FakeStt();
+    second.connect.mockRejectedValueOnce(new Error("ElevenLabs STT connection timed out"));
+    sttsToHandOut.push(second);
+    await start(service);
+    let endSentence!: () => void;
+    tts.speak.mockImplementationOnce(async (text: string) => {
+      tts.spoken.push(text);
+      await new Promise<void>((resolve) => { endSentence = resolve; }); // the sentence takes a while
+    });
+    tts.cancel.mockImplementation(() => endSentence?.()); // cancel() stops it, as the real voice does
+    stt.emitClose("closed");
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(cantHearYou("Harriet", [])));
+    second.emit("I have chest pain right now"); // she says it while the sentence plays
+    await vi.waitFor(() => expect(tts.spoken.at(-1)).toBe(urgentReply("Harriet", [])));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(transport.end).toHaveBeenCalledOnce(); // by the emergency path, after its reply: not also by the lost-session path
+  });
+
   it("does nothing once the call is over, or after an emergency reply, which ends the call itself", async () => {
     const over = setup();
     await start(over);

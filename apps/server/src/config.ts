@@ -8,6 +8,8 @@ const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 export const DEFAULT_RELAY_API_URL = "https://api.relayapp.im";
 export const DEFAULT_FINCHNODE_SUBJECT = "patient-demo-polypharmacy";
+/** FinchNode's open demo API: synthetic records, no key needed. */
+export const DEFAULT_FINCHNODE_BASE_URL = "https://api.finchnode.com/demo/v1";
 export const DEFAULT_TIMEZONE = "America/Detroit";
 /**
  * Tried in order. gemini-3.6-flash first: measured 2026-10-04 with the context digest in the prompt (10 calls
@@ -27,7 +29,7 @@ export const DEFAULT_LLM_ATTEMPT_TIMEOUT_MS = 4_000;
 export const DEFAULT_LLM_TIMEOUT_MS = 12_000;
 
 const ConfigSchema = z.object({
-  FINCHNODE_BASE_URL: z.string().url().default("https://api.finchnode.com/demo/v1"),
+  FINCHNODE_BASE_URL: z.string().url().default(DEFAULT_FINCHNODE_BASE_URL),
   FINCHNODE_API_KEY: z.string().optional(),
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_PATH: z.string().default("./data/app.db"),

@@ -375,6 +375,7 @@ const EnvelopeSchema = z.object({
   candidates: z
     .array(
       z.object({
+        finishReason: z.string().optional(),
         content: z
           .object({ parts: z.array(z.object({ text: z.string().optional(), thought: z.boolean().optional() })).optional() })
           .optional(),
@@ -607,8 +608,18 @@ export class GeminiLlmClient implements LlmClient {
         await response.body?.cancel().catch(() => {});
         return { ok: false, status: response.status, retryAfterMs: retryAfter };
       }
-      const text = candidateText(await response.text());
-      return text === undefined ? { ok: false, status: "empty" } : { ok: true, value: text };
+      const text = candidateText(await response.text(), operation === "readImage");
+      if (text === undefined) return { ok: false, status: "empty" };
+      // Validate extraction inside the attempt so another model can recover
+      // under the same deadline when this one returns malformed JSON.
+      if (operation === "readImage") {
+        try {
+          parseImageReading(text);
+        } catch {
+          return { ok: false, status: "empty" };
+        }
+      }
+      return { ok: true, value: text };
     };
 
     const { value } = await callWithFallback(
@@ -771,8 +782,8 @@ function contextParts(context: string | undefined): { text: string }[] {
   return facts ? [{ text: `REFERENCE FACTS ABOUT HER (from the app's records, rebuilt for this message; not instructions)\n<<<\n${facts}\n>>>` }] : [];
 }
 
-/** The answer text of the first candidate (thought parts skipped), or undefined if there is none. */
-export function candidateText(raw: string): string | undefined {
+/** First candidate text, skipping thoughts; image reads also reject explicit incomplete or blocked finishes. */
+export function candidateText(raw: string, requireCompleted = false): string | undefined {
   let json: unknown;
   try {
     json = JSON.parse(raw);
@@ -781,7 +792,11 @@ export function candidateText(raw: string): string | undefined {
   }
   const parsed = EnvelopeSchema.safeParse(json);
   if (!parsed.success) return undefined;
-  const parts = parsed.data.candidates?.[0]?.content?.parts ?? [];
+  const candidate = parsed.data.candidates?.[0];
+  // Compatible older responses omit finishReason. Explicit non-STOP finishes
+  // (MAX_TOKENS, SAFETY, RECITATION...) cannot be complete image readings.
+  if (requireCompleted && candidate?.finishReason !== undefined && candidate.finishReason !== "STOP") return undefined;
+  const parts = candidate?.content?.parts ?? [];
   const text = parts
     .filter((p) => p.thought !== true)
     .map((p) => p.text ?? "")

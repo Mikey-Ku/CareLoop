@@ -432,7 +432,9 @@ export class CallService implements CallEventHandler {
         next?.close();
       }
     }
-    if (active.ending || active.mediaClosed) return;
+    // An emergency may have been heard while the reconnect was pending (the lost session can still deliver its
+    // last words): its reply is then the last word, and the end of the call is the emergency path's.
+    if (active.ending || active.mediaClosed || active.safetyLevel >= 4) return;
     this.#log("call_stt_lost", { call_id: active.call.id, reason, ...(failure === undefined ? {} : { error: summary(failure) }) });
     active.conversation?.close();
     const sentence = cantHearYou(active.firstName, this.#familyNames(active.patientId));
@@ -442,6 +444,7 @@ export class CallService implements CallEventHandler {
     } catch (error) {
       this.#log("call_stt_lost_speech_failed", { call_id: active.call.id, error: summary(error) });
     }
+    if (active.safetyLevel >= 4) return; // an emergency cut the sentence short: its reply is being said, and it ends the call after
     active.transport?.end();
   }
 

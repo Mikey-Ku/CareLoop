@@ -131,6 +131,44 @@ describe("GeminiLlmClient.readImage guards", () => {
   });
 });
 
+describe("readImage response recovery", () => {
+  const input = { seniorName: "Harriet", image: PHOTO, mimeType: "image/png" };
+  const label = { kind: "medicine_label", label: { medicineName: "Synthetic medicine", confidence: "high" } };
+
+  it.each(["MAX_TOKENS", "SAFETY", "RECITATION", "OTHER", "malformed"])("rejects %s and uses the next configured model", async (finishReason) => {
+    const urls: string[] = [];
+    const fetch: FetchLike = async (url) => {
+      urls.push(url);
+      if (urls.length === 1) {
+        if (finishReason === "malformed") return ok('{"kind":"discharge_papers","paper":');
+        return new Response(JSON.stringify({ candidates: [{ finishReason, content: { parts: [{ text: JSON.stringify(label) }] } }] }));
+      }
+      return ok(label);
+    };
+    const llm = new GeminiLlmClient({ apiKey: KEY, models: ["lite-a", "lite-b"], timeoutMs: 5000 }, { fetch });
+    expect(await llm.readImage(input)).toEqual({ kind: "medicine_label", label: label.label });
+    expect(urls).toHaveLength(2);
+    expect(urls[1]).toContain("lite-b");
+  });
+
+  it("reports unavailable when every model returns incomplete output", async () => {
+    const fetch: FetchLike = async () => new Response(JSON.stringify({ candidates: [{ finishReason: "MAX_TOKENS", content: { parts: [{ text: JSON.stringify(label) }] } }] }));
+    const llm = new GeminiLlmClient({ apiKey: KEY, models: ["lite-a", "lite-b"], timeoutMs: 5000 }, { fetch });
+    await expect(llm.readImage(input)).rejects.toBeInstanceOf(LlmUnavailableError);
+  });
+
+  it("keeps a complete unreadable response without retrying an unclear photo", async () => {
+    let attempts = 0;
+    const fetch: FetchLike = async () => {
+      attempts += 1;
+      return new Response(JSON.stringify({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: '{"kind":"unreadable","note":"too blurry"}' }] } }] }));
+    };
+    const llm = new GeminiLlmClient({ apiKey: KEY, models: ["lite-a", "lite-b"], timeoutMs: 5000 }, { fetch });
+    expect(await llm.readImage(input)).toEqual({ kind: "unreadable", reason: "too blurry" });
+    expect(attempts).toBe(1);
+  });
+});
+
 describe("parseImageReading", () => {
   it("keeps label text exactly as printed: case, numbers, dashes and punctuation, only whitespace collapsed", () => {
     const instructions = "TAKE 1\u20132 tablets by mouth every 4 to 6 hrs as needed; do NOT exceed 6 in 24 hours.";

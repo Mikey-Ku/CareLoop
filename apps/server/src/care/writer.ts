@@ -35,7 +35,7 @@ export const DOSING_ADVICE = [
   /\b(increase|decrease|double|halve|reduce|raise|lower|cut|adjust|skip|stop)\s+(her|the|his|your)\s+(dose|dosage|medication|medicine|metformin|apixaban|pills?)\b/i,
   /\b(stop|start)\s+(taking|her|the)\s+\w+/i,
 ];
-const DIAGNOSIS = /\bdiagnos\w*|\b(likely|probably|could be|might be|sounds like|suggests?|consistent with)\s+(a |an )?(heart failure|infection|stroke|heart attack|pneumonia|fluid|kidney|bleed)/i;
+export const DIAGNOSIS = /\bdiagnos\w*|\b(likely|probably|could be|might be|sounds like|suggests?|consistent with)\s+(a |an )?(heart failure|infection|stroke|heart attack|pneumonia|fluid|kidney|bleed)/i;
 
 /**
  * A written text fit to send, or undefined. Cleans markdown and (for the family) exclamation marks, then

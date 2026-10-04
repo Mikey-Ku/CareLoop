@@ -199,6 +199,34 @@ describe("idioms and everyday words don't hit", () => {
   });
 });
 
+describe("not only affirms an existing safety phrase", () => {
+  it.each([
+    "I have not only chest pain but dizziness",
+    "Not only chest pain, but nausea too",
+    "I have NOT ONLY chest pain but dizziness",
+    "She has not only chest pain but dizziness",
+    "I had not only chest pain but dizziness",
+    "I do not only have chest pain but dizziness",
+  ])("preserves the urgent hit: %s", (text) => {
+    expect(screenMessage(text)).toEqual({ kind: "urgent_symptom", matched: "chest pain" });
+  });
+
+  it.each([
+    "I have not had chest pain",
+    "No not only chest pain",
+    "Not the only chest pain",
+    "She has not had chest pain",
+    "I had not had chest pain",
+    "I do not have chest pain",
+  ])("preserves other negations: %s", (text) => {
+    expect(screenMessage(text)).toBeUndefined();
+  });
+
+  it.each(["I have only chest pain but no dizziness", "I have not, only chest pain"])("preserves affirmative or separate clauses: %s", (text) => {
+    expect(screenMessage(text)?.kind).toBe("urgent_symptom");
+  });
+});
+
 describe("priority and empty input", () => {
   it.each([
     ["I can't breathe and I want to die", "want to die"],
@@ -244,5 +272,41 @@ describe("phrases added after the first content eval", () => {
     "my granddaughter will notice if the cookies are gone",
   ])("still doesn't hit: %s", (text) => {
     expect(screenMessage(text)).toBeUndefined();
+  });
+});
+
+describe("phrases added for a blood thinner, an ACE inhibitor and a fall risk", () => {
+  it.each([
+    "I had black stools this morning",
+    "my stool was black and sticky",
+    "dark tarry stools since Sunday",
+    "there was blood in my stool",
+    "I noticed blood in my urine today",
+    "bloody stools again",
+    "my urine looks like red urine",
+    "I hit my head on the cupboard",
+    "bumped my head getting out of bed",
+    "I think I have a head injury",
+    "my tongue is swelling up",
+    "my lips are swollen this morning",
+    "my throat is closing up",
+    "I lost my vision in my left eye",
+    "I'm numb on one side of my face",
+  ])("urgent: %s", (text) => {
+    expect(kindOf(text)).toBe("urgent_symptom");
+  });
+
+  it.each([
+    "no black stool",
+    "I haven't had blood in my urine",
+    "I didn't hit my head",
+    "no red urine, thank goodness",
+    "the black stool in the kitchen is wobbly",
+    "I could hit my head against the wall",
+    "my sister had a head injury years ago",
+    "my head hurts a little",
+    "I like dark chocolate",
+  ])("not urgent: %s", (text) => {
+    expect(kindOf(text)).toBeUndefined();
   });
 });
