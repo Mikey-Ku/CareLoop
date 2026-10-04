@@ -221,6 +221,25 @@ describe("care facts: the day's severity, notes and medicines", () => {
     markRefillReminded(db, { patientId: P, medicationKey: apixaban.key, fillDate: "2026-08-02", name: "apixaban 5 mg", runOut: "2026-09-04", day: DAY1, at });
   }
 
+  it("visit questions, label checks and refills belong to her day in America/Detroit, not the UTC date", async () => {
+    await checkIn();
+    const apixaban = normalizeHealthRecord(loadSnapshot(SUBJECT), { rxnav }).medications.find((m) => /apixaban/i.test(m.name))!;
+    const next = new Date(Date.parse(`${DAY1}T00:00:00.000Z`) + 86_400_000).toISOString().slice(0, 10);
+    // 22:30 in Detroit on DAY1 is already the next day in UTC; 23:30 UTC the day before is still the previous day in Detroit.
+    const lateEvening = `${next}T02:30:00.000Z`;
+    const prevEvening = `${DAY1}T03:30:00.000Z`;
+    addVisitQuestion(db, { patientId: P, text: "Asked late in the evening", createdAt: lateEvening });
+    addVisitQuestion(db, { patientId: P, text: "Asked the evening before", createdAt: prevEvening });
+    insertLabelCheck(db, { patientId: P, attachmentId: "att_late", outcome: "not_on_list", medicationKey: null, labelMedicine: "Ibuprofen", labelStrength: "200 mg", createdAt: lateEvening });
+    insertLabelCheck(db, { patientId: P, attachmentId: "att_prev", outcome: "not_on_list", medicationKey: null, labelMedicine: "Naproxen", labelStrength: "220 mg", createdAt: prevEvening });
+    const id = markRefillReminded(db, { patientId: P, medicationKey: apixaban.key, fillDate: "2026-08-02", name: "apixaban 5 mg", runOut: "2026-09-04", day: "2026-08-30", at: prevEvening });
+    db.prepare(`UPDATE med_refills SET status = 'asked', updated_at = ? WHERE id = ?`).run(lateEvening, id);
+    const f = facts();
+    expect(f.visitQuestions).toEqual(["Asked late in the evening"]);
+    expect(f.medicines.labelMismatches.map((l) => l.label)).toEqual(["Ibuprofen 200 mg"]);
+    expect(f.medicines.refills).toEqual([{ medicine: "apixaban 5 mg", runsOut: "2026-09-04", status: "asked", familyTold: false }]);
+  });
+
   it("gathers the ladder by topic (highest first), her notes, visit questions, doses, label mismatches and refills", async () => {
     await busyDay();
     const f = facts();

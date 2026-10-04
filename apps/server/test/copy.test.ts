@@ -27,6 +27,11 @@ import {
   familyRelayWaiting,
   familyUrgentAlert,
   familyWelcome,
+  familySays,
+  familyPassedOn,
+  familyCantPassOn,
+  familyEmergencyAbout,
+  familyCrisisAbout,
   feelingLowReply,
   flagDetail,
   flagNotedReply,
@@ -124,6 +129,8 @@ function allOutputs(): string[] {
   }
   for (const topic of TOPICS) out.push(followUpReply(NAME, "better", topic), followUpReply(NAME, "same", topic));
   out.push(familyWelcome(NAME));
+  out.push(familySays("Sarah", "Love you mom, see you Sunday"), familySays("Sarah", 'she said "hi" \u2014 then left'));
+  out.push(familyPassedOn(NAME), familyCantPassOn(NAME), familyEmergencyAbout(NAME), familyCrisisAbout(NAME));
   out.push(flagDetail(FLAG_MESSAGE), ...ruleFlagMessages.map(flagDetail));
   out.push(didntUnderstand([BUTTON.start, BUTTON.notToday]), didntUnderstand(["Yes"]));
   out.push(explainPrompt(NAME), openReplyUnavailable(NAME));
@@ -224,6 +231,7 @@ describe("copy: style rules across every output", () => {
       "recordLinkEndedFamily", "recordLinkEndedSenior", "redFlagAdvice", "sharingChangedFamily", "sharingChangedSenior", "sharingLevelFromButton",
       "sharingMenu", "smallTalkFallback", "sorryNotGreat", "symptomNotedReply", "topicWords", "typedReplyUnavailable", "urgentReply", "withLead",
       "withTypingHint", "answerPhrase", "suggestedConfirm", "understoodLine",
+      "familySays", "familyPassedOn", "familyCantPassOn", "familyEmergencyAbout", "familyCrisisAbout",
       ...MEDS_COPY_FUNCTIONS,
     ].sort();
     expect(fns).toEqual(sampled);

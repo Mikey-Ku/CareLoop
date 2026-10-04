@@ -17,6 +17,7 @@ import {
   finishedCheckinsBefore,
   insertCheckin,
   latestCheckin,
+  latestCheckinPromptAt,
   markInboundHandled,
   patientForChat,
   recordCheckinPrompt,
@@ -54,7 +55,8 @@ import {
   scheduleFollowUp,
   type FollowUpRow,
 } from "../db/follow-ups.ts";
-import { dueNudges, getDose, markNudged, recordMedPrompt } from "../db/meds.ts";
+import { dueNudges, getDose, latestMedPromptAt, markNudged, openDose, openRefill, pendingMemoryCheck, recordMedPrompt } from "../db/meds.ts";
+import { closeWaitingPrompts, openWaitingPrompt, openWaitingPrompts } from "../db/waiting-prompts.ts";
 import { addMemories, recentMemories } from "../db/memories.ts";
 import { addCheckinNote, addVisitQuestion, checkinNotes } from "../db/notes.ts";
 import { addObservation, highestOfDay, observationsBetween, type ObservationSource } from "../db/observations.ts";
@@ -214,7 +216,19 @@ import {
 // (InboundMessage.replyTo); a tap on a message sent for another step, another day
 // or no step at all doesn't answer what is pending now. It re-sends the current
 // prompt instead. "Not today" from the greeting or any question of the pending
-// check-in still ends the day. Typed text (no replyTo) is matched as before.
+// check-in still ends the day.
+//
+// Latest prompt wins (live bug 2026-10-04: after "I have a question" on the medicines reminder, an older
+// open check-in's greeting took her question "What does it look like :(" as her open reply). Typed text
+// with no replyTo that isn't one of our labels goes to the MOST RECENTLY SENT prompt still waiting for her
+// (newestWaiting): the check-in's latest step (checkin_prompts, or "Let me explain"), an open follow-up,
+// "I have a question" ("Go ahead", src/db/waiting-prompts.ts), a medicines reminder, memory check or refill
+// reminder (med_prompts), the paper check, or the sharing menu. A check-in whose latest prompt is older than
+// another waiting prompt doesn't take it: a follow-up gets it as before, "I have a question" makes it her
+// medicine question (fixed reply, visit_questions), a paper check leaves it alone, and anything else reads
+// it as plain chat with nothing pending (then the check-in's step again). On a tie the check-in keeps it.
+// A waiting_prompts row waits for one typed message and closes once one is planned. Taps (replyTo) still
+// go to their own message, labels to whoever shows them, and the safety screen still runs first.
 //
 // Severity ladder (src/checkin/severity.ts, docs/DESIGN.md): every answer, typed symptom,
 // follow-up answer and safety hit gets a level from fixed tables, saved in symptom_observations.
@@ -373,7 +387,21 @@ type TypedContext =
   | { at: "question"; c: CheckinRow; q: Question }
   | { at: "step"; c: CheckinRow; prompt: Prompt }
   | { at: "follow_up"; f: FollowUpRow }
+  /** "I have a question" on a medicines reminder: her next typed message is her medicine question. */
+  | { at: "meds_question"; promptId: number }
   | { at: "none" };
+
+/** A prompt waiting for her reply, and when it last went out (see "Latest prompt wins"). */
+type Waiting =
+  | { kind: "checkin"; at: string }
+  | { kind: "follow_up"; at: string; f: FollowUpRow }
+  | { kind: "meds_question"; at: string; promptId: number }
+  | { kind: "meds" | "paper" | "sharing_menu"; at: string };
+
+/** The latest of some ISO timestamps, ignoring missing ones. */
+function latestOf(...xs: (string | null | undefined)[]): string | undefined {
+  return xs.reduce<string | undefined>((m, x) => (x && (m === undefined || x > m) ? x : m), undefined);
+}
 
 /** Typed text the first planning pass found, which needs the LLM before it can be planned. */
 type FreeTextNeed = {
@@ -576,6 +604,9 @@ const ALL_LABELS = new Set(
 );
 const isButtonLabel = (text: string) => ALL_LABELS.has(norm(text));
 
+/** Typed text that is neither a tap (no replyTo) nor one of our labels: see "Latest prompt wins". */
+const isFreeText = (msg: InboundMessage) => msg.replyTo === undefined && msg.text.trim().length > 0 && !isButtonLabel(msg.text);
+
 function questionById(id: string): Question {
   const q = QUESTIONS_BY_ID.get(id);
   if (!q) throw new Error(`Check-in refers to unknown question "${id}"`);
@@ -599,6 +630,8 @@ function contextKey(ctx: TypedContext): string {
       return `step:${ctx.c.id}:${ctx.prompt.step}`;
     case "follow_up":
       return `follow_up:${ctx.f.id}`;
+    case "meds_question":
+      return `meds_question:${ctx.promptId}`;
     case "none":
       return "none";
   }
@@ -661,7 +694,10 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       checkinTakes: (patient, text) => {
         const c = pendingCheckin(patient.id);
         const p = c && currentPrompt(patient, c);
-        return p !== undefined && p.buttons.some((b) => is(b, text));
+        if (p === undefined || !p.buttons.some((b) => is(b, text))) return false;
+        // A label both show ("Not yet") is the helper's when its prompt is the newer one.
+        const newest = newestWaiting(patient, c);
+        return newest?.kind !== "meds" && newest?.kind !== "meds_question";
       },
     },
   });
@@ -1173,6 +1209,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     const chatId = msg.chatId;
     if (is(msg.text, SHARING_MENU_BUTTON)) {
       const current = getSharing(db, patient.id);
+      openWaitingPrompt(db, { patientId: patient.id, kind: "sharing_menu", at: clock.now() });
       return [
         {
           chatId,
@@ -1187,6 +1224,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (!level) return undefined;
     const before = getSharing(db, patient.id);
     setSharing(db, patient.id, level);
+    closeWaitingPrompts(db, patient.id, clock.now(), "sharing_menu");
     return [
       { chatId, message: { text: sharingChangedSenior(level) }, key: `${patient.id}:sharing-changed:${msg.messageId}` },
       // The family hears that it changed, not why; nothing if she picked the level she already had.
@@ -1315,6 +1353,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         return [...ctx.prompt.buttons];
       case "follow_up":
         return [...FOLLOW_UP_LABELS];
+      case "meds_question":
       case "none":
         return [];
     }
@@ -1328,7 +1367,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
   /** A reply carrying the pending buttons, remembered as that step's prompt so a tap on it answers it. */
   function withButtons(patient: CheckinPatient, ctx: TypedContext, msg: InboundMessage, text: string, slot: string): Send {
     const key = `${patient.id}:${slot}:${msg.messageId}`;
-    const message = { text, ...(ctx.at === "none" ? {} : { buttons: buttonsOf(ctx) }) };
+    const message = { text, ...(ctx.at === "none" || ctx.at === "meds_question" ? {} : { buttons: buttonsOf(ctx) }) };
     if (ctx.at === "question") return { chatId: msg.chatId, message, key: `${patient.id}:${ctx.c.date}:${slot}:${msg.messageId}`, prompt: promptFor(ctx.c, "question") };
     if (ctx.at === "step") return { chatId: msg.chatId, message, key: `${patient.id}:${ctx.c.date}:${slot}:${msg.messageId}`, prompt: promptFor(ctx.c, ctx.prompt.step) };
     return { chatId: msg.chatId, message, key };
@@ -1348,6 +1387,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         return { question: ctx.prompt.text, options: [...ctx.prompt.buttons] };
       case "follow_up":
         return { question: followUpQuestion(name, followUpTopic(ctx.f.reason)), options: [...FOLLOW_UP_LABELS] };
+      case "meds_question":
       case "none":
         return undefined;
     }
@@ -1385,9 +1425,10 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         needs: {
           kind: "classify",
           context,
-          at: ctx.at,
+          at: ctx.at === "meds_question" ? "none" : ctx.at,
           about: here,
-          noSmallTalk: redFlagYes !== undefined,
+          // An explicit yes on a red-flag question, or her medicine question: the reply is fixed.
+          noSmallTalk: redFlagYes !== undefined || ctx.at === "meds_question",
           classify: { seniorName: name, message: text, pending: pendingFor(ctx, name) },
           smallTalk: { seniorName: name, message: text, memories: recentMemories(db, patient.id, SMALL_TALK_MEMORIES) },
           // The understanding pass, while a question waits (an explicit yes on a red-flag question needs none).
@@ -1413,6 +1454,8 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
 
     if (cls?.kind === "crisis" || cls?.kind === "urgent_symptom") return { sends: planSafety(patient, msg, cls.kind) };
     if (cls) addMemories(db, patient.id, [...cls.memories, ...cls.complaints], clock.now());
+    // Her words after "I have a question" (see "Latest prompt wins"): her medicine question.
+    if (ctx.at === "meds_question") return { sends: planMedsQuestion(patient, msg, text, cls) };
 
     // An explicit yes on a red-flag question is her "Yes": a fixed rule, with or without the LLM.
     if (ctx.at === "question" && redFlagYes !== undefined && !stale) {
@@ -1519,9 +1562,23 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
         if (answer === undefined) return didnt();
         return planFollowUpAnswer(patient, ctx.f, answer, msg);
       }
+      case "meds_question": // planned before any reaction (planMedsQuestion)
       case "none":
         return [];
     }
+  }
+
+  /**
+   * Her message after "I have a question" on a medicines reminder: never answered here. The fixed "ask your
+   * doctor or pharmacist" reply and it goes on her visit list (instruction-like text is not kept), unless the
+   * model read it as feeling low or a message for her family (their own replies). Then the check-in's step again.
+   */
+  function planMedsQuestion(patient: CheckinPatient, msg: InboundMessage, text: string, cls: MessageClassification | undefined): Send[] {
+    closeWaitingPrompts(db, patient.id, clock.now(), "meds_question");
+    const again = reprompt(patient, msg.chatId, msg.messageId);
+    if (cls?.kind === "feeling_low" || cls?.kind === "family_message") return [...kindReply(patient, msg, cls, text), ...again];
+    if (!looksLikeInstructions(text)) addVisitQuestion(db, { patientId: patient.id, text, createdAt: clock.now() });
+    return [{ chatId: msg.chatId, message: { text: medicineQuestionReply(patient.preferredName) }, key: `${patient.id}:reply:${msg.messageId}` }, ...again];
   }
 
   /**
@@ -1551,7 +1608,11 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (!patient) return { sends: [] };
     if (inboundSeen(db, msg.messageId)) return { sends: [] };
     const planned = routeInbound(patient, msg, fresh, understood);
-    if (!("needs" in planned)) markInboundHandled(db, msg.messageId, msg.chatId, clock.now());
+    if (!("needs" in planned)) {
+      markInboundHandled(db, msg.messageId, msg.chatId, clock.now());
+      // "Go ahead" and the sharing menu wait for one typed message: once one is planned, whatever took it, they close.
+      if (isFreeText(msg)) closeWaitingPrompts(db, patient.id, clock.now());
+    }
     return planned;
   }
 
@@ -1579,10 +1640,26 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (onFollowUp && onFollowUp.patientId === patient.id && !onFollowUp.answeredAt)
       return planTyped(patient, msg, { at: "follow_up", f: onFollowUp }, typed);
 
+    // Latest prompt wins (see above): typed text goes to the newest prompt still waiting for her.
+    const newest = isFreeText(msg) ? newestWaiting(patient, c) : undefined;
+    if (newest?.kind === "meds_question") return planTyped(patient, msg, { at: "meds_question", promptId: newest.promptId }, typed);
+    if (c && newest && newest.kind !== "checkin") {
+      // Something was sent after anything the check-in asked: her words are not the check-in's.
+      if (newest.kind === "follow_up") return planTyped(patient, msg, { at: "follow_up", f: newest.f }, typed);
+      if (newest.kind === "paper") return { sends: [] }; // left alone, as with no check-in
+      // Plain chat with nothing pending, then the check-in's step again so she can carry on (not after a safety reply).
+      const planned = planTyped(patient, msg, { at: "none" }, typed);
+      if ("needs" in planned) return planned;
+      const kind = typed?.classification?.kind;
+      if (kind === "crisis" || kind === "urgent_symptom") return planned;
+      return { sends: [...planned.sends, ...reprompt(patient, msg.chatId, msg.messageId)] };
+    }
+
     if (!c) {
       // Nothing pending: a late tap (one of our labels) or a paper check waiting for her is left alone.
       if (isButtonLabel(msg.text) || pendingReadback(db, patient.id) || pendingPaperFollowUp(db, patient.id)) return { sends: [] };
-      const f = openFollowUp(db, patient.id);
+      // An open follow-up takes typed text unless something newer waits (then it is plain chat).
+      const f = newest ? (newest.kind === "follow_up" ? newest.f : undefined) : openFollowUp(db, patient.id);
       return planTyped(patient, msg, f ? { at: "follow_up", f } : { at: "none" }, typed);
     }
     const chatId = msg.chatId;
@@ -1613,6 +1690,30 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     if (c.step === "greeting") return planOpenReply(patient, msg, c, understood?.kind === "extract" ? understood : undefined);
     const prompt = currentPrompt(patient, c);
     return planTyped(patient, msg, prompt ? { at: "step", c, prompt } : { at: "none" }, typed);
+  }
+
+  /**
+   * The prompt still waiting for her that went out last (see "Latest prompt wins"), or undefined when nothing
+   * waits. `c`: the pending check-in. On a tie the check-in wins (it is first, and only a newer one replaces it).
+   */
+  function newestWaiting(patient: CheckinPatient, c: CheckinRow | undefined): Waiting | undefined {
+    const all: Waiting[] = [];
+    if (c) all.push({ kind: "checkin", at: latestOf(latestCheckinPromptAt(db, c.id), c.explainAt, c.sentAt) ?? "" });
+    const f = openFollowUp(db, patient.id);
+    if (f?.sentAt) all.push({ kind: "follow_up", at: f.sentAt, f });
+    for (const w of openWaitingPrompts(db, patient.id))
+      all.push(w.kind === "meds_question" ? { kind: "meds_question", at: w.openedAt, promptId: w.id } : { kind: "sharing_menu", at: w.openedAt });
+    const dose = openDose(db, patient.id);
+    const refill = openRefill(db, patient.id);
+    const medsAt = latestOf(
+      dose && latestOf(latestMedPromptAt(db, "dose", dose.id), dose.sentAt, dose.nudgedAt),
+      pendingMemoryCheck(db, patient.id)?.askedAt,
+      refill?.status === "reminded" ? latestOf(latestMedPromptAt(db, "refill", refill.id), refill.updatedAt) : undefined,
+    );
+    if (medsAt) all.push({ kind: "meds", at: medsAt });
+    const paperAt = latestOf(pendingReadback(db, patient.id)?.createdAt, pendingPaperFollowUp(db, patient.id)?.confirmedAt);
+    if (paperAt) all.push({ kind: "paper", at: paperAt });
+    return all.reduce<Waiting | undefined>((best, w) => (best === undefined || w.at > best.at ? w : best), undefined);
   }
 
   /** She tapped "Let me explain" on the pending question: an invitation to type, no buttons, and the question marked. */

@@ -136,6 +136,7 @@ A rule result is recomputed on every snapshot and shown to no one. A rule result
 - At most one new flag is offered per day, apart from the 3 questions, with buttons "Tell me more" and "Later". "Later" on the offer (before she has heard it) keeps it `new` for another day; once she has heard it, "Later" leaves it `told`, for record flags and paper (R6) flags alike.
 - Family sees flags only at sharing level `all`, inside the daily status. Flags never send an alert.
 - Red flags (below) are a different thing and skip this lifecycle.
+- While an R6 flag is not cleared, a medicine her papers say was stopped (or changed to another dose) that her record still lists keeps its place in the medicines reminder, with her label words verbatim and then "Your hospital papers say this was stopped. Please check with your pharmacist before taking it." ("changed" likewise). The same note goes on its memory check and a matching label photo (`src/meds/paper-notes.ts`). Nothing tells her to stop it.
 
 ## Daily questions and red flags
 
@@ -181,6 +182,10 @@ Buttons stay the main way to answer. Typed replies are the second way, read by t
 
 Every typed message during the check-in gets one understanding pass: the safety screen, then extraction (answers to any of today's unanswered questions, each symptom under its own topic, told which question she is answering right now) and the classifier in parallel. Everything is applied at once, then the check-in goes on at the first unanswered question. A templated line says back what was understood ("Got it: ankles feeling fine. I've noted the back pain for your doctor."). On a red-flag question a reading below level 3 becomes a suggested confirm ("It sounds like your breathing was a little hard at times. Is that right?" with "Yes, that's right" and the other options); she always taps. The generic "You wrote: ... Just to check" confirm remains only when the reading is unclear.
 
+### Latest prompt wins (2026-10-04)
+
+Live bug: she tapped "I have a question" on the medicines reminder, typed her question, and an older open check-in's greeting took it as her open reply ("Thanks, Harriet." and the ankle question). Typed text with no replyTo that isn't one of our labels now goes to the most recently sent prompt still waiting for her: the check-in's latest step, an open follow-up, "I have a question" (her next message is her medicine question: the fixed reply, saved to `visit_questions`), a medicines reminder, memory check or refill reminder, the paper check, or the sharing menu (`waiting_prompts`, migration 13, for the last two kinds). A check-in whose latest prompt is older doesn't take it; text meant for a reminder, refill or menu is read as plain chat and the check-in's step is sent again. Taps still go to their own message, a label to whoever shows it, and the safety screen runs first.
+
 ### Message kinds and reactions
 
 Every typed message goes through a fixed phrase screen first (`src/safety/screen.ts`, crisis and urgent symptom), then the LLM sorts it into one kind; fixed rules react. A screen hit always wins; the LLM may raise a message to crisis or urgent, never lower it. The phrase lists are a demo starting point (see FEEDBACK.md). Live check after a test conversation on 2026-10-03 found the old flow looped her when she tried to explain, ignored a typed "Yes", and went straight back to routine after a red flag.
@@ -224,7 +229,8 @@ Two separate permissions:
 - Only Harriet changes her sharing level, from a "Sharing" button in her chat, at any time. The family is told it changed, not why.
 - Red flags always reach the family; the sharing level only limits the detail. This deliberately overrides her privacy choice (see `docs/BRIEF.md` constraints).
 - Record consent ends (410): stop reading, delete stored snapshots and flags for her, tell Harriet and the family the record link ended. Chat history, check-ins and memories stay unless she asks to delete them.
-- A family member gets a one-time welcome the first time they message the agent: it is an assistant, they'll get Harriet's updates there, she decides how much they see, urgent alerts always come through.
+- A family member gets a one-time welcome the first time they message the agent: it is an assistant, they'll get Harriet's updates there, she decides how much they see, urgent alerts always come through, and what they write there is passed on to her.
+- Family messages to Harriet (2026-10-04, `src/relay/family-inbound.ts`): a text from a linked family chat goes to her chat as `Sarah says: "..."` (display name, else handle; trimmed, capped at 500 characters) and the family member hears "I've passed that on to Harriet." The safety screen reads it first in the third person, as for care replies ("Mom fell" reads as "I fell"): an emergency happening to her gets the 911-now reply and a crisis gets 988, and neither is passed on (the reply says so). A bare "Thanks" or "Ok" answers our update and is not passed on. Their words are plain text: never read by a model, never an answer to her check-in, never a sharing change. Only who and when are stored (`family_messages`).
 
 ## Context packet
 
@@ -270,6 +276,7 @@ For calls, the packet goes to ElevenLabs as dynamic variables through the bridge
 | clarifications | one "A little, or a lot?" per check-in and question (migration 7) |
 | care_summaries | id, patient_id, day, trigger, facts_json (the day's facts frozen when first summarized), created_at; unique per patient, day, trigger (migration 11) |
 | care_messages | id, patient_id, audience (doctor, family), phone, direction, kind (summary, reply, inbound), summary_id, idempotency_key, photon_message_id, text, created_at, sent_at, error (Photon texts, planned before sending) |
+| waiting_prompts | id, patient_id, kind (meds_question, sharing_menu), ref_id, opened_at, closed_at (prompts waiting for her next typed message: "Latest prompt wins"; migration 13) |
 
 ## Care summaries over Photon
 

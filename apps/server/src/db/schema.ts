@@ -463,6 +463,21 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX call_transcript_call ON call_transcript_turns (call_id, sequence);
   `,
+  // 13: prompts that wait for her next typed message and live outside the check-in and the medication
+  // tables (src/db/waiting-prompts.ts): "I have a question" on a medicines reminder ("Go ahead, ...")
+  // and the sharing menu. Typed text goes to the most recently sent prompt still waiting (engine.ts
+  // "Latest prompt wins"); each closes once her next typed message is planned.
+  `
+  CREATE TABLE waiting_prompts (
+    id INTEGER PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('meds_question', 'sharing_menu')),
+    ref_id INTEGER,
+    opened_at TEXT NOT NULL,
+    closed_at TEXT
+  );
+  CREATE INDEX waiting_prompts_open ON waiting_prompts (patient_id, closed_at, opened_at);
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
