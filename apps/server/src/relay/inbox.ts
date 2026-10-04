@@ -127,8 +127,9 @@ function patientForHandle(db: Db, handle: string): PatientLink | undefined {
 /**
  * Store the senior's direct chat id (and her handle). A targeted UPDATE, not
  * upsertPatient, so fields this code doesn't know (sharing, timezone) are left alone.
+ * The call service uses it too, when she calls before she has typed.
  */
-function linkPatientChat(db: Db, patientHandle: string, chatId: string): { patientId: string; changed: boolean } | undefined {
+export function linkPatientChat(db: Db, patientHandle: string, chatId: string): { patientId: string; changed: boolean } | undefined {
   const patient = patientForHandle(db, patientHandle);
   if (!patient) return undefined;
   const changed = patient.relayChatId !== chatId || patient.relayHandle === null;

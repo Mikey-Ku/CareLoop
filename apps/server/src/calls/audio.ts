@@ -12,7 +12,15 @@ const require = createRequire(import.meta.url);
 
 export type AudioLogger = (event: string, fields?: Record<string, unknown>) => void;
 
-/** Converts Relay's interleaved PCM16 frame to mono 16 kHz for Scribe realtime. */
+/** What Scribe realtime is given (audio_format pcm_48000): Relay's own rate, so her speech is only downmixed, never resampled. */
+const STT_SAMPLE_RATE = 48_000;
+
+/**
+ * Converts Relay's interleaved PCM16 frame to mono PCM16 at 48 kHz for Scribe realtime. A 48 kHz frame, which
+ * is what the transport delivers, is only downmixed (the old 16 kHz path interpolated without an anti-alias
+ * filter and misheard quiet words, "list in April" for "Lisinopril"). A frame at another rate is resampled by
+ * linear interpolation, as a fallback.
+ */
 export function relayAudioToStt(frame: { samples: Int16Array; sampleRate: number; channelCount: number }): Int16Array {
   if (!Number.isInteger(frame.sampleRate) || frame.sampleRate <= 0) throw new Error("invalid Relay audio sample rate");
   if (!Number.isInteger(frame.channelCount) || frame.channelCount < 1 || frame.channelCount > 2) throw new Error("unsupported Relay audio channel count");
@@ -32,10 +40,10 @@ export function relayAudioToStt(frame: { samples: Int16Array; sampleRate: number
     }
     mono[i] = count === 0 ? 0 : total / count;
   }
-  if (frame.sampleRate === 16_000) return floatToPcm16(mono);
-  const outputLength = Math.max(1, Math.round(mono.length * 16_000 / frame.sampleRate));
+  if (frame.sampleRate === STT_SAMPLE_RATE) return floatToPcm16(mono);
+  const outputLength = Math.max(1, Math.round(mono.length * STT_SAMPLE_RATE / frame.sampleRate));
   const output = new Float32Array(outputLength);
-  const ratio = frame.sampleRate / 16_000;
+  const ratio = frame.sampleRate / STT_SAMPLE_RATE;
   for (let i = 0; i < outputLength; i += 1) {
     const source = i * ratio;
     const left = Math.floor(source);
@@ -56,6 +64,8 @@ export type RealtimeSttOptions = {
   apiKey: string;
   modelId?: string;
   languageCode?: string;
+  /** ELEVENLABS_STT_VAD_SILENCE_SECS: how long she must pause before her turn is committed. Default 0.7. */
+  vadSilenceSecs?: number;
   log?: AudioLogger;
   webSocket?: WsConstructor;
 };
@@ -97,9 +107,9 @@ export class ElevenLabsRealtimeStt {
     const WebSocketImpl = this.#options.webSocket ?? (require("ws") as WsConstructor);
     const query = new URLSearchParams({
       model_id: this.#options.modelId ?? "scribe_v2_realtime",
-      audio_format: "pcm_16000",
+      audio_format: `pcm_${STT_SAMPLE_RATE}`,
       commit_strategy: "vad",
-      vad_silence_threshold_secs: "0.85",
+      vad_silence_threshold_secs: String(this.#options.vadSilenceSecs ?? 0.7),
       ...(this.#options.languageCode ? { language_code: this.#options.languageCode } : {}),
     });
     const socket = new WebSocketImpl(`wss://api.elevenlabs.io/v1/speech-to-text/realtime?${query.toString()}`, { headers: { "xi-api-key": this.#options.apiKey } });
@@ -160,11 +170,26 @@ export class ElevenLabsRealtimeStt {
   }
 }
 
+/**
+ * A soft limiter for the voice: y = tanh(g * x) / tanh(g) on samples scaled to [-1, 1]. Quiet speech is
+ * raised (about 4.7 dB at g = 1.6) and loud peaks are rounded off instead of clipped, so the result never
+ * leaves the int16 range. A gain of 1 (or less) returns the samples untouched.
+ */
+export function softLimit(samples: Int16Array, gain: number): Int16Array {
+  if (!(gain > 1)) return samples;
+  const scale = 32_768 / Math.tanh(gain);
+  const output = new Int16Array(samples.length);
+  for (let i = 0; i < samples.length; i += 1) output[i] = Math.max(-32_768, Math.min(32_767, Math.round(Math.tanh((gain * (samples[i] ?? 0)) / 32_768) * scale)));
+  return output;
+}
+
 export type ElevenLabsTtsOptions = {
   apiKey: string;
   voiceId: string;
   modelId?: string;
   outputFormat?: string;
+  /** ELEVENLABS_TTS_GAIN: the soft limiter's gain on the voice (softLimit). Absent or 1: untouched. */
+  gain?: number;
   log?: AudioLogger;
   fetch?: typeof fetch;
 };
@@ -231,7 +256,7 @@ export class ElevenLabsTts {
           remainder = bytes.slice(usableLength);
           if (usableLength === 0) continue;
           const samples = new Int16Array(bytes.buffer, bytes.byteOffset, usableLength / 2);
-          await this.#transport.writeAudio({ samples, sampleRate: 48_000, channelCount: 1 });
+          await this.#transport.writeAudio({ samples: softLimit(samples, this.#options.gain ?? 1), sampleRate: 48_000, channelCount: 1 });
         }
         if (!controller.signal.aborted) await this.#transport.waitForPlayout();
       } finally {

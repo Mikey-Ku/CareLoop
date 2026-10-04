@@ -199,4 +199,27 @@ describe("direct ElevenLabs call settings", () => {
     expect(JSON.stringify(config)).not.toContain(presageKey);
     expect(() => loadConfig({ ELEVENLABS_TTS_OUTPUT_FORMAT: "pcm_24000" })).toThrow("ELEVENLABS_TTS_OUTPUT_FORMAT");
   });
+
+  it("voice gain defaults to 1.6; 1 means untouched; values outside 1 to 4 are refused", () => {
+    expect(loadConfig({}).calls.elevenLabsTtsGain).toBe(1.6);
+    expect(loadConfig({ ELEVENLABS_TTS_GAIN: "" }).calls.elevenLabsTtsGain).toBe(1.6);
+    expect(loadConfig({ ELEVENLABS_TTS_GAIN: "1" }).calls.elevenLabsTtsGain).toBe(1);
+    expect(loadConfig({ ELEVENLABS_TTS_GAIN: "2.5" }).calls.elevenLabsTtsGain).toBe(2.5);
+    for (const bad of ["0.5", "0", "-1", "9", "loud"]) expect(() => loadConfig({ ELEVENLABS_TTS_GAIN: bad }), bad).toThrow("ELEVENLABS_TTS_GAIN");
+  });
+
+  it("speech wait defaults to 0.7 s and takes 0.3 to 3; anything else is refused", () => {
+    expect(loadConfig({}).calls.elevenLabsSttVadSilenceSecs).toBe(0.7);
+    expect(loadConfig({ ELEVENLABS_STT_VAD_SILENCE_SECS: "" }).calls.elevenLabsSttVadSilenceSecs).toBe(0.7);
+    expect(loadConfig({ ELEVENLABS_STT_VAD_SILENCE_SECS: "1.2" }).calls.elevenLabsSttVadSilenceSecs).toBe(1.2);
+    for (const bad of ["0.1", "0", "5", "soon"]) expect(() => loadConfig({ ELEVENLABS_STT_VAD_SILENCE_SECS: bad }), bad).toThrow("ELEVENLABS_STT_VAD_SILENCE_SECS");
+  });
+
+  it("speech language defaults to en, takes another ISO code, and an empty value means auto-detect", () => {
+    expect(loadConfig({}).calls.elevenLabsSttLanguage).toBe("en");
+    expect(loadConfig({ ELEVENLABS_STT_LANGUAGE: " ES " }).calls.elevenLabsSttLanguage).toBe("es");
+    expect(loadConfig({ ELEVENLABS_STT_LANGUAGE: "" }).calls.elevenLabsSttLanguage).toBeUndefined();
+    expect(loadConfig({ ELEVENLABS_STT_LANGUAGE: "  " }).calls.elevenLabsSttLanguage).toBeUndefined();
+    for (const bad of ["english", "e", "en-US", "1"]) expect(() => loadConfig({ ELEVENLABS_STT_LANGUAGE: bad }), bad).toThrow("ELEVENLABS_STT_LANGUAGE");
+  });
 });

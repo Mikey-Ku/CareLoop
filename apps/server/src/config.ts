@@ -61,8 +61,12 @@ const ConfigSchema = z.object({
   ELEVENLABS_API_KEY: z.string().optional(),
   ELEVENLABS_VOICE_ID: z.string().optional(),
   ELEVENLABS_STT_MODEL: z.string().default("scribe_v2_realtime"),
+  /** How long she must pause before her turn is taken as finished. It is added to every reply's wait; it was 0.85 and a real call felt slow. */
+  ELEVENLABS_STT_VAD_SILENCE_SECS: z.coerce.number().min(0.3, "must be 0.3 to 3 seconds").max(3, "must be 0.3 to 3 seconds").default(0.7),
   ELEVENLABS_TTS_MODEL: z.string().default("eleven_flash_v2_5"),
   ELEVENLABS_TTS_OUTPUT_FORMAT: z.string().default("pcm_48000").pipe(z.literal("pcm_48000")),
+  /** Soft limiter on the voice (src/calls/audio.ts softLimit). 1 leaves it untouched; 1.6 lifts a quiet voice about 4.7 dB without clipping. */
+  ELEVENLABS_TTS_GAIN: z.coerce.number().min(1, "must be 1 (untouched) or more").max(4, "must be 4 or less").default(1.6),
   CALL_QUIET_MEASUREMENT_MS: z.coerce.number().int().min(30_000).max(45_000).default(30_000),
   /** Longest call; the server ends the ElevenLabs session after it (Relay's 32 s is only the time to answer). */
   CALL_MAX_MINUTES: z.coerce.number().positive().max(30).default(4),
@@ -110,8 +114,14 @@ export type CallsConfig = {
   /** ElevenLabs voice used by direct streaming TTS. */
   elevenLabsVoiceId: string | undefined;
   elevenLabsSttModel: string;
+  /** ELEVENLABS_STT_LANGUAGE: the language code of her speech ("en" unless set); undefined means ElevenLabs detects it. */
+  elevenLabsSttLanguage: string | undefined;
+  /** ELEVENLABS_STT_VAD_SILENCE_SECS: her pause, in seconds, that ends a turn. */
+  elevenLabsSttVadSilenceSecs: number;
   elevenLabsTtsModel: string;
   elevenLabsTtsOutputFormat: string;
+  /** ELEVENLABS_TTS_GAIN: the voice's soft limiter gain, 1 to 4 (1 untouched). */
+  elevenLabsTtsGain: number;
   /** SmartSpectra key. Non-enumerable and never logged. */
   presageApiKey: string | undefined;
   /** SmartSpectra's minimum quiet window for breathing. */
@@ -170,8 +180,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     elevenLabsApiKey: undefined,
     elevenLabsVoiceId: c.ELEVENLABS_VOICE_ID?.trim() || undefined,
     elevenLabsSttModel: c.ELEVENLABS_STT_MODEL.trim(),
+    elevenLabsSttLanguage: sttLanguageCode(env.ELEVENLABS_STT_LANGUAGE),
+    elevenLabsSttVadSilenceSecs: c.ELEVENLABS_STT_VAD_SILENCE_SECS,
     elevenLabsTtsModel: c.ELEVENLABS_TTS_MODEL.trim(),
     elevenLabsTtsOutputFormat: c.ELEVENLABS_TTS_OUTPUT_FORMAT.trim(),
+    elevenLabsTtsGain: c.ELEVENLABS_TTS_GAIN,
     presageApiKey: undefined,
     quietMeasurementMs: c.CALL_QUIET_MEASUREMENT_MS,
     maxMinutes: c.CALL_MAX_MINUTES,
@@ -226,6 +239,19 @@ export function parseHandles(value: string | undefined): string[] {
     if (handle) seen.add(handle);
   }
   return [...seen];
+}
+
+/**
+ * ELEVENLABS_STT_LANGUAGE: "en" when unset. Unlike the other settings an empty value means something,
+ * no language code, so ElevenLabs detects the language itself (it once took English for Chinese), which is
+ * why this is read from the raw environment, where an empty value is still empty.
+ */
+function sttLanguageCode(value: string | undefined): string | undefined {
+  if (value === undefined) return "en";
+  const code = value.trim().toLowerCase();
+  if (code === "") return undefined;
+  if (!/^[a-z]{2,3}$/.test(code)) throw new ConfigError("ELEVENLABS_STT_LANGUAGE: use an ISO language code such as en (empty means auto-detect)");
+  return code;
 }
 
 /** Comma separated values, trimmed, blanks and repeats dropped; undefined when nothing is left. */

@@ -27,6 +27,9 @@ Do "Try it on your phone" in the [README](../README.md#try-it-on-your-phone-abou
 | `GEMINI_MODELS`, `LLM_TIMEOUT_MS`, `LLM_ATTEMPT_TIMEOUT_MS` | Model list and time budget | Leave defaults |
 | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | Realtime transcription and spoken replies inside the Relay call (no ElevenLabs agent, tool secret or tunnel) | Needed for calls |
 | `ELEVENLABS_STT_MODEL`, `ELEVENLABS_TTS_MODEL`, `ELEVENLABS_TTS_OUTPUT_FORMAT` | Direct ElevenLabs model and audio format | Leave defaults |
+| `ELEVENLABS_STT_LANGUAGE` | Language of her speech for transcription, an ISO code (default `en`). Empty means auto-detect, which once took English for Chinese | Leave `en` for English speakers |
+| `ELEVENLABS_STT_VAD_SILENCE_SECS` | How long she must pause, in seconds (0.3 to 3; default 0.7), before her turn is taken as finished. Every reply waits this long | Optional; lower it if replies feel slow, raise it if she is cut off |
+| `ELEVENLABS_TTS_GAIN` | How loud the voice is: a soft limiter, 1 to 4 (default 1.6; 1 leaves it untouched) | Optional; raise it if the voice sounds quiet |
 | `PRESAGE_API_KEY` | Pulse and breathing estimates from Relay video frames | Optional; without it the call skips the camera reading |
 | `CALL_QUIET_MEASUREMENT_MS` | Length of the quiet reading, 30000 to 45000 | Optional |
 | `CALL_MAX_MINUTES`, `VITALS_MIN_CONFIDENCE` | Server ends the call after N minutes (default 4); lowest camera confidence used (default 1) | Optional |
@@ -146,9 +149,9 @@ Before each: agent running with a fresh `CLOCK_DATE` (or fresh database), `FOLLO
 
 **S12. The video call**
 1. Agent running with `ELEVENLABS_VOICE_ID` set (no tunnel or ElevenLabs agent needed; see `docs/CALLS.md`). Harriet video calls the agent.
-2. Say "my ankles are a bit puffy". Agree to the reading and hold still with the phone propped up.
+2. Say "my ankles are a bit puffy". When it offers the quiet camera measurement ("Before we finish, would you like to try a quiet camera measurement?"), say yes and hold still with the phone propped up. Another time say no: "Of course. We can skip the camera measurement." and then the goodbye.
 3. Ask "Should I stop my aspirin?"
-- Expect: answered within 10 seconds; first sentence says it is an AI; asks today's questions; quiet prompt; heart rate as a camera estimate with no usual-range words; a medicine question gets a pointer to her doctor or pharmacist, never advice (this is Gemini's wording on a call, so check it); goodbye naming Sarah; ends by about 3 minutes (cut at 4). Then one "Here's what I noted from our call: ..." message with [That's right] [Something's wrong].
+- Expect: answered within 10 seconds; first sentence says it is an AI; asks today's questions; quiet prompt; heart rate as a camera estimate with no usual-range words; a medicine question gets a pointer to her doctor or pharmacist, never advice (this is Gemini's wording on a call, so check it); the same fixed goodbye naming Sarah, with no advice and no question (never Gemini's own closing); ends by about 3 minutes (cut at 4). Then one "Here's what I noted from our call: ..." message with [That's right] [Something's wrong].
 4. Second call: say "I have chest pain". Expect the 911 reply and Sarah alerted during the call.
 5. Write down the heart rate next to Presage's own app, same person, same minute.
 

@@ -1,8 +1,10 @@
+import { crisisReply, urgentReply } from "../checkin/copy.ts";
 import type { CallCheckinContext } from "../checkin/engine-types.ts";
 import type { HealthRecord } from "../finchnode/types.ts";
 import type { CallScreeningLlmOutput, LlmClient } from "../llm/types.ts";
 import type { VitalsResult } from "../vitals/types.ts";
-import { callFirstMessage, quietMeasurementPrompt } from "./copy.ts";
+import { CAMERA_OFFER_AT_END, callClosing, callFirstMessage, quietMeasurementPrompt } from "./copy.ts";
+import { emergencyDecision } from "./emergency.ts";
 import type { TranscriptTurn } from "./types.ts";
 
 export type ConversationOrchestratorOptions = {
@@ -15,9 +17,19 @@ export type ConversationOrchestratorOptions = {
   llm?: LlmClient;
   loadSnapshot: (subject: string) => Promise<HealthRecord>;
   getVitals: () => VitalsResult;
-  canMeasure: boolean;
+  /**
+   * Whether the camera reading is possible right now, asked on every turn: Presage is configured and her
+   * video is on (the call service watches the transport). An audio-only call, or a camera turned off, gets no offer.
+   */
+  canMeasure: () => boolean;
   quietMeasurementMs: number;
   speak: (text: string) => Promise<void>;
+  /**
+   * Awaited before the greeting, the first utterance of the call only (the call service waits for her
+   * audio to arrive and writes a short silence). The greeting is spoken even if this rejects, and not at
+   * all if the call has ended meanwhile.
+   */
+  beforeGreeting?: () => Promise<void>;
   recordAgentTurn: (text: string) => void;
   beginQuietMeasurement: () => void;
   onComplete: (screening?: CallScreeningLlmOutput) => void;
@@ -35,7 +47,11 @@ export class ConversationOrchestrator {
   #completed = false;
   #waitingForMeasurementConsent = false;
   #measurementDeclined = false;
+  /** She said yes and the quiet reading was started: it is never offered or asked for again. */
+  #measurementDone = false;
   #measurementTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Her FinchNode record, read on the first turn that needs it (see #loadContext). */
+  #record: Promise<HealthRecord> | undefined;
   #phase: "interview" | "quiet_measurement" | "screening" = "interview";
 
   constructor(options: ConversationOrchestratorOptions) {
@@ -46,11 +62,23 @@ export class ConversationOrchestrator {
   start(): void {
     if (this.#started) return;
     this.#started = true;
-    void this.#speak(callFirstMessage(this.#options.firstName)).catch((error) => {
+    void this.#greet().catch((error) => {
       this.#log("call_greeting_failed", { error: summary(error) });
       this.#completed = true;
       this.#options.onComplete();
     });
+  }
+
+  async #greet(): Promise<void> {
+    if (this.#options.beforeGreeting) {
+      try {
+        await this.#options.beforeGreeting();
+      } catch (error) {
+        this.#log("call_greeting_lead_in_failed", { error: summary(error) }); // a missing lead-in never costs her the greeting
+      }
+      if (this.#completed) return; // the call ended while we waited: nobody to greet
+    }
+    await this.#speak(callFirstMessage(this.#options.firstName));
   }
 
   handlePatientTurn(text: string): Promise<void> {
@@ -82,6 +110,7 @@ export class ConversationOrchestrator {
       this.#waitingForMeasurementConsent = false;
       if (affirmative(text)) {
         this.#phase = "quiet_measurement";
+        this.#measurementDone = true;
         await this.#speak(quietMeasurementPrompt(Math.round(this.#options.quietMeasurementMs / 1000)));
         this.#options.beginQuietMeasurement();
         this.#measurementTimer = setTimeout(() => void this.#afterMeasurement(), this.#options.quietMeasurementMs + 500);
@@ -129,7 +158,7 @@ export class ConversationOrchestrator {
       currentVitals: this.#options.getVitals(),
       finchContext,
       recentMemories: [...this.#options.initialContext.memories],
-      canMeasure: this.#options.canMeasure && !this.#measurementDeclined,
+      canMeasure: this.#canMeasure,
       interviewPhase: interviewPhase === "quiet_measurement" ? "screening" : interviewPhase,
     });
     if (this.#completed) return;
@@ -143,18 +172,27 @@ export class ConversationOrchestrator {
       await this.#speak(`${decision.acknowledgment} ${decision.nextQuestion}`);
       return;
     }
-    if ((decision.nextAction === "request_measurement_permission" || decision.nextAction === "start_quiet_measurement") && this.#options.canMeasure && !this.#measurementDeclined) {
+    if ((decision.nextAction === "request_measurement_permission" || decision.nextAction === "start_quiet_measurement") && this.#canMeasure) {
       this.#waitingForMeasurementConsent = true;
       const question = decision.nextQuestion ?? "Would you be comfortable taking a quiet camera measurement?";
       await this.#speak(`${decision.acknowledgment} ${question}`);
       return;
     }
+    if ((decision.nextAction === "complete_screening" || decision.nextAction === "end_call") && this.#canMeasure) {
+      // Gemini would end the call, but the reading only happens if she is asked, and Gemini asks only
+      // sometimes. So the offer is ours: once, in fixed words, before the goodbye. Her answer takes the
+      // consent path above; after the reading or her no, the next turn that ends the call says goodbye.
+      this.#waitingForMeasurementConsent = true;
+      await this.#speak(CAMERA_OFFER_AT_END);
+      return;
+    }
     if (decision.nextAction === "complete_screening" || decision.nextAction === "emergency" || decision.nextAction === "end_call") {
-      const screening = await this.#finalScreening();
-      const spoken = screening?.patientResponseText ?? decision.patientResponseText;
-      if (spoken.trim()) await this.#speak(spoken);
+      // The screening is stored with the call and runs while the goodbye is spoken; none of its words, and
+      // none of the model's, are ever said. The goodbye or the emergency words are ours (src/calls/copy.ts).
+      const screening = this.#finalScreening();
+      await this.#speak(decision.nextAction === "emergency" ? this.#emergencyWords() : callClosing(this.#options.firstName, this.#options.initialContext.familyNames));
       this.#completed = true;
-      this.#options.onComplete(screening);
+      this.#options.onComplete(await screening);
       return;
     }
     const spoken = decision.patientResponseText.trim();
@@ -178,9 +216,28 @@ export class ConversationOrchestrator {
     await this.#options.speak(spoken);
   }
 
+  /** The camera reading is possible now, she hasn't said no, and it hasn't been taken: so it can be offered, and never twice. */
+  get #canMeasure(): boolean {
+    return this.#options.canMeasure() && !this.#measurementDeclined && !this.#measurementDone;
+  }
+
+  /**
+   * What she hears when Gemini declares an emergency: the text check-in's fixed replies, 988 for a crisis
+   * (the fixed screen over her turns decides, never the model) and 911 otherwise. Nobody has been told yet,
+   * so no family member is named; the ladder after the call decides who is alerted.
+   */
+  #emergencyWords(): string {
+    const crisis = (emergencyDecision(this.#options.transcript)?.level ?? 0) >= 5;
+    return crisis ? crisisReply(this.#options.firstName) : urgentReply(this.#options.firstName);
+  }
+
   async #loadContext(): Promise<unknown> {
+    // Her record is read once per call: a call lasts minutes, and fetching it again on every turn cost
+    // 0.1 to 0.3 s each. A failed read is not kept, so the next turn tries again.
+    let loading: Promise<HealthRecord> | undefined;
     try {
-      const record = await this.#options.loadSnapshot(this.#options.subject);
+      loading = this.#record ??= this.#options.loadSnapshot(this.#options.subject);
+      const record = await loading;
       return {
         dataAsOf: record.meta.dataAsOf,
         syncStatus: record.meta.syncStatus,
@@ -190,6 +247,7 @@ export class ConversationOrchestrator {
         vitals: record.data.vitals.slice(0, 30).map(({ name, value, unit, date, referenceRange }) => ({ name, value, unit, date, referenceRange })),
       };
     } catch (error) {
+      if (loading && this.#record === loading) this.#record = undefined;
       this.#log("call_finch_context_failed", { error: summary(error) });
       return { unavailable: true };
     }
