@@ -70,3 +70,10 @@ Demo:
 - [ ] Confirm the wording of rules R3 (bleeding combination) and R4 (potassium) against a drug interaction reference.
 - [ ] Check MHacks prize tracks (FinchNode, ElevenLabs, Presage through MLH, Relay) and note them here.
 - [ ] Assign owners: records and rules, Relay agent, voice, vitals, demo and pitch.
+## Relay video-call screening implementation
+
+The video-call lane now uses `@relaymessenger/elevenlabs` as the Relay audio and ElevenLabs bridge, while Gemini remains the only model used for structured symptom interpretation and final approved wording. The ElevenLabs Agent must be configured as a conversational shell and must call the backend screening and quiet-measurement tools before it interprets or summarizes symptoms.
+
+The quiet phase is intentionally conservative. SmartSpectra breathing needs a complete 30 second window, upper chest visibility, a stable camera, and no talking. Zero confidence, missing readings, unsupported Relay frames, and interrupted calls are reported as unusable rather than promoted to a medical conclusion. SmartSpectra validation hints should be surfaced to the patient when the client UI is available.
+
+Known integration limitation: the ElevenLabs Agent tool URLs must be configured in the ElevenLabs dashboard and exposed over HTTPS for a real phone call. The repository provides the protected routes and the tool contract, but cannot create the dashboard agent or public tunnel automatically.

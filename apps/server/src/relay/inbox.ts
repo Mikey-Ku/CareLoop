@@ -1,4 +1,4 @@
-import type { MessageWebhookData, RelayWebhookEvent, WebSocketFullSyncContext } from "@relaymessenger/sdk";
+import type { CallWebhookEvent, MessageWebhookData, RelayWebhookEvent, WebSocketFullSyncContext } from "@relaymessenger/sdk";
 import { familyWelcome, photoNotYet } from "../checkin/copy.ts";
 import type { CheckinEngine } from "../checkin/engine-types.ts";
 import { normalizeHandle as familyHandle } from "../config.ts";
@@ -8,6 +8,7 @@ import type { Db } from "../db/index.ts";
 import type { InboundMessage, Messenger } from "./messenger.ts";
 import { consoleLog, describeRelayError, normalizeHandle, sameHandle, type RelayClient, type RelayLog } from "./relay-client.ts";
 import { RelayMessenger } from "./relay-messenger.ts";
+import type { CallEventHandler } from "../calls/service.ts";
 
 // Durable inbox for Relay's acknowledged WebSocket, after Relay-SDK
 // cookbook/websocket-agent. `onEvent` commits the whole event by `event_id`
@@ -40,6 +41,8 @@ export type InboxDeps = {
   messenger?: Messenger;
   log?: RelayLog;
   now?: () => string;
+  /** Starts or updates a call after its event is durably committed. */
+  callHandler?: CallEventHandler;
 };
 
 /** What the processor did with one event; stored in the log line, useful in tests. */
@@ -55,6 +58,7 @@ export type EventOutcome =
   | "unknown_chat"
   | "media_skipped"
   | "no_text"
+  | "call_started"
   | "ignored_type";
 
 // ---------------------------------------------------------------------------
@@ -174,6 +178,18 @@ export async function processEvent(deps: InboxDeps, event: RelayWebhookEvent): P
   const log = deps.log ?? consoleLog;
   const now = deps.now ?? (() => new Date().toISOString());
   const base = { event_id: event.event_id, event_type: event.event_type };
+
+  if (event.event_type === "call.created" || event.event_type === "call.updated" || event.event_type === "call.ended") {
+    if (!deps.callHandler) {
+      log("relay_call_ignored", base);
+      return "call_started";
+    }
+    // CallService.handle returns as soon as the bridge has been scheduled. It never holds the
+    // durable inbox drain open for the lifetime of the media session.
+    await deps.callHandler.handle(event as CallWebhookEvent);
+    log("relay_call_routed", base);
+    return "call_started";
+  }
 
   if (event.event_type === "contact.added") {
     const { contact, chat_id: chatId } = event.data;
@@ -458,6 +474,7 @@ export type RunRelayInboxOptions = {
   signal?: AbortSignal;
   log?: RelayLog;
   now?: () => string;
+  callHandler?: CallEventHandler;
 };
 
 /**
@@ -475,6 +492,7 @@ export async function runRelayInbox(options: RunRelayInboxOptions): Promise<void
     relay: options.relay,
     log,
     ...(options.now ? { now: options.now } : {}),
+    ...(options.callHandler ? { callHandler: options.callHandler } : {}),
   });
   inbox.wake();
   try {

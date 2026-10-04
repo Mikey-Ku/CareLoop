@@ -126,6 +126,27 @@ export type LlmCallOptions = {
   signal?: AbortSignal;
 };
 
+/** Structured, non-media input for the call screening operation. */
+export type CallScreeningLlmInput = {
+  patientId: string;
+  transcript: { speaker: "patient" | "agent"; text: string }[];
+  vitals: unknown;
+  finchContext: unknown;
+  recentMemories: string[];
+  symptomObservations: unknown[];
+};
+
+/** Gemini's safe wording layer. Deterministic rules still own emergency precedence. */
+export type CallScreeningLlmOutput = {
+  symptoms: SymptomMention[];
+  finchEvidence: { source: string; detail: string }[];
+  concernLevel: "low" | "moderate" | "high" | "emergency" | "crisis";
+  recommendedHumanAction: "none" | "monitor_and_document" | "contact_clinician_today" | "emergency_services_now" | "crisis_support_now";
+  uncertainty: string[];
+  patientResponseText: string;
+  caregiverSummary: string;
+};
+
 export interface LlmClient {
   /** "gemini", "anthropic" or "fake". */
   readonly provider: string;
@@ -135,6 +156,8 @@ export interface LlmClient {
   classifyMessage(input: ClassifyInput, options?: LlmCallOptions): Promise<MessageClassification>;
   /** Pull answers to all of today's questions, and every symptom, out of her reply to the open question. */
   extractCheckin(input: ExtractCheckinInput, options?: LlmCallOptions): Promise<CheckinExtraction>;
+  /** Optional in older/fake clients; the production Gemini client implements it. */
+  screenCall?(input: CallScreeningLlmInput, options?: LlmCallOptions): Promise<CallScreeningLlmOutput>;
 }
 
 /** Every model in the chain failed or the time budget ran out. Callers fall back to buttons or a template. */

@@ -1,4 +1,5 @@
 import type { Server } from "node:http";
+import type Relay from "@relaymessenger/sdk";
 import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +22,7 @@ import { assertNoWebhookSubscriptions, runRelayInbox } from "./relay/inbox.ts";
 import type { Messenger } from "./relay/messenger.ts";
 import { createRelayClient, type RelayClient, type RelayLog } from "./relay/relay-client.ts";
 import { RelayMessenger } from "./relay/relay-messenger.ts";
+import { CallService } from "./calls/service.ts";
 import { patientIdFor } from "./patient-id.ts";
 import { createDailyScheduler, localDate, zonedInstant, type CancelTimer, type DailyScheduler } from "./scheduler.ts";
 
@@ -64,6 +66,8 @@ export type AgentDeps = {
   config: Config;
   db: Db;
   relay: RelayClient;
+  /** The concrete Relay SDK client used by the WebRTC call transport. */
+  callRelay?: Relay;
   /** Defaults to a RelayMessenger over `relay`. */
   messenger?: Messenger;
   /** Reads what she types instead of tapping (main passes createLlmClient(config)). Without it: buttons only. */
@@ -175,6 +179,10 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
     { missedCheckinTime: config.missedCheckinTime, ...(deps.followUpDelayMinutes !== undefined ? { followUpDelayMinutes: deps.followUpDelayMinutes } : {}) },
   );
 
+  const calls = deps.callRelay
+    ? new CallService({ db, config, relay: deps.callRelay, loadSnapshot: deps.loadSnapshot, ...(deps.llm ? { llm: deps.llm } : {}), log: (event, fields) => log(`[calls] ${event}${fields ? ` ${JSON.stringify(fields)}` : ""}`), now: () => now().toISOString() })
+    : undefined;
+
   // 4. WebSocket delivery needs zero webhook subscriptions.
   await ops.assertNoWebhookSubscriptions(relay);
   log("[agent] Relay: no webhook subscriptions, WebSocket delivery is available");
@@ -182,7 +190,7 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
 
   // 5. Inbox: holds the socket until stop().
   const abort = new AbortController();
-  const inboxDone = ops.runRelayInbox({ relay, db, engine, patientHandle: relayHandle, signal: abort.signal, log: relayLog });
+  const inboxDone = ops.runRelayInbox({ relay, db, engine, patientHandle: relayHandle, signal: abort.signal, log: relayLog, ...(calls ? { callHandler: calls } : {}) });
   inboxDone.then(
     () => log("[agent] Relay inbox closed"),
     (error: unknown) => log(`[agent] Relay inbox stopped: ${errorSummary(error)}`),
@@ -241,7 +249,13 @@ export async function startAgent(deps: AgentDeps): Promise<RunningAgent> {
   }
 
   // 7. /health.
-  const server = await listen(createApp({ config }), deps.port ?? config.port);
+  const server = await listen(
+    createApp({
+      config,
+      ...(calls ? { calls: { screen: (callId) => calls.screen(callId), beginQuietMeasurement: (callId, permissionGranted) => calls.beginQuietMeasurement(callId, permissionGranted), toolSecret: config.calls.elevenLabsToolSecret } } : {}),
+    }),
+    deps.port ?? config.port,
+  );
   const port = (server.address() as AddressInfo).port;
   log(`[agent] health check on http://localhost:${port}/health`);
   const followUpTimer = setInterval(() => void followUpTick(), deps.followUpPollMs ?? FOLLOW_UP_POLL_MS);
@@ -419,12 +433,14 @@ export async function main(argv: string[] = process.argv.slice(2), env: Record<s
   }
 
   const db = openDatabase(config.databasePath);
+  const relay = createRelayClient({ agentToken: token, apiUrl: config.relay.apiUrl });
   let agent: RunningAgent;
   try {
     agent = await startAgent({
       config,
       db,
-      relay: createRelayClient({ agentToken: token, apiUrl: config.relay.apiUrl }),
+      relay,
+      callRelay: relay as unknown as Relay,
       loadSnapshot: snapshotLoader(config, true),
       llm: createLlmClient(config),
       checkinNow,

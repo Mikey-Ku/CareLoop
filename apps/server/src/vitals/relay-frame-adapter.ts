@@ -8,6 +8,8 @@ export type RelayVideoFrame = {
   height: number;
   stride: number;
   pixelFormat: RelayVideoPixelFormat | string;
+  /** Relay's capture timestamp when available. */
+  timestampUs?: number | bigint;
 };
 
 export type FrameSink = {
@@ -60,7 +62,8 @@ export function createRelayVideoFrameAdapter(
         return { accepted: false, reason: "invalid_frame", detail: "Frame dimensions, stride, or buffer length are invalid" };
       }
 
-      const timestampUs = Math.max(lastTimestampUs + 1, nowUs());
+      const sourceTimestamp = frame.timestampUs === undefined ? undefined : Number(frame.timestampUs);
+      const timestampUs = Math.max(lastTimestampUs + 1, sourceTimestamp !== undefined && Number.isFinite(sourceTimestamp) ? sourceTimestamp : nowUs());
       lastTimestampUs = timestampUs;
       const accepted = sink.sendFrame(frame.buffer, frame.width, frame.height, frame.stride, pixelFormat, timestampUs);
       return accepted

@@ -59,6 +59,7 @@ describe("schema", () => {
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((t) => t.name);
     expect(tables).toEqual(
       [
+        "call_sessions", "call_transcript_turns",
         "checkin_notes", "checkin_prompts", "checkins", "clarifications", "family_members", "family_messages", "family_relays", "flags", "follow_ups",
         "inbound_messages", "memories", "paper_scans", "patients", "record_snapshots", "relay_events", "relay_full_syncs", "symptom_observations",
         "visit_questions", "vitals_readings",

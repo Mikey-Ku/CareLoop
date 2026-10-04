@@ -301,6 +301,37 @@ export const MIGRATIONS: readonly string[] = [
 
   ALTER TABLE checkins ADD COLUMN suggestions_json TEXT;
   `,
+  // 10: Relay video-call screening. Only call metadata, transcript text needed for audit,
+  // structured outputs and approved memories are stored. Raw audio and video never enter SQLite.
+  `
+  CREATE TABLE call_sessions (
+    call_id TEXT PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    relay_chat_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('ringing', 'in_progress', 'ended', 'failed')),
+    phase TEXT NOT NULL CHECK (phase IN ('interview', 'quiet_measurement', 'screening', 'complete', 'emergency', 'failed')),
+    conversation_id TEXT,
+    started_at TEXT NOT NULL,
+    answered_at TEXT,
+    ended_at TEXT,
+    measurement_started_at TEXT,
+    measurement_ended_at TEXT,
+    screening_json TEXT,
+    error TEXT
+  );
+  CREATE INDEX call_sessions_patient ON call_sessions (patient_id, started_at);
+
+  CREATE TABLE call_transcript_turns (
+    id INTEGER PRIMARY KEY,
+    call_id TEXT NOT NULL REFERENCES call_sessions(call_id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL,
+    speaker TEXT NOT NULL CHECK (speaker IN ('patient', 'agent')),
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (call_id, sequence)
+  );
+  CREATE INDEX call_transcript_call ON call_transcript_turns (call_id, sequence);
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

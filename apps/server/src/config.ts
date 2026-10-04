@@ -44,6 +44,10 @@ const ConfigSchema = z.object({
   GEMINI_MODELS: z.string().optional(),
   LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(DEFAULT_LLM_TIMEOUT_MS),
   LLM_ATTEMPT_TIMEOUT_MS: z.coerce.number().int().min(500).max(120_000).default(DEFAULT_LLM_ATTEMPT_TIMEOUT_MS),
+  ELEVENLABS_API_KEY: z.string().optional(),
+  ELEVENLABS_AGENT_ID: z.string().optional(),
+  ELEVENLABS_TOOL_SECRET: z.string().optional(),
+  CALL_QUIET_MEASUREMENT_MS: z.coerce.number().int().min(30_000).max(45_000).default(30_000),
 });
 
 export type RelayConfig = {
@@ -78,11 +82,25 @@ export type LlmConfig = {
   attemptTimeoutMs: number;
 };
 
+export type CallsConfig = {
+  /** ElevenLabs API key. Non-enumerable and never logged. */
+  elevenLabsApiKey: string | undefined;
+  /** ElevenLabs conversational agent id. */
+  elevenLabsAgentId: string | undefined;
+  /** Optional bearer token for the ElevenLabs server tool endpoint. Non-enumerable. */
+  elevenLabsToolSecret: string | undefined;
+  /** SmartSpectra key. Non-enumerable and never logged. */
+  presageApiKey: string | undefined;
+  /** SmartSpectra's minimum quiet window for breathing. */
+  quietMeasurementMs: number;
+};
+
 export type Config = {
   finchnode: { baseUrl: string; apiKey: string | undefined };
   relay: RelayConfig;
   patient: PatientConfig;
   llm: LlmConfig;
+  calls: CallsConfig;
   port: number;
   databasePath: string;
   checkinTime: string;
@@ -97,7 +115,7 @@ export class ConfigError extends Error {
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
   // Secrets are read here and nowhere near the schema, so a parse error can't echo them.
-  const { RELAY_AGENT_TOKEN, GEMINI_API_KEY, ...rest } = env;
+  const { RELAY_AGENT_TOKEN, GEMINI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_TOOL_SECRET, PRESAGE_API_KEY, ...rest } = env;
   const cleaned = Object.fromEntries(Object.entries(rest).map(([k, v]) => [k, v === "" ? undefined : v]));
   const parsed = ConfigSchema.safeParse(cleaned);
   if (!parsed.success) {
@@ -118,6 +136,17 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const geminiKey = GEMINI_API_KEY?.trim();
   Object.defineProperty(llm, "geminiApiKey", { value: geminiKey ? geminiKey : undefined, enumerable: false });
 
+  const calls: CallsConfig = {
+    elevenLabsApiKey: undefined,
+    elevenLabsAgentId: c.ELEVENLABS_AGENT_ID?.trim() || undefined,
+    elevenLabsToolSecret: undefined,
+    presageApiKey: undefined,
+    quietMeasurementMs: c.CALL_QUIET_MEASUREMENT_MS,
+  };
+  Object.defineProperty(calls, "elevenLabsApiKey", { value: ELEVENLABS_API_KEY?.trim() || undefined, enumerable: false });
+  Object.defineProperty(calls, "elevenLabsToolSecret", { value: ELEVENLABS_TOOL_SECRET?.trim() || undefined, enumerable: false });
+  Object.defineProperty(calls, "presageApiKey", { value: PRESAGE_API_KEY?.trim() || undefined, enumerable: false });
+
   return {
     finchnode: { baseUrl: c.FINCHNODE_BASE_URL, apiKey: c.FINCHNODE_API_KEY },
     relay,
@@ -128,6 +157,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       timezone: validTimezone(c.PATIENT_TIMEZONE.trim()),
     },
     llm,
+    calls,
     port: c.PORT,
     databasePath: c.DATABASE_PATH,
     checkinTime: c.CHECKIN_TIME,

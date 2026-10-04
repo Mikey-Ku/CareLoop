@@ -200,3 +200,13 @@ Retest on the phone with `FOLLOW_UP_DELAY_MINUTES=2`; add a second phone as fami
 Re-record a well-lit face-and-chest clip longer than 30 seconds, set `PRESAGE_API_KEY` in `.env`, then run `npm run vitals:video -- /absolute/path/to/face.mp4 --metrics all`. The corrected runner now reaches normal Presage processing; next connect the verified Relay `VideoStream` frame shape to `createRelayVideoFrameAdapter`.
 
 **Open questions:** Confirm the live Relay `VideoStream` pixel format and whether it supplies a usable source timestamp; if it supplies I420, add and test a conversion path before sending frames to SmartSpectra.
+## 2026-10-03, Relay video-call screening lane
+
+- Read `CLAUDE_CODE_BRIEF.md`, `docs/DESIGN.md`, `docs/TEAM_PLAN.md`, and this run log before changing code.
+- Inspected current Relay Calls, VideoStream, WebSocket, and ElevenLabs bridge declarations. The installed bridge uses `ElevenLabsCall.connect`, joins a call while it is ringing, and exposes the underlying `RelayCallTransport`; Relay `VideoStream` can provide RGBA frames and capture timestamps.
+- Added `@relaymessenger/elevenlabs@0.1.1`, pinned `@relaymessenger/sdk@0.5.1`, and added `node-webcodecs@1.3.0`.
+- Added durable call routing for `call.created`, `call.updated`, and `call.ended`; call events remain deduplicated by `event_id` and are acknowledged after SQLite insertion.
+- Added the `apps/server/src/calls/` lifecycle, interview, deterministic emergency precedence, quiet measurement, Gemini screening contract, ElevenLabs bridge, Relay VideoStream to Presage adapter, backend tool routes, cleanup, and diagnostics.
+- Added schema migration 9 for call metadata and bounded transcript turns. No raw audio or video columns are present.
+- Added `docs/CALLS.md` with setup, agent prompt, tool routes, phone test steps, SDK versions, and Presage limitations.
+- Verification: `pnpm lint` passed. The complete `pnpm test` suite passed with 39 files and 1,349 tests after allowing the existing app and agent tests to bind ephemeral loopback ports.
