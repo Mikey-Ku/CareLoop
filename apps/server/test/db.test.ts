@@ -1,7 +1,9 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { getInstanceId } from "../src/db/app-meta.ts";
 import {
   deletePatientFlags,
   deletePatientSnapshots,
@@ -22,7 +24,7 @@ import {
   upsertPatient,
   type Db,
 } from "../src/db/index.ts";
-import { SCHEMA_VERSION } from "../src/db/schema.ts";
+import { MIGRATIONS, SCHEMA_VERSION } from "../src/db/schema.ts";
 import type { RuleId, RuleResult, Severity } from "../src/rules/index.ts";
 
 const P = "harriet";
@@ -59,7 +61,7 @@ describe("schema", () => {
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((t) => t.name);
     expect(tables).toEqual(
       [
-        "call_sessions", "call_transcript_turns",
+        "app_meta", "call_sessions", "call_transcript_turns",
         "care_messages", "care_summaries", "checkin_notes", "checkin_prompts", "checkins", "clarifications", "family_members", "family_messages", "family_relays", "flags", "follow_ups",
         "inbound_messages", "med_doses", "med_label_checks", "med_memory_checks", "med_prompts", "med_refills", "memories", "paper_scans", "patients", "record_snapshots", "relay_events", "relay_full_syncs", "symptom_observations",
         "visit_questions", "vitals_readings", "waiting_prompts",
@@ -81,6 +83,59 @@ describe("schema", () => {
     expect(schemaVersion(second)).toBe(SCHEMA_VERSION);
     expect(getSharing(second, P)).toBe("status");
     second.close();
+  });
+
+  it("migration 15 (app_meta) is appended last and upgrades a version 14 database, keeping its data", () => {
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(15);
+    expect(MIGRATIONS[14]).toMatch(/CREATE TABLE app_meta/);
+    dir = mkdtempSync(join(tmpdir(), "db-test-"));
+    const path = join(dir, "old.db");
+    const old = new Database(path);
+    for (const sql of MIGRATIONS.slice(0, 14)) old.exec(sql);
+    old.pragma("user_version = 14");
+    old.prepare(`INSERT INTO patients (id, finchnode_patient_id, preferred_name) VALUES (?, 'fn-harriet', 'Harriet')`).run(P);
+    old.close();
+
+    const upgraded = openDatabase(path);
+    expect(schemaVersion(upgraded)).toBe(SCHEMA_VERSION);
+    expect(upgraded.prepare(`SELECT preferred_name AS name FROM patients WHERE id = ?`).get(P)).toEqual({ name: "Harriet" });
+    const id = getInstanceId(upgraded);
+    upgraded.close();
+    const again = openDatabase(path);
+    expect(getInstanceId(again)).toBe(id);
+    again.close();
+  });
+
+  describe("instance id", () => {
+    it("is made on first use from 8 to 12 URL-safe characters and is the same every time after", () => {
+      const db = openDatabase(":memory:");
+      expect(db.prepare(`SELECT COUNT(*) AS n FROM app_meta`).get()).toEqual({ n: 0 });
+      const id = getInstanceId(db);
+      expect(id).toMatch(/^[A-Za-z0-9_-]{8,12}$/);
+      expect(getInstanceId(db)).toBe(id);
+      expect(db.prepare(`SELECT COUNT(*) AS n FROM app_meta`).get()).toEqual({ n: 1 });
+    });
+
+    it("differs between fresh databases", () => {
+      expect(getInstanceId(openDatabase(":memory:"))).not.toBe(getInstanceId(openDatabase(":memory:")));
+    });
+
+    it("keeps the one already stored", () => {
+      const db = openDatabase(":memory:");
+      db.prepare(`INSERT INTO app_meta (key, value) VALUES ('instance_id', 'stored-id-1')`).run();
+      expect(getInstanceId(db)).toBe("stored-id-1");
+    });
+
+    it("survives closing and reopening a file database", () => {
+      dir = mkdtempSync(join(tmpdir(), "db-test-"));
+      const path = join(dir, "app.db");
+      const first = openDatabase(path);
+      const id = getInstanceId(first);
+      first.close();
+      const second = openDatabase(path);
+      expect(getInstanceId(second)).toBe(id);
+      second.close();
+    });
   });
 
   it("enforces foreign keys", () => {

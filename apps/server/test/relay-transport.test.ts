@@ -1,6 +1,11 @@
-import { RelayAPIError, type AgentMe, type WebhookSubscription } from "@relaymessenger/sdk";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { RelayAPIError, type AgentMe, type MessageSendParams, type WebhookSubscription } from "@relaymessenger/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { normalizeHandle } from "../src/config.ts";
+import { getInstanceId } from "../src/db/app-meta.ts";
+import { openDatabase } from "../src/db/index.ts";
 import { describeRelayError, relayApiOrigin, sameHandle, verifyRelayAccess, type RelayClient } from "../src/relay/relay-client.ts";
 import { ACTIVITY_RENEW_MS, MAX_ACTIVITY_RENEWALS, RelayMessenger, toRelayParts, type Every } from "../src/relay/relay-messenger.ts";
 
@@ -30,7 +35,7 @@ function fakeRelay() {
       update: vi.fn(async () => ({ status: "ok", chat_id: GROUP })),
       listChats: vi.fn(async () => ({ data: [], async *[Symbol.asyncIterator]() {} })),
       markAsRead: vi.fn(async () => undefined),
-      messages: { send: vi.fn(async (chatId: string) => sent("m-1", chatId)) },
+      messages: { send: vi.fn(async (chatId: string, _body: MessageSendParams) => sent("m-1", chatId)) },
     },
     me: { retrieve: vi.fn(async () => ME) },
     webhookSubscriptions: { list: vi.fn(async () => ({ subscriptions: [] as WebhookSubscription[] })) },
@@ -105,6 +110,115 @@ describe("RelayMessenger", () => {
     expect(error.message).toContain("trace-1");
     expect(error.message).toMatch(/first message/);
     expect(error.cause).toBeInstanceOf(RelayAPIError);
+  });
+});
+
+describe("RelayMessenger idempotency keys", () => {
+  const KEY = "harriet:2026-09-01:question:0";
+  const keyOf = (relay: ReturnType<typeof fakeRelay>, call = 0) => relay.chats.messages.send.mock.calls[call]![1].message.idempotency_key;
+  const reused = () => new RelayAPIError("Idempotency key was already used for different message content", { status: 409, code: 1005, traceId: "trace-1" });
+
+  it("with an instance id, sends it plus 24 hex characters of the key's sha256, never the key itself", async () => {
+    const relay = fakeRelay();
+    const messenger = new RelayMessenger(relay, { instanceId: "inst0001abc" });
+    await messenger.send(CHAT, { text: "Hi" }, "a");
+    await messenger.send(CHAT, { text: "Hi" }, "a");
+    await messenger.send(CHAT, { text: "Hi" }, KEY);
+    expect(keyOf(relay, 0)).toBe("inst0001abc.ca978112ca1bbdcafac231b3"); // sha256("a") starts ca978112ca1bbdcafac231b3
+    expect(keyOf(relay, 1)).toBe(keyOf(relay, 0));
+    expect(keyOf(relay, 2)).toMatch(/^inst0001abc\.[0-9a-f]{24}$/);
+    expect(keyOf(relay, 2)).not.toBe(keyOf(relay, 0));
+  });
+
+  it("two fresh databases send the same logical key under different wire keys", async () => {
+    const wireKey = async () => {
+      const relay = fakeRelay();
+      await new RelayMessenger(relay, { instanceId: getInstanceId(openDatabase(":memory:")) }).send(CHAT, { text: "Hi" }, KEY);
+      return keyOf(relay);
+    };
+    expect(await wireKey()).not.toBe(await wireKey());
+  });
+
+  it("one database keeps its wire key across a close and reopen", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "relay-keys-"));
+    try {
+      const run = async () => {
+        const db = openDatabase(join(dir, "app.db"));
+        const relay = fakeRelay();
+        const instanceId = getInstanceId(db);
+        await new RelayMessenger(relay, { instanceId }).send(CHAT, { text: "Hi" }, KEY);
+        db.close();
+        return { instanceId, key: keyOf(relay) };
+      };
+      const first = await run();
+      expect(await run()).toEqual(first);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("when Relay says the key was used for different content (409, code 1005), sends once more under the wire key plus .r", async () => {
+    const relay = fakeRelay();
+    relay.chats.messages.send.mockRejectedValueOnce(reused());
+    const log = vi.fn();
+    const result = await new RelayMessenger(relay, { instanceId: "inst0001abc", log }).send(CHAT, { text: "Her private words", buttons: ["Yes"] }, KEY);
+    expect(result.messageId).toBe("m-1");
+    expect(relay.chats.messages.send).toHaveBeenCalledTimes(2);
+    expect(keyOf(relay, 1)).toBe(`${keyOf(relay, 0)}.r`);
+    expect(relay.chats.messages.send.mock.calls[1]![1].message.parts).toEqual(relay.chats.messages.send.mock.calls[0]![1].message.parts);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith("relay_idempotency_key_reused", { chat_id: CHAT, key: keyOf(relay, 0), detail: expect.stringContaining("different message content") });
+    expect(JSON.stringify(log.mock.calls)).not.toContain("private words");
+  });
+
+  it("heals the same way without an instance id", async () => {
+    const relay = fakeRelay();
+    relay.chats.messages.send.mockRejectedValueOnce(reused());
+    await new RelayMessenger(relay, { log: () => {} }).send(CHAT, { text: "Hello." }, "welcome:harriet:sarah.demo");
+    expect(keyOf(relay, 0)).toBe("welcome:harriet:sarah.demo");
+    expect(keyOf(relay, 1)).toBe("welcome:harriet:sarah.demo.r");
+  });
+
+  it.each([
+    ["a 409 with another code", 409, 1004],
+    ["a 409 with no code", 409, undefined],
+    ["code 1005 on another status", 400, 1005],
+  ])("does not retry %s", async (_name, status, code) => {
+    const relay = fakeRelay();
+    relay.chats.messages.send.mockRejectedValueOnce(new RelayAPIError("Nope", { status, ...(code === undefined ? {} : { code }) }));
+    const log = vi.fn();
+    await expect(new RelayMessenger(relay, { instanceId: "inst0001abc", log }).send(CHAT, { text: "Hi" }, KEY)).rejects.toThrow(`HTTP ${status}`);
+    expect(relay.chats.messages.send).toHaveBeenCalledTimes(1);
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it("does not retry a failure that is not a Relay API error", async () => {
+    const relay = fakeRelay();
+    relay.chats.messages.send.mockRejectedValueOnce(new Error("socket hang up"));
+    await expect(new RelayMessenger(relay, { instanceId: "inst0001abc" }).send(CHAT, { text: "Hi" }, KEY)).rejects.toThrow(/socket hang up/);
+    expect(relay.chats.messages.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("a second 409 with code 1005 propagates after the single retry", async () => {
+    const relay = fakeRelay();
+    relay.chats.messages.send.mockRejectedValue(reused());
+    const log = vi.fn();
+    const error = await new RelayMessenger(relay, { instanceId: "inst0001abc", log }).send(CHAT, { text: "Hi" }, KEY).then(
+      () => new Error("expected the send to fail"),
+      (e: unknown) => e as Error,
+    );
+    expect(error.message).toContain("HTTP 409");
+    expect(error.message).toContain("code 1005");
+    expect(error.cause).toBeInstanceOf(RelayAPIError);
+    expect(relay.chats.messages.send).toHaveBeenCalledTimes(2);
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it("any other failure on the retry propagates as it is", async () => {
+    const relay = fakeRelay();
+    relay.chats.messages.send.mockRejectedValueOnce(reused()).mockRejectedValueOnce(new RelayAPIError("Blocked", { status: 403, code: 2026 }));
+    await expect(new RelayMessenger(relay, { instanceId: "inst0001abc" }).send(CHAT, { text: "Hi" }, KEY)).rejects.toThrow(/HTTP 403, code 2026/);
+    expect(relay.chats.messages.send).toHaveBeenCalledTimes(2);
   });
 });
 

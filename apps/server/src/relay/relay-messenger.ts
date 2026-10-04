@@ -1,4 +1,5 @@
-import { IDEMPOTENCY_KEY_MAX_LENGTH, partsWithButtons, type ChatActivityResponse, type ChatClearActivityParams, type ChatSetActivityParams, type MessagePart } from "@relaymessenger/sdk";
+import { createHash } from "node:crypto";
+import { IDEMPOTENCY_KEY_MAX_LENGTH, RelayAPIError, partsWithButtons, type ChatActivityResponse, type ChatClearActivityParams, type ChatSetActivityParams, type MessagePart } from "@relaymessenger/sdk";
 import { assertValidActivityLabel, assertValidButtons, relayButtonsPart } from "./messenger.ts";
 import type { Messenger, OutboundMessage, SentMessage } from "./messenger.ts";
 import { consoleLog, describeRelayError, type RelayClient, type RelayLog } from "./relay-client.ts";
@@ -14,6 +15,12 @@ import { consoleLog, describeRelayError, type RelayClient, type RelayLog } from 
 // holds it for a 90 second lease, so it is renewed with that `activity_id` every 60
 // seconds while the work goes on; DELETE with the `activity_id` clears only ours.
 // Best effort: a failure is logged (never her message) and swallowed.
+//
+// Idempotency keys: Relay remembers each key for hours, and the engine's keys repeat for a pinned
+// CLOCK_DATE (`<patient>:<day>:question:0`). So with an `instanceId` (this database's, see
+// src/db/app-meta.ts) the key on the wire is `<instanceId>.<24 hex of sha256(key)>`: the same for one
+// database across restarts (retries stay safe), different for a fresh one. If Relay still refuses a key
+// (409, code 1005: used for different content), the send is retried once under `<key>.r`.
 
 /** Renew an activity label this often (Relay's lease is 90 seconds). */
 export const ACTIVITY_RENEW_MS = 60_000;
@@ -40,7 +47,12 @@ export type RelayMessengerOptions = {
   log?: RelayLog;
   /** Timer for renewing activity labels. Defaults to an unref'd setInterval. */
   every?: Every;
+  /** This database's instance id. Without one, keys go to Relay as given. */
+  instanceId?: string;
 };
+
+/** Relay's answer when a key was already used for different message content: HTTP 409, API code 1005. */
+const isKeyReused = (error: unknown): boolean => error instanceof RelayAPIError && error.status === 409 && error.code === 1005;
 
 const defaultEvery: Every = (fn, ms) => {
   const timer = setInterval(fn, ms);
@@ -57,6 +69,7 @@ export class RelayMessenger implements Messenger {
   private readonly relay: MessengerRelay;
   private readonly log: RelayLog;
   private readonly every: Every;
+  private readonly instanceId: string | undefined;
   /** The activity label each chat shows: its Relay id and how to stop renewing it. */
   private readonly activities = new Map<string, { id: string; stopRenewing: () => void }>();
 
@@ -65,6 +78,7 @@ export class RelayMessenger implements Messenger {
     this.relay = relay;
     this.log = options.log ?? consoleLog;
     this.every = options.every ?? defaultEvery;
+    this.instanceId = options.instanceId;
   }
 
   async setActivity(chatId: string, label: string): Promise<void> {
@@ -125,13 +139,20 @@ export class RelayMessenger implements Messenger {
     if (idempotencyKey.length < 1 || idempotencyKey.length > IDEMPOTENCY_KEY_MAX_LENGTH)
       throw new Error(`Idempotency key must be 1 to ${IDEMPOTENCY_KEY_MAX_LENGTH} characters, got ${idempotencyKey.length}`);
 
+    const wireKey = this.instanceId ? `${this.instanceId}.${createHash("sha256").update(idempotencyKey).digest("hex").slice(0, 24)}` : idempotencyKey;
     let response;
     try {
-      // The SDK retries a send only when it carries an idempotency key, and
-      // Relay replays the same Message for the same key, so retries are safe.
-      response = await this.relay.chats.messages.send(chatId, {
-        message: { parts: toRelayParts(message), idempotency_key: idempotencyKey },
-      });
+      try {
+        response = await this.post(chatId, message, wireKey);
+      } catch (error) {
+        if (!isKeyReused(error)) throw error;
+        response = await this.post(chatId, message, `${wireKey}.r`);
+        this.log("relay_idempotency_key_reused", {
+          chat_id: chatId,
+          key: wireKey,
+          detail: "Relay had already used this idempotency key for different message content; the message was sent under a new key",
+        });
+      }
     } catch (error) {
       throw new Error(describeRelayError(`Sending a message to Relay chat ${chatId}`, error), { cause: error });
     }
@@ -143,5 +164,11 @@ export class RelayMessenger implements Messenger {
       chatId: response.chat_id ?? chatId,
       at: response.message.created_at,
     };
+  }
+
+  private post(chatId: string, message: OutboundMessage, key: string) {
+    // The SDK retries a send only when it carries an idempotency key, and
+    // Relay replays the same Message for the same key, so retries are safe.
+    return this.relay.chats.messages.send(chatId, { message: { parts: toRelayParts(message), idempotency_key: key } });
   }
 }

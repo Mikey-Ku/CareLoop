@@ -1,3 +1,4 @@
+import type { MessageSendParams } from "@relaymessenger/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentStartError,
@@ -19,6 +20,7 @@ import {
 import { snapshotLoader } from "../src/cli/simulator.ts";
 import { formatLine, main as relayCheckMain, runRelayCheck } from "../src/cli/relay-check.ts";
 import { loadConfig, type Config } from "../src/config.ts";
+import { getInstanceId } from "../src/db/app-meta.ts";
 import { getCheckin } from "../src/db/checkins.ts";
 import { addFamilyRelay, familyChats, familyMembers, linkFamilyMember, syncFamilyMembers, waitingFamilyRelays } from "../src/db/family.ts";
 import { nextFollowUp, scheduleFollowUp } from "../src/db/follow-ups.ts";
@@ -27,6 +29,7 @@ import { familyRelay, followUpQuestion, smallTalkFallback } from "../src/checkin
 import { FakeLlmClient } from "../src/llm/fake.ts";
 import { patientIdFor } from "../src/patient-id.ts";
 import { FakeMessenger } from "../src/relay/fake-messenger.ts";
+import type { Messenger } from "../src/relay/messenger.ts";
 import type { RelayClient } from "../src/relay/relay-client.ts";
 
 const SUBJECT = "patient-demo-polypharmacy";
@@ -354,6 +357,65 @@ describe("startAgent", () => {
     expect(patientIdFor("Harriet", SUBJECT)).toBe("harriet");
     expect(patientIdFor(undefined, SUBJECT)).toBe(SUBJECT);
     expect(patientIdFor("Mary Ann", SUBJECT)).toBe("mary-ann");
+  });
+});
+
+describe("Relay message keys", () => {
+  /** A Relay client that only records the sends (the inbox calls go through the fake ops). */
+  function sendingRelay() {
+    const send = vi.fn(async (chatId: string, _body: MessageSendParams) => ({
+      chat_id: chatId,
+      message: { id: "m-1", parts: [], created_at: "2026-09-01T13:00:00Z", sent_at: "2026-09-01T13:00:00Z", delivery_status: "delivered" as const, is_system_message: false as const },
+    }));
+    return { send, relay: { chats: { messages: { send } } } as unknown as RelayClient };
+  }
+
+  /** One agent on a fresh database and the pinned day: the keys it sent and the messenger its inbox got. */
+  async function runFreshAgent() {
+    const { send, relay } = sendingRelay();
+    let inboxMessenger: Messenger | undefined;
+    const ops: Partial<RelayOps> = {
+      runRelayInbox: (options) => {
+        inboxMessenger = options.messenger;
+        return new Promise<void>((resolve) => options.signal?.addEventListener("abort", () => resolve()));
+      },
+    };
+    const { db, start } = setup({ deps: { checkinNow: true, relay, messenger: undefined }, ops });
+    const agent = await start();
+    link(db);
+    await agent.linked;
+    return { db, send, inboxMessenger: inboxMessenger!, keys: send.mock.calls.map(([, body]) => body.message.idempotency_key) };
+  }
+
+  it("sends under keys that carry the database's instance id, so a fresh database on the same pinned day never reuses them", async () => {
+    const first = await runFreshAgent();
+    const second = await runFreshAgent();
+    expect(first.keys.length).toBeGreaterThan(0);
+    expect(first.keys.every((k) => k?.startsWith(`${getInstanceId(first.db)}.`))).toBe(true);
+    expect(second.keys.every((k) => k?.startsWith(`${getInstanceId(second.db)}.`))).toBe(true);
+    expect(getInstanceId(first.db)).not.toBe(getInstanceId(second.db));
+    expect(first.keys[0]).not.toBe(second.keys[0]);
+  });
+
+  it("gives the inbox the same messenger, so the family welcome and photo replies carry the instance id too", async () => {
+    const { db, send, inboxMessenger } = await runFreshAgent();
+    send.mockClear();
+    await inboxMessenger.send("chat_sarah", { text: "Welcome." }, "welcome:harriet:sarah");
+    expect(send.mock.calls[0]![1].message.idempotency_key).toMatch(new RegExp(`^${getInstanceId(db)}\\.[0-9a-f]{24}$`));
+  });
+
+  it("passes the messenger it was given on to the inbox", async () => {
+    let given: Messenger | undefined;
+    const { messenger, start } = setup({
+      ops: {
+        runRelayInbox: (options) => {
+          given = options.messenger;
+          return new Promise<void>((resolve) => options.signal?.addEventListener("abort", () => resolve()));
+        },
+      },
+    });
+    await start();
+    expect(given).toBe(messenger);
   });
 });
 
