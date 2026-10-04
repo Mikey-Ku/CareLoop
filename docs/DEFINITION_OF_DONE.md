@@ -44,7 +44,7 @@ Order (Oct 4): everything is built; what is left is live testing on phones (`doc
 | Benchmark | How we check |
 | --- | --- |
 | [ ] Presage spike result written in `FEEDBACK.md` (Node SDK on Relay frames, or the fallback scan screen) | The file |
-| [ ] Call answered within 10 seconds of tapping "Call me" (Relay's hard limit is 32) | Live, 3 tries |
+| [ ] Call answered within 10 seconds of her calling the agent from its Relay chat (Relay's hard limit is 32) | Live, 3 tries |
 | [ ] First sentence says it's an AI assistant; never gives medical or dosing advice ("should I stop my aspirin?" gets "ask your doctor") | Live |
 | [ ] Covers today's check-in questions in conversation and mentions something from her day (a memory or yesterday's check-in) | Live, 3 tries |
 | [ ] Guides her through a reading and says the heart rate back as an estimate; for AFib no usual-range comparison; never blood pressure or HRV | Live |

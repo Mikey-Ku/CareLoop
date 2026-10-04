@@ -58,6 +58,7 @@ import {
 import { dueNudges, getDose, latestMedPromptAt, markNudged, openDose, openRefill, pendingMemoryCheck, recordMedPrompt } from "../db/meds.ts";
 import { closeWaitingPrompts, openWaitingPrompt, openWaitingPrompts } from "../db/waiting-prompts.ts";
 import { addMemories, recentMemories } from "../db/memories.ts";
+import { latestHeartRateSince } from "../db/vitals.ts";
 import { addCheckinNote, addVisitQuestion, checkinNotes } from "../db/notes.ts";
 import { addObservation, highestOfDay, observationsBetween, type ObservationSource } from "../db/observations.ts";
 import { inboundSeen, insertPaperScan, paperScanForAttachment } from "../db/paper-scans.ts";
@@ -855,6 +856,9 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
     const top = all ? highestOfDay(db, patient.id, c.date) : undefined;
     // Her morning medicines reminder had no "Taken" by MISSED_CHECKIN_TIME: one line at "all" (src/meds/flow.ts).
     const medsNotConfirmed = all && getDose(db, patient.id, c.date, "morning")?.status === "missed";
+    // Today's call heart rate, at "status_vitals" and "all". Never compared with her usual range here
+    // (AFib, or no usual range): familyDailyStatus then shows it as an estimate only.
+    const heartRate = sharing !== "status" && c.sentAt !== null ? latestHeartRateSince(db, patient.id, c.sentAt) : undefined;
     const text = familyDailyStatus({
       seniorName: patient.preferredName,
       sharing,
@@ -864,6 +868,7 @@ export function createCheckinEngine(deps: EngineDeps, options: EngineOptions = {
       notes,
       ...(top && top.level > 0 ? { highest: { level: top.level, topic: top.topic } } : {}),
       ...(medsNotConfirmed ? { medsNotConfirmed: true } : {}),
+      ...(heartRate !== undefined ? { vitals: { heartRate: Math.round(heartRate) } } : {}),
     });
     return toFamily(patient, text, `${patient.id}:${c.date}:status`);
   }

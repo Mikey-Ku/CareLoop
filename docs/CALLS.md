@@ -179,4 +179,4 @@ npm test
 npm run agent
 ```
 
-For a direct file spike, use `npm run vitals:video -- --video /absolute/path/to/clip.mp4` and inspect the normalized JSON. Real videos and secret values must remain outside Git.
+For a direct file spike, use `npm run vitals:video -- /absolute/path/to/clip.mp4` and inspect the normalized JSON. Real videos and secret values must remain outside Git.

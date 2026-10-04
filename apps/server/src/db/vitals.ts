@@ -21,3 +21,15 @@ export function addVitalsReading(db: Db, r: NewVitalsReading): number {
     .run(r.patientId, r.takenAt, r.heartRate, r.breathingRate, r.method, r.confidence);
   return Number(info.lastInsertRowid);
 }
+
+/**
+ * Her latest camera heart rate taken at or after `sinceIso` (the day's check-in sent time), if any.
+ * A 10-minute margin covers a call that opened the check-in itself, as in wasOnCallSince.
+ */
+export function latestHeartRateSince(db: Db, patientId: string, sinceIso: string): number | undefined {
+  const since = Date.parse(sinceIso) - 10 * 60_000;
+  const rows = db
+    .prepare(`SELECT taken_at AS takenAt, heart_rate AS heartRate FROM vitals_readings WHERE patient_id = ? AND heart_rate IS NOT NULL ORDER BY taken_at DESC LIMIT 5`)
+    .all(patientId) as { takenAt: string; heartRate: number }[];
+  return rows.find((r) => Date.parse(r.takenAt) >= since)?.heartRate;
+}

@@ -45,13 +45,13 @@ Goal: the text check-in feels natural and never breaks, and Harriet gets help wi
 
 ### B. Video call
 
-Goal: Harriet taps "Call me", has a short warm voice conversation that does her check-in, and hears her heart rate.
+Goal: Harriet calls the agent from its Relay chat, has a short warm voice conversation that does her check-in, and hears her heart rate.
 
 - **Presage spike first** (`lane3/presage-spike`): `@smartspectra/node-sdk` with raw frames from Relay's `VideoStream`; compare with Presage's own app, same person, same minute. If frames don't work, use the fallback scan screen. Write the result in `FEEDBACK.md`.
 - **The call:** answer Relay's `call.created` within 32 seconds with `@relaymessenger/elevenlabs`; pass the context packet (her questions for today, memories, usual range) as initiation data. The ElevenLabs agent's prompt: says it is an AI, keeps it short, covers today's questions conversationally, never gives medical or dosing advice, ends by pointing to her family. Reference: Relay-SDK `cookbook/elevenlabs-agents-call`.
 - **Vitals during the call:** the voice guides her ("look at the camera and hold still for about a minute"), the frames go to Presage, and the voice says the heart rate back as an estimate (no usual-range comparison for AFib). Save it in `vitals_readings`. Never blood pressure or HRV.
 - **After the call:** run the transcript through `extractCheckin` and the severity ladder (`src/checkin/severity.ts`) so spoken answers are recorded exactly like typed ones; safety screen first.
-- Files: new `src/calls/*`, new `src/vitals/*` (or `services/presage-bridge/`), one small PR to `engine.ts` for the "Call me" button.
+- Files: new `src/calls/*`, new `src/vitals/*` (or `services/presage-bridge/`), one small PR to `engine.ts` (as built: she calls the agent herself; there is no "Call me" button).
 - Done when: the benchmarks for feature 1 pass.
 
 ### C. Doctor and family

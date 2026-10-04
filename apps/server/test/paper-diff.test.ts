@@ -163,7 +163,7 @@ describe("diffPaper", () => {
     expect(result.details.discrepancies).toEqual([
       { kind: "dose_differs", paperName: "apixaban", recordName: apixaban.name, paperStrength: "2.5 mg", recordStrength: "5 MG" },
     ]);
-    expect(result.message).toMatch(/apixaban 2\.5 mg, but your medication list shows 5 MG/);
+    expect(result.message).toMatch(/apixaban 2\.5 mg, but your medication list shows 5 mg/);
   });
 
   it("reads a strength printed inside the paper's medication name", () => {
