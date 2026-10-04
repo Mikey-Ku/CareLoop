@@ -1,6 +1,6 @@
 import { inspect } from "node:util";
 import { describe, expect, it } from "vitest";
-import { ConfigError, DEFAULT_GEMINI_MODELS, loadConfig, normalizeHandle, parseHandles, resolveCheckinDate } from "../src/config.ts";
+import { ConfigError, DEFAULT_GEMINI_CALL_MODELS, DEFAULT_GEMINI_MODELS, loadConfig, normalizeHandle, parseHandles, resolveCheckinDate } from "../src/config.ts";
 
 const TOKEN = "relay_agent_tok_SECRET_123";
 
@@ -140,7 +140,8 @@ describe("LLM settings", () => {
 
   it("defaults to gemini, the two measured models and a 12 s budget, with no key", () => {
     const c = loadConfig({});
-    expect(c.llm).toEqual({ provider: "gemini", geminiModels: [...DEFAULT_GEMINI_MODELS], timeoutMs: 12_000, attemptTimeoutMs: 4_000 });
+    expect(c.llm).toEqual({ provider: "gemini", geminiModels: [...DEFAULT_GEMINI_MODELS], geminiCallModels: [...DEFAULT_GEMINI_CALL_MODELS], timeoutMs: 12_000, attemptTimeoutMs: 4_000 });
+    expect(c.llm.geminiCallModels[0]).toMatch(/lite/); // calls start on a fast model
     expect(c.llm.geminiApiKey).toBeUndefined();
     expect(loadConfig({ GEMINI_API_KEY: "  " }).llm.geminiApiKey).toBeUndefined();
   });
@@ -174,5 +175,28 @@ describe("LLM settings", () => {
       expect(err.message).not.toContain(KEY);
       expect(inspect(err)).not.toContain(KEY);
     }
+  });
+});
+
+describe("direct ElevenLabs call settings", () => {
+  it("loads API/voice/models while keeping API secrets non-enumerable", () => {
+    const elevenLabsKey = "eleven_test_secret";
+    const presageKey = "presage_test_secret";
+    const config = loadConfig({
+      ELEVENLABS_API_KEY: elevenLabsKey,
+      ELEVENLABS_VOICE_ID: "voice-demo",
+      ELEVENLABS_STT_MODEL: "scribe_v2_realtime",
+      ELEVENLABS_TTS_MODEL: "eleven_flash_v2_5",
+      ELEVENLABS_TTS_OUTPUT_FORMAT: "pcm_48000",
+      PRESAGE_API_KEY: presageKey,
+    });
+    expect(config.calls.elevenLabsApiKey).toBe(elevenLabsKey);
+    expect(config.calls.elevenLabsVoiceId).toBe("voice-demo");
+    expect(config.calls.elevenLabsSttModel).toBe("scribe_v2_realtime");
+    expect(config.calls.elevenLabsTtsModel).toBe("eleven_flash_v2_5");
+    expect(config.calls.elevenLabsTtsOutputFormat).toBe("pcm_48000");
+    expect(JSON.stringify(config)).not.toContain(elevenLabsKey);
+    expect(JSON.stringify(config)).not.toContain(presageKey);
+    expect(() => loadConfig({ ELEVENLABS_TTS_OUTPUT_FORMAT: "pcm_24000" })).toThrow("ELEVENLABS_TTS_OUTPUT_FORMAT");
   });
 });

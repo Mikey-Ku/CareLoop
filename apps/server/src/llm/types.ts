@@ -246,6 +246,34 @@ export type CallScreeningLlmOutput = {
   caregiverSummary: string;
 };
 
+export type CallTurnLlmInput = {
+  callId: string;
+  patientId: string;
+  seniorName: string;
+  transcript: { speaker: "patient" | "agent"; text: string }[];
+  conversationSummary: string;
+  knownSymptoms: SymptomMention[];
+  unansweredQuestions: string[];
+  lastQuestionAsked?: string | undefined;
+  currentVitals: unknown;
+  finchContext: unknown;
+  recentMemories: string[];
+  canMeasure: boolean;
+  interviewPhase: "opening" | "interview" | "quiet_measurement" | "screening" | "closing";
+};
+
+export type CallTurnLlmOutput = {
+  acknowledgment: string;
+  patientResponseText: string;
+  nextQuestion: string | null;
+  nextAction: "ask_follow_up" | "request_measurement_permission" | "start_quiet_measurement" | "complete_screening" | "emergency" | "end_call";
+  questionId?: string | undefined;
+  informationCollected: string[];
+  missingInformation: string[];
+  evidence: { source: string; detail: string }[];
+  uncertainty: string[];
+};
+
 export interface LlmClient {
   /** "gemini" or "fake". */
   readonly provider: string;
@@ -265,6 +293,8 @@ export interface LlmClient {
   writeCareMessage(input: CareMessageInput, options?: LlmCallOptions): Promise<string>;
   /** Optional in older/fake clients; the production Gemini client implements it. */
   screenCall?(input: CallScreeningLlmInput, options?: LlmCallOptions): Promise<CallScreeningLlmOutput>;
+  /** Adaptive, one-question-at-a-time turn planning for direct STT/TTS calls. */
+  callTurn?(input: CallTurnLlmInput, options?: LlmCallOptions): Promise<CallTurnLlmOutput>;
 }
 
 /** Every model in the chain failed or the time budget ran out. Callers fall back to buttons or a template. */

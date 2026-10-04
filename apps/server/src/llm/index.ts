@@ -26,7 +26,7 @@ export function createLlmClient(config: Pick<Config, "llm"> | LlmConfig, deps: C
   const llm = "llm" in config ? config.llm : config;
   if (!llm.geminiApiKey || llm.geminiModels.length === 0) return undefined;
   return new GeminiLlmClient(
-    { apiKey: llm.geminiApiKey, models: llm.geminiModels, timeoutMs: llm.timeoutMs, attemptTimeoutMs: llm.attemptTimeoutMs },
+    { apiKey: llm.geminiApiKey, models: llm.geminiModels, callModels: llm.geminiCallModels, timeoutMs: llm.timeoutMs, attemptTimeoutMs: llm.attemptTimeoutMs },
     { ...deps, logger: deps.logger ?? consoleLlmLogger },
   );
 }

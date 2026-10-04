@@ -115,7 +115,7 @@ describe("the model's safety reading on a call", () => {
     const w = world({ classifyMessage: () => ({ kind, confidence: "high", complaints: [], memories: [] }) });
     const faint = { id: "call:c1:turn:1", text: "I've been feeling faint and my heart is racing all morning" };
     const done = { id: "call:c1:turn:3", text: "Honestly I'd rather go to sleep and be done with everything" };
-    // screen_symptoms mid-call, again with her later words, then the end of the call.
+    // Run the deterministic safety/ladder screen during the call, again after later turns, then at call end.
     expect(await w.engine.recordSpokenCheckin(P, DAY, [faint], { callId: "c1", assessOnly: true })).toMatchObject({ level: 4, safety: "urgent_symptom" });
     kind = "crisis";
     expect(await w.engine.recordSpokenCheckin(P, DAY, [faint, done], { callId: "c1", assessOnly: true })).toMatchObject({ level: 5, safety: "crisis" });

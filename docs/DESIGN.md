@@ -5,12 +5,12 @@ Plan doc with diagrams: https://claude.ai/code/artifact/3b6c7a92-f524-40dc-85cf-
 ## Architecture
 
 ```
-Harriet (Relay iOS app) --\                         /--> FinchNode demo API (record, read-only)
-                           >-- Relay API -- our backend --> ElevenLabs Agent (voice, via Relay bridge)
-Sarah (her own Relay chat) -/   (WebSocket,    |         \--> Presage SmartSpectra SDK (vitals from frames)
-                                 calls)        |
-                                               +--> Gemini (reads typed replies and photos, words texts)
-                                               +--> SQLite (our database)
+Harriet (Relay app) ------\                         /--> FinchNode demo API (read-only)
+                           >-- Relay API -- backend --> ElevenLabs STT (transcript)
+Sarah (her own Relay chat) -/   (WebSocket,    |     --> Gemini (adaptive interview + evidence wording)
+                                 WebRTC)       |     --> ElevenLabs TTS (spoken response)
+                                               |     --> Presage SmartSpectra (video frames only)
+                                               +--> SQLite (structured data + transcript; no raw media)
 ```
 
 Backend parts:
@@ -22,21 +22,21 @@ Backend parts:
 | `rules` engine | Medication checks, red flags, paper discrepancies. Deterministic, unit tested |
 | `db` | SQLite tables below |
 | `relay` agent | Webhook server, check-in messages, buttons, family chats, photos, voice memos, scheduled jobs |
-| `calls` handler | Relay call events, ElevenLabs bridge, video frames to Presage |
-| `llm` | Claude for friendly wording and reading paper photos. Never decides what is risky |
+| `calls` handler | Relay call lifecycle, ElevenLabs STT/TTS, adaptive Gemini turns, video frames to Presage |
+| `llm` | Gemini contextualizes transcript and structured evidence. Deterministic rules retain safety precedence |
 
 ## Tech stack
 
 | Layer | Choice | Why |
 | --- | --- | --- |
-| Runtime | Node 22.18+, TypeScript (strict), `.ts` run directly by Node's type stripping (no build step, no tsx) | Relay's SDK and its ElevenLabs bridge are TypeScript packages; Node 20 reached end of life in April 2026 |
-| Web server | Express | Webhook routes need the raw body for signature checks |
+| Runtime | Node 22.18+, TypeScript (strict), `.ts` run directly by Node's type stripping (no build step, no tsx) | Relay's SDK is TypeScript; Node 20 reached end of life in April 2026 |
+| Web server | Express | Local health and doctor-report endpoints; calls use outbound APIs, no public webhook |
 | Database | SQLite via `better-sqlite3` | One file, no setup |
 | Validation | `zod` | Validate FinchNode and Relay payloads |
 | Tests | `vitest` | Fast unit tests for the client and rules |
 | Lint | `tsc --noEmit` (`npm run lint`) | Typecheck only; no ESLint dependency |
-| Relay | `@relaymessenger/sdk`, `@relaymessenger/elevenlabs`, CLI `npx relaymessenger` | Chat, buttons, calls, media, voice memos |
-| Voice | ElevenLabs Agent (configured in the ElevenLabs dashboard) | Warm voice; context passed at call start |
+| Relay | `@relaymessenger/sdk`, CLI `npx relaymessenger` | Chat, buttons, calls, media, voice memos |
+| Voice | ElevenLabs realtime STT + streaming TTS APIs | Transcript enters Gemini; approved text is spoken into the Relay call |
 | LLM | Gemini (free tier) through its REST API, behind a provider-neutral `LlmClient` (`src/llm/`) | Reads free-text replies, writes small talk, reads paper photos. Free tier: synthetic data only, and Google may use prompts to improve its products. Decided 2026-10-03 |
 | Vitals | Presage SmartSpectra C++ SDK with custom frame input, as a sidecar in `services/presage-bridge/` | Takes raw frames from the Relay video call. Final choice after the spike |
 | Drug names | NLM RxNav REST API (no key) | Map free-text medication names to RxNorm codes. Exact normalized-name match only (`rxcui.json?search=2`); approximate search guesses wrong drugs |
@@ -250,7 +250,7 @@ type ContextPacket = {
 };
 ```
 
-For calls, only what the check-in uses goes to ElevenLabs as dynamic variables through the bridge's `initiationData` (`conversation_initiation_client_data`): her first name, today's unanswered questions, yesterday's level 1+ topics, up to 3 memories and family names (`docs/CALLS.md`). The rest of the packet stays on the server; the usual range is read only for the heart-rate read-back.
+For calls, only audio goes to ElevenLabs STT and generated speech comes back from ElevenLabs TTS. Committed transcript text and a bounded, structured FinchNode projection go to Gemini for adaptive interview turns. Raw audio and video never go to Gemini or SQLite; only the video track goes to Presage. See `docs/CALLS.md`.
 
 ### Context digest
 
@@ -333,7 +333,7 @@ Photon limits: 50 new conversations per line per day, 5,000 messages per server 
 - Forms: multi-page, answers in a `form_response` part.
 - Photos: `message.received` media part with a signed URL valid 60 minutes; attachments up to 100 MiB.
 - **No chat holds two people** (docs.relayapp.im/chats). A direct chat is one person and one agent; a group is one person with agents, or agents only (3 to 7). So there is no shared family group: each family member has a **family chat**, their own direct chat with the agent, and the agent sends family updates to each one and forwards voice memos between Harriet's chat and theirs. Creating a group with two people fails with 403 code 2003.
-- Calls: agent can call a person who added it, turned on Allow Calls, and has replied. `ElevenLabsCall.connect({ relay, callId, elevenlabs: { apiKey, agentId }, initiationData })` from the `call.created` handler.
+- Calls: agent can call a person who added it, turned on Allow Calls, and has replied. `RelayCallTransport` joins the `call.created` room; the backend streams audio to ElevenLabs STT and TTS audio back into Relay. No agent SDK or public callback is used.
 - Video: remote camera track decoded with `VideoStream` (RGBA, I420 and others), up to 1080p at 30 fps.
 - Activity label: 1 to 21 visible chars, 90 second lease, renew every 60 seconds.
 - Voice memos: send an uploaded audio attachment as a voice memo; download inbound media the same way as photos.
@@ -344,17 +344,3 @@ Photon limits: 50 new conversations per line per day, 5,000 messages per server 
 - C++ SDK custom input: `UseCustomInput().Build(handle)`, then `handle->Send(frame, timestamp_us)` with strictly increasing timestamps. Docs: https://smartspectra.presagetech.com/docs/cpp/headless-mode.md
 - Node SDK can read a recorded MP4 (H.264, 30 to 60 s, well lit, still face) with `useFile()`; Presage calls this "smoke, not accuracy".
 - Breathing needs a 30 second window; HRV 60 seconds.
-
-## Build order
-
-1. Scaffold the repo (TypeScript server, lint, vitest, SQLite schema). FinchNode client for the demo API with typed models, scenario handling, normalization, source merge. Record fixtures. Tests.
-2. Context packet builder, question picker, rules R1 to R5, answer key test.
-2a. Terminal simulator (done): check-in engine behind a `Messenger` interface (`src/relay/messenger.ts`), `FakeMessenger`, fixed message copy (`src/checkin/copy.ts`), red flags, missed check-in job, R6 paper diff, `npm run simulate` and `scripts/demo/*.txt`.
-3. Relay agent: `RelayMessenger` implementing `Messenger`, WebSocket inbox (durable by `event_id`) that turns `message.received` into `engine.handleInbound`, patient and family linking on `contact.added` (one family chat per family member), scheduler for `startDay` and `runMissedCheckin`, `npm run agent`.
-4. Chat call: ElevenLabs bridge on `call.created`, context packet as initiation data, memories saved after the call, voice memo to family.
-5. Vitals call: Relay video frames into Presage (spike decides C++ sidecar vs fallback scan screen), heart rate compared with her usual range, breathing rate recorded, both spoken back.
-6. Hospital paper check: photo to Claude vision, read-back and confirm buttons, rule R6 against the record.
-7. Family voice messages both ways, sharing levels, record consent revocation flow.
-8. Stretch and polish: visit-prep PDF, weekly summary, demo script helpers, recorded backups.
-
-Steps 1 and 2 need no API keys. Steps 3 to 7 need keys and phones (see FEEDBACK.md team tasks).

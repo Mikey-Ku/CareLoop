@@ -1,12 +1,12 @@
 # Mhacks_2026
 
-A daily check-in companion for older adults living alone with several chronic conditions, built on FinchNode, Relay Messenger, ElevenLabs and Presage.
+A daily check-in companion for older adults living alone with several chronic conditions, built on FinchNode, Relay Messenger, Gemini, ElevenLabs speech APIs, and Presage.
 
 **Status:** in progress (MHacks 2026)
 
 ## What it does
 
-Each morning a Relay agent starts a short, friendly chat with at most three questions picked from the senior's FinchNode health record. She can choose a voice call to talk or a video call that compares her heart rate with her usual range from clinic visits and records her breathing rate. Photos of hospital papers are checked against her medication list, and each family member follows along in their own Relay chat with the agent.
+Each morning a Relay agent starts a short, friendly chat with at most three questions picked from the senior's FinchNode health record. She can choose a video call to describe symptoms conversationally: Relay carries the call, ElevenLabs transcribes and speaks, Gemini contextualizes the committed transcript with structured FinchNode records, and Presage can provide consented pulse and breathing estimates from video. Photos of hospital papers are checked against her medication list, and each family member follows along in their own Relay chat with the agent.
 
 All data in this project is synthetic.
 
@@ -53,22 +53,9 @@ Each person runs their own agent: two programs on the same agent token take each
 
 The commands above are for macOS (`sed -i ''`, zsh `read`). Your conversation is stored in `apps/server/data/app.db` (not in git).
 
-### Optional: care summaries over Photon (doctor and emergency contact)
+### Optional: care summaries over Photon
 
-Optional and off by default. The MVP's family updates go through Relay family chats; iMessage is not in the MVP (`docs/BRIEF.md`). Skip this section unless you want to try it.
-
-After each check-in, the doctor and the emergency contact each get a text over [Photon](https://photon.codes/docs/spectrum-ts/getting-started) (iMessage):
-- the doctor gets a data summary;
-- the emergency contact gets a plain-language one, with only what Harriet's sharing level allows (anything urgent always gets its base line).
-
-The assistant answers their replies, grounded in that summary. Urgent texts from the emergency contact get fixed replies on the severity ladder: an emergency ("she fell", "chest pain") gets 911 now, then her doctor; a crisis gets 988; a symptom gets her doctor, with no 911.
-
-1. Copy `care-contacts.example.json` to `care-contacts.json` at the repo root. The real file is gitignored.
-2. Put in the doctor's and the emergency contact's names and phone numbers. Any common format works, for example `(734) 555-1234` or `+17345551234`. A 10-digit number is taken as US or Canada.
-3. In `.env`, set `SPECTRUM_PROJECT_ID` and `SPECTRUM_PROJECT_SECRET` from the Photon dashboard. With `GEMINI_API_KEY` set, Gemini words the summaries and the follow-up answers inside fixed parts; without it, the fixed templates are sent.
-4. Have both contacts text the Photon line once before the first summary. Apple flags cold messages as junk.
-
-`npm run agent` turns the summaries on by itself when the file holds real numbers and the Photon variables are set. Otherwise it logs why they are off. To preview the two texts for a day: `npm run care:send -- --day 2026-09-01 --dry-run` (add `--templates` for the fixed templates only).
+Off by default and not part of the MVP. After each check-in the doctor and the emergency contact can get a text over [Photon](https://photon.codes/docs/spectrum-ts/getting-started) (iMessage). To try it: copy `care-contacts.example.json` to `care-contacts.json` with their numbers, set `SPECTRUM_PROJECT_ID` and `SPECTRUM_PROJECT_SECRET` in `.env`, have both contacts text the Photon line once, then run the agent. Preview with `npm run care:send -- --day 2026-09-01 --dry-run`.
 
 ## Usage
 

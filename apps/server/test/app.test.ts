@@ -9,7 +9,6 @@ let base: string;
 beforeAll(async () => {
   const app = createApp({
     config: { finchnode: { baseUrl: "https://api.finchnode.com/demo/v1", apiKey: "ck_test_secret" } },
-    calls: { screen: async () => ({}), beginQuietMeasurement: async () => ({}), toolSecret: "tool_test_secret" },
     doctorReport: (patientId) => (patientId === "harriet" ? "<p>report</p>" : undefined),
     logError: () => {},
   });
@@ -33,17 +32,11 @@ describe("GET /health", () => {
   });
 });
 
-describe("error handler", () => {
-  it("answers a body-parser error with JSON and no stack trace", async () => {
-    const res = await fetch(`${base}/integrations/elevenlabs/screen-symptoms`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ callId: "x".repeat(33 * 1024) }),
-    });
-    expect(res.status).toBe(413);
-    const text = await res.text();
-    expect(JSON.parse(text)).toEqual({ error: "bad_request" });
-    expect(text).not.toMatch(/at .*\.(ts|js)/);
+describe("removed ElevenLabs tool endpoints", () => {
+  it("are not exposed; the call pipeline is server-side", async () => {
+    const res = await fetch(`${base}/integrations/elevenlabs/screen-symptoms`, { method: "POST" });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "not_found" });
   });
 });
 

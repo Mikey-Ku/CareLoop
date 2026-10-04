@@ -12,6 +12,7 @@ import {
   candidateText,
   cleanList,
   parseClassification,
+  parseCallTurn,
   parseMapping,
   parseSmallTalk,
   type FetchLike,
@@ -62,13 +63,13 @@ function hang(init: RequestInit): Promise<Response> {
   });
 }
 
-function client(steps: Step[], extra: Partial<GeminiDeps> & { models?: string[]; timeoutMs?: number; attemptTimeoutMs?: number } = {}) {
+function client(steps: Step[], extra: Partial<GeminiDeps> & { models?: string[]; callModels?: string[]; timeoutMs?: number; attemptTimeoutMs?: number } = {}) {
   const { fetch, calls } = scriptedFetch(steps);
   const log: AttemptLogEntry[] = [];
   const pauses: number[] = [];
-  const { models, timeoutMs, attemptTimeoutMs, ...deps } = extra;
+  const { models, callModels, timeoutMs, attemptTimeoutMs, ...deps } = extra;
   const llm = new GeminiLlmClient(
-    { apiKey: KEY, models: models ?? ["model-a", "model-b"], timeoutMs: timeoutMs ?? 5000, attemptTimeoutMs },
+    { apiKey: KEY, models: models ?? ["model-a", "model-b"], callModels, timeoutMs: timeoutMs ?? 5000, attemptTimeoutMs },
     {
       fetch,
       logger: (e) => log.push(e),
@@ -793,5 +794,45 @@ describe("history_question", () => {
     expect(parseClassification(json({ kind: "history_question" })).historyTopic).toBe("other");
     expect(parseClassification(json({ kind: "chat", historyTopic: "refill" })).historyTopic).toBeUndefined();
     expect(parseClassification(json({ kind: "history_question", historyTopic: "refill", symptoms: [{ topic: "knee pain", words: "my knee aches", amount: "a_little", change: "same" }] })).symptoms).toHaveLength(1);
+  });
+});
+
+describe("Gemini adaptive call-turn validation", () => {
+  it("accepts one question with separate acknowledgment and evidence", () => {
+    expect(parseCallTurn(JSON.stringify({
+      acknowledgment: "Thank you for telling me.",
+      patientResponseText: "I appreciate you sharing that.",
+      nextQuestion: "When did it begin?",
+      nextAction: "ask_follow_up",
+      informationCollected: ["New dizziness"],
+      missingInformation: ["onset"],
+      evidence: [{ source: "patient_transcript", detail: "Patient said dizziness began today." }],
+      uncertainty: [],
+    }))).toMatchObject({ nextAction: "ask_follow_up", nextQuestion: "When did it begin?", informationCollected: ["New dizziness"] });
+  });
+
+  it("rejects multiple questions and questions hidden in the response text", () => {
+    const base = { acknowledgment: "Thank you.", patientResponseText: "I understand.", nextAction: "ask_follow_up", nextQuestion: "When did it start? How severe is it?" };
+    expect(() => parseCallTurn(JSON.stringify(base))).toThrow(LlmUnavailableError);
+    expect(() => parseCallTurn(JSON.stringify({ ...base, patientResponseText: "What happened?", nextQuestion: "When did it begin?" }))).toThrow(LlmUnavailableError);
+  });
+});
+
+describe("Gemini model chains", () => {
+  it("plans a call turn on the call models and everything else on the chat models", async () => {
+    const turn = { acknowledgment: "Thank you.", patientResponseText: "I see.", nextQuestion: "When did it begin?", nextAction: "ask_follow_up", informationCollected: [], missingInformation: [], evidence: [], uncertainty: [] };
+    const input = { callId: "c", patientId: "harriet", seniorName: "Harriet", transcript: [], conversationSummary: "", knownSymptoms: [], unansweredQuestions: [], currentVitals: {}, finchContext: {}, recentMemories: [], canMeasure: false, interviewPhase: "interview" as const };
+    const { llm, calls } = client([ok(turn), ok({ answer: "A little", confidence: "high", otherComplaints: [] })], { models: ["chat-model"], callModels: ["call-model"] });
+    await llm.callTurn(input);
+    await llm.mapAnswer(ANKLE);
+    expect(calls.map((c) => c.url.split("/models/")[1])).toEqual(["call-model:generateContent", "chat-model:generateContent"]);
+  });
+
+  it("falls back to the chat models for a call turn when no call models are set", async () => {
+    const turn = { acknowledgment: "Thank you.", patientResponseText: "I see.", nextQuestion: "When did it begin?", nextAction: "ask_follow_up", informationCollected: [], missingInformation: [], evidence: [], uncertainty: [] };
+    const input = { callId: "c", patientId: "harriet", seniorName: "Harriet", transcript: [], conversationSummary: "", knownSymptoms: [], unansweredQuestions: [], currentVitals: {}, finchContext: {}, recentMemories: [], canMeasure: false, interviewPhase: "interview" as const };
+    const { llm, calls } = client([ok(turn)], { models: ["chat-model"] });
+    await llm.callTurn(input);
+    expect(calls[0]?.url.split("/models/")[1]).toBe("chat-model:generateContent");
   });
 });
