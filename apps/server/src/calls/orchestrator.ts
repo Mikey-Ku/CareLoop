@@ -49,6 +49,8 @@ export class ConversationOrchestrator {
   #turnSeq = 0;
   #completed = false;
   #waitingForMeasurementConsent = false;
+  /** She was asked "yes or no" once more after an answer that was neither; a second one is taken as no. */
+  #consentReasked = false;
   #measurementDeclined = false;
   /** She said yes and the quiet reading was started: it is never offered or asked for again. */
   #measurementDone = false;
@@ -139,14 +141,15 @@ export class ConversationOrchestrator {
         this.#measurementTimer.unref?.();
         return;
       }
-      if (negative(text)) {
-        this.#measurementDeclined = true;
-        await this.#speak("Of course. We can skip the camera measurement.");
-      } else {
+      if (!negative(text) && !this.#consentReasked) {
+        this.#consentReasked = true;
         this.#waitingForMeasurementConsent = true;
         await this.#speak("Would you like to try the quiet camera measurement? You can say yes or no.");
         return;
       }
+      // A no, or a second answer that is not a yes: there is no reading.
+      this.#measurementDeclined = true;
+      await this.#speak("Of course. We can skip the camera measurement.");
     }
     if (asksToRepeat(text)) {
       await this.#speak(`Of course. ${this.#lastQuestion ?? "How are you feeling today?"}`);
@@ -210,10 +213,11 @@ export class ConversationOrchestrator {
       await this.#speak(`${decision.acknowledgment} ${question}`);
       return;
     }
-    if ((decision.nextAction === "complete_screening" || decision.nextAction === "end_call") && this.#canMeasure) {
-      // Gemini would end the call, but the reading only happens if she is asked, and Gemini asks only
+    if (decision.nextAction === "complete_screening" && this.#canMeasure) {
+      // Gemini has what it needs, but the reading only happens if she is asked, and Gemini asks only
       // sometimes. So the offer is ours: once, in fixed words, before the goodbye. Her answer takes the
       // consent path above; after the reading or her no, the next turn that ends the call says goodbye.
+      // Not for end_call: she said she has to go, and gets the goodbye without another question.
       this.#waitingForMeasurementConsent = true;
       await this.#speak(CAMERA_OFFER_AT_END);
       return;
@@ -306,7 +310,7 @@ export class ConversationOrchestrator {
 }
 
 function affirmative(text: string): boolean {
-  return /^(yes|yeah|yep|sure|okay|ok|that's fine|i agree|go ahead)\b/i.test(text.trim());
+  return /^(yes|yeah|yep|yup|sure|okay|ok|alright|all right|sounds good|let's do it|why not|that's fine|i agree|go ahead)\b/i.test(text.trim());
 }
 
 /** "Sorry, what did you ask?", "pardon", "can you say that again": the whole utterance, not a sentence that merely starts so. */
@@ -315,7 +319,7 @@ function asksToRepeat(text: string): boolean {
 }
 
 function negative(text: string): boolean {
-  return /^(no|nope|not now|i'd rather not|don't|do not)\b/i.test(text.trim());
+  return /^(no|nope|nah|not now|not today|not really|maybe later|skip|i'd rather not|i would rather not|i do not|i don't|don't|do not)\b/i.test(text.trim());
 }
 
 function isRepeatedQuestion(question: string, transcript: readonly TranscriptTurn[]): boolean {
