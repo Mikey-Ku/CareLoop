@@ -227,14 +227,15 @@ describe("copy: style rules across every output", () => {
   it("covers every exported function", () => {
     const fns = Object.entries(copy).filter(([, v]) => typeof v === "function").map(([k]) => k).sort();
     const sampled = [
+      "caregiverApproved", "caregiverClaimReply", "caregiverClaimed", "caregiverDenied", "caregiverHandlePrompt", "caregiverInviteCreated", "caregiverInviteInvalid", "caregiverRevoked",
       "checkinDone", "checkinDoneAfterConcern", "checkinGreeting", "clarifyAmount", "complaintReply", "crisisReply", "didntUnderstand",
       "explainPrompt", "familyCrisisAlert", "familyDailyStatus", "familyFollowUpUpdate", "familyFollowUpWorse", "familyMissedAlert", "familyRedFlagAlert",
       "familyRelay", "familyRelayDone", "familyRelayWaiting", "familyUrgentAlert", "familyWelcome", "feelingLowReply", "flagDetail",
       "flagNotedReply", "flagOffer", "followUpAsk", "followUpQuestion", "followUpReply", "freeTextConfirm", "keepAnEye", "keepAnEyeReply",
       "medicineQuestionReply", "noteSaved", "notedForDoctor", "notTodayReply", "openReplyThanks", "openReplyUnavailable", "photoNotYet",
       "recordLinkEndedFamily", "recordLinkEndedSenior", "redFlagAdvice", "sharingChangedFamily", "sharingChangedSenior", "sharingLevelFromButton",
-      "sharingMenu", "smallTalkFallback", "sorryNotGreat", "symptomNotedReply", "topicWords", "typedReplyUnavailable", "urgentReply", "withLead",
-      "withTypingHint", "answerPhrase", "suggestedConfirm", "understoodLine", "historyAnswer", "historyNothing",
+      "sharingMenu", "smallTalkFallback", "sorryNotGreat", "suggestedConfirm", "symptomNotedReply", "syntheticWelcome", "topicWords", "typedReplyUnavailable", "urgentReply", "withLead",
+      "withTypingHint", "answerPhrase", "understoodLine", "historyAnswer", "historyNothing",
       "familySays", "familyPassedOn", "familyCantPassOn", "familyEmergencyAbout", "familyCrisisAbout",
       ...MEDS_COPY_FUNCTIONS,
     ].sort();

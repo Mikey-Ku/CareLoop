@@ -7,7 +7,6 @@ import {
   MEDS_MORNING_JOB,
   MISSED_JOB,
   REFILL_JOB,
-  MISSING_HANDLE_MESSAGE,
   MISSING_TOKEN_MESSAGE,
   llmStatus,
   main as agentMain,
@@ -304,11 +303,10 @@ describe("startAgent", () => {
     expect(calls.inbox).toEqual([]);
   });
 
-  it("refuses to start without PATIENT_RELAY_HANDLE", async () => {
+  it("starts in multi-user mode without PATIENT_RELAY_HANDLE", async () => {
     const { start } = setup({ env: { PATIENT_RELAY_HANDLE: "" } });
-    const error = await start().catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(AgentStartError);
-    expect((error as Error).message).toBe(MISSING_HANDLE_MESSAGE);
+    const agent = await start();
+    expect(agent.patientId).toBe("");
   });
 
   it("stop() aborts the inbox, stops the scheduler and closes the server", async () => {
