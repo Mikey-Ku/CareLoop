@@ -237,6 +237,7 @@ const CSS = `
   .bad { font-weight: 700; }
   .flags td:first-child { font-weight: 700; white-space: nowrap; }
   .keep { break-inside: avoid; }
+  .reference { break-before: page; }
   footer { margin-top: 4px; border-top: 2px solid #111111; padding-top: 2px; font-size: 7.6pt; display: flex; justify-content: space-between; gap: 12px; }
   footer .claim { font-weight: 700; }
 `;
@@ -453,15 +454,16 @@ export function renderDoctorReportHtml(r: DoctorReport): string {
     <section><h2>Day by day <small>(severity level 0 to 5)</small></h2>${week}</section>
   </div>
 
-  <section><h2>Subjective <small>(patient-reported, severity levels set by fixed rules)</small></h2>${symptoms}${notes}</section>
-
-  <section><h2>Objective <small>(camera estimates and her record)</small></h2>${vitals}${labs}</section>
-
-  <section class="keep"><h2>Medications <small>(her active list from the record as of ${esc(reportDate(r.to))}, with this week's events)</small></h2>${meds}</section>
-
   <section><h2>Items for clinician review <small>(flags from fixed rules; no assessment is made)</small></h2>${review}</section>
 
+  <section><h2>Subjective <small>(patient-reported, severity levels set by fixed rules)</small></h2>${symptoms}${notes}</section>
+
   <section><h2>Her questions for the visit</h2>${questions}</section>
+
+  <!-- Page 1 above stands alone (what needs attention and what she said); the reference tables follow. -->
+  <section class="reference"><h2>Objective <small>(camera estimates and her record)</small></h2>${vitals}${labs}</section>
+
+  <section class="keep"><h2>Medications <small>(her active list from the record as of ${esc(reportDate(r.to))}, with this week's events)</small></h2>${meds}</section>
 
   <footer><span class="claim">${REPORT_FOOTER}</span><span>${SYNTHETIC_BANNER}</span></footer>
 </div>

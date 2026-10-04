@@ -7,7 +7,7 @@ import { REPO_ROOT } from "../finchnode/fixtures.ts";
 import { buildDoctorReport, hasPatient, latestCheckinDay, patientIds, renderDoctorReportHtml, weekStart } from "../report/index.ts";
 
 // npm run report -- [--day YYYY-MM-DD] [--db path] [--out file.html] [--patient id]
-// Writes the doctor report (one printable page, the 7 days ending on --day, default her latest
+// Writes the doctor report (two printed pages, page 1 standing alone; the 7 days ending on --day, default her latest
 // check-in date) and prints its path. Default database: DATABASE_PATH; the simulator's is
 // ../../data/simulator.db. Default patient: the only one in the database (or the first by id).
 // Default output: data/report-<day>.html at the repo root.

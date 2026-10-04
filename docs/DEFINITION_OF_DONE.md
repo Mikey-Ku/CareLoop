@@ -88,7 +88,7 @@ Order: 2 is nearly done; 1 and 3 run in parallel; 4 can start now from simulated
 
 | Benchmark | How we check |
 | --- | --- |
-| [ ] One printed page: patient and conditions, the week's symptoms by severity level with dates and her words, vitals, her visit questions, flags with evidence, medicines and refill status | Print it from a simulated week |
+| [ ] Two printed pages, page 1 standing alone (flags, symptoms, her questions; labs and medicines on page 2): patient and conditions, the week's symptoms by severity level with dates and her words, vitals, her visit questions, flags with evidence, medicines and refill status | Print it from a simulated week |
 | [ ] Every number and date in it matches the database and her FinchNode record | Spot-check 5 items |
 | [ ] Shareable link served locally | Open it on a phone |
 | [ ] Never prints dosing advice or a diagnosis | Read it; copy test |
